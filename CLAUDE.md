@@ -146,6 +146,12 @@ persisted.
 - **`Filter`** decides whether a message may be sent. On the hot path, in
   front of every message, so it must be a lookup and not a round trip.
   Its refusal reason becomes the `ERR` code verbatim.
+- **`Limiter`** supplies rate limits — `ClientLimits` per connection,
+  `ChannelLimits` per channel. **Policy only**: the enforcing is the
+  server's, on a token bucket in `internal/ratelimit`, so an
+  implementation is asked once and never sees an individual message.
+  Defaults are unlimited, and so is any `Limits` with a non-positive
+  field — "no limit" and "a limit of nothing" must not be one typo apart.
 - **`Recorder`** writes messages down, public and private. It runs on a
   background worker **after** delivery, off a bounded queue, and drops
   with a counter when that queue is full. A store having a bad day costs
@@ -193,9 +199,25 @@ stall must degrade scrollback, not delivery.
 - **Scrollback**: the last N messages per channel are kept in a ring
   buffer on the channel and replayed on `JOIN`; the SQLite table is for
   history beyond that.
-- **Rate limiting**: per-connection token bucket, checked in the read
-  pump before the command reaches the hub. Exceeding it gets an `ERR`,
-  and repeated abuse closes the connection.
+- **Rate limiting** (`internal/ratelimit`): two token buckets, both
+  unlimited by default and both configured by the `Limiter` hook. The
+  client's bucket is per **connection** — an anonymous connection has no
+  stable id to key on, so two sockets get two buckets; tightening that
+  needs logins. The channel's bucket is shared by every member, which is
+  what stops a room being unreadable during a raid however many people
+  are doing it.
+
+  A nil `*Bucket` allows everything, so the unlimited default costs a nil
+  comparison on the hot path rather than a mutex and a clock read.
+
+  The client's limit is checked first, so somebody over their own budget
+  is told it is their fault (`ERR throttled`) rather than the room's
+  (`ERR channelthrottled`) — two codes, because only one of them is
+  something a client can do anything about. Both are checked before the
+  `Filter`, and both are spent whether or not the message survives what
+  comes after: a rate limit that only counts *successful* messages makes
+  sending garbage free. Private messages spend the client's budget but
+  not the channel's, since they are not in the channel.
 - **Moderation**: mutes and bans are in-memory state on the channel with
   a SQLite row behind them, so a restart does not clear them. An IP ban
   is checked at upgrade time, before the WebSocket handshake completes.

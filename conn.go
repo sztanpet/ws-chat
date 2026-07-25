@@ -13,6 +13,7 @@ import (
 	"github.com/sztanpet/ws-chat/internal/broadcast"
 	"github.com/sztanpet/ws-chat/internal/hook"
 	"github.com/sztanpet/ws-chat/internal/proto"
+	"github.com/sztanpet/ws-chat/internal/ratelimit"
 )
 
 // conn is one client. Three goroutines run per connection: a read pump that
@@ -44,7 +45,12 @@ type conn struct {
 	priv  chan []byte
 	id    hook.Identity
 	codec proto.Codec
-	log   *slog.Logger
+
+	// limit is this connection's own bucket. Nil means unlimited, which is
+	// the default.
+	limit *ratelimit.Bucket
+
+	log *slog.Logger
 }
 
 // msgType is the WebSocket message type this connection's codec speaks.
@@ -103,6 +109,7 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 		priv:  make(chan []byte, a.cfg.PrivBuffer),
 		id:    id,
 		codec: codec,
+		limit: a.clientLimiter(r.Context(), id),
 	}
 	c.log = a.log.With("nick", c.nick(), "remote", r.RemoteAddr, "codec", codec.Name())
 
@@ -272,6 +279,22 @@ func (c *conn) handleMsg(ctx context.Context, payload []byte) {
 		return
 	}
 
+	// Limits before the filter: the check is a nil comparison or a mutex,
+	// where the filter may be a lookup, and a throttled client should not
+	// cost the filter anything at all.
+	//
+	// Both are spent whether or not the message survives what comes after.
+	// A rate limit that only counts successful messages is not a rate
+	// limit — sending garbage would be free.
+	if !c.limit.Allow() {
+		c.reply(ctx, proto.ErrThrottled)
+		return
+	}
+	if !c.app.chanLimit.Allow() {
+		c.reply(ctx, proto.ErrChanThrottled)
+		return
+	}
+
 	if ok, reason := c.app.allow(ctx, c.id, in.Data); !ok {
 		c.reply(ctx, reason)
 		return
@@ -315,6 +338,14 @@ func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 		return
 	case in.Nick == c.nick():
 		c.reply(ctx, proto.ErrSelf)
+		return
+	}
+
+	// The client's own limit applies; the channel's does not, because a
+	// private message is not in the channel and must not be able to starve
+	// it — or be starved by it.
+	if !c.limit.Allow() {
+		c.reply(ctx, proto.ErrThrottled)
 		return
 	}
 

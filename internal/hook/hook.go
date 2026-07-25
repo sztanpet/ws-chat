@@ -23,6 +23,9 @@
 //   - Allow runs on the sender's read pump, in front of every message. It
 //     is on the hot path, so it has to be fast — a lookup, not a round
 //     trip. It is the wrong place for anything that talks to a network.
+//   - ClientLimits and ChannelLimits are asked once each, when a connection
+//     or a channel is set up. They decide policy; the enforcing is the
+//     server's, on a token bucket, and costs a nil check when unlimited.
 //   - Message and Private run on a background worker AFTER delivery, so a
 //     slow or broken store delays persistence and never delivery. Their
 //     queue is bounded: when it is full, records are dropped and counted
@@ -76,6 +79,52 @@ func (i Identity) Has(role string) bool {
 		}
 	}
 	return false
+}
+
+// Limits is a rate limit: burst messages allowed at once, then one more
+// every Interval.
+//
+// The zero value is unlimited, and so is any value with a non-positive
+// field. That is deliberate — a server that installs no Limiter, or a
+// Limiter that has no opinion about somebody, must not accidentally
+// throttle them to nothing.
+type Limits struct {
+	// Burst is how many messages may be sent back to back.
+	Burst int
+
+	// Interval is how long one message costs, sustained. Burst 5 with an
+	// Interval of 2s is "five at once, then one every two seconds".
+	Interval time.Duration
+}
+
+// Unlimited reports whether these limits enforce anything.
+func (l Limits) Unlimited() bool { return l.Burst < 1 || l.Interval <= 0 }
+
+// Limiter supplies rate limits. Both of its answers default to unlimited,
+// so installing no Limiter changes nothing.
+//
+// It decides policy only. A limit is enforced by the server on a token
+// bucket, so an implementation is asked once and never again — it must not
+// expect to see, or be able to veto, individual messages. Filter is the
+// hook for that.
+type Limiter interface {
+	// ClientLimits is asked once per connection, at connect time, for how
+	// fast this person may talk. It is the seam for "mods are not
+	// throttled" and "new accounts are throttled harder".
+	//
+	// The limit is per CONNECTION, not per identity: an anonymous
+	// connection has no stable id to key on, so somebody who opens two
+	// sockets gets two buckets. Tightening that needs logins and a keyed
+	// registry, and is noted in state/server.md.
+	ClientLimits(ctx context.Context, id Identity) Limits
+
+	// ChannelLimits is asked once, when a channel is created, for how fast
+	// the channel as a whole may move — every member's messages against
+	// one bucket. It is what stops a room being unreadable during a raid,
+	// however many people are doing it.
+	//
+	// It does not apply to private messages, which are not in a channel.
+	ChannelLimits(ctx context.Context, channel string) Limits
 }
 
 // Chatter is what the directory knows about somebody. Empty fields mean
@@ -150,6 +199,7 @@ type Hooks struct {
 	Auth      Authenticator
 	Directory Directory
 	Filter    Filter
+	Limiter   Limiter
 	Recorder  Recorder
 }
 

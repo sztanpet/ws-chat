@@ -53,6 +53,10 @@ _(none yet)_
   Comparisons are made with a paced sender: an implementation whose send
   path is O(1) has nothing pacing it against its receivers and will lap
   them instead of feeding them.
+- **Rate limiting is mechanism in the core, policy in a hook.** Token
+  buckets live in `internal/ratelimit`; the `Limiter` hook is asked once
+  per connection and once per channel for the numbers and never sees a
+  message. Unlimited is the default and costs a nil check.
 - **Everything that is not moving bytes between sockets is a hook.**
   `internal/hook` defines auth, chatter data, message filtering and
   persistence as interfaces; the core imports the interfaces and never an

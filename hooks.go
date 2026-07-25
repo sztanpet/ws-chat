@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sztanpet/ws-chat/internal/hook"
+	"github.com/sztanpet/ws-chat/internal/ratelimit"
 )
 
 // This file is where the core meets the layers outside it. Every call to a
@@ -73,6 +74,26 @@ func (a *app) identify(ctx context.Context, r *http.Request) (hook.Identity, err
 		id.Nick = fmt.Sprintf("anon%d", a.anon.Add(1))
 	}
 	return id, nil
+}
+
+// clientLimiter builds the rate limiter for one connection. No Limiter
+// installed, or one with no opinion, means unlimited — which New returns as
+// a nil *Bucket, so the check on the hot path costs a nil comparison.
+func (a *app) clientLimiter(ctx context.Context, id hook.Identity) *ratelimit.Bucket {
+	if a.hooks.Limiter == nil {
+		return nil
+	}
+	limits := a.hooks.Limiter.ClientLimits(ctx, id)
+	return ratelimit.New(limits.Burst, limits.Interval)
+}
+
+// channelLimiter builds the bucket every member of a channel shares.
+func (a *app) channelLimiter(ctx context.Context, channel string) *ratelimit.Bucket {
+	if a.hooks.Limiter == nil {
+		return nil
+	}
+	limits := a.hooks.Limiter.ChannelLimits(ctx, channel)
+	return ratelimit.New(limits.Burst, limits.Interval)
 }
 
 // allow asks the filter whether a message may be sent. It runs on the

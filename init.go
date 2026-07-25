@@ -13,6 +13,7 @@ import (
 	"github.com/sztanpet/ws-chat/internal/config"
 	"github.com/sztanpet/ws-chat/internal/hook"
 	"github.com/sztanpet/ws-chat/internal/proto"
+	"github.com/sztanpet/ws-chat/internal/ratelimit"
 )
 
 // app is the composition root. Everything the handlers need hangs off it,
@@ -41,6 +42,10 @@ type app struct {
 	// connection joins. Channels replace it with a lookup from channel name
 	// to its own set.
 	bcs map[string]broadcast.Broadcaster
+
+	// chanLimit is the bucket every member of the channel shares. Nil means
+	// unlimited, which is the default. One per channel once channels exist.
+	chanLimit *ratelimit.Bucket
 
 	// sendMu is held while a message is assigned its id and written to
 	// every codec's ring. Without it two senders could reach the rings in
@@ -102,6 +107,7 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 	for _, codec := range proto.Codecs() {
 		a.bcs[codec.Name()] = broadcast.NewRing(cfg.Capacity)
 	}
+	a.chanLimit = a.channelLimiter(context.Background(), mainChannel)
 
 	a.ctx, a.stopConn = context.WithCancel(context.Background())
 	if hooks.Recorder != nil {
@@ -113,6 +119,11 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 	a.srv = &http.Server{Addr: cfg.Addr, Handler: a.mux}
 	return a, nil
 }
+
+// mainChannel is the single implicit channel everything belongs to until
+// channels exist. It is passed to the hooks that take a channel name so
+// that those call sites already have one when they do.
+const mainChannel = "main"
 
 func (a *app) routes() {
 	a.mux.HandleFunc("GET /ws", a.handleWS)

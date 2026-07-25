@@ -45,6 +45,21 @@ extension points, and a single-channel WebSocket chat server.
   `hook.Hooks` is a working server and costs a nil check, not a call.
 - **`hooks.go` is the only place a hook is called**, so the rules about
   which may block live in one file.
+- **Rate limiting is mechanism in the core, policy in the hook.** The
+  `Limiter` hook is asked once per connection and once per channel and
+  never sees a message; `internal/ratelimit` does the enforcing.
+- **A nil `*ratelimit.Bucket` allows everything**, which is what makes the
+  unlimited default free — a nil comparison rather than a mutex and a
+  clock read.
+- **Client limits are per connection, not per identity.** Anonymous
+  connections have no stable id to key on. Per-identity needs logins and a
+  keyed registry with a lifetime; noted under Pending.
+- **Both buckets are spent even when the message is later refused.** A
+  rate limit that only counts successful messages makes sending garbage
+  free.
+- **`ratelimit.Bucket` has `AllowAt(now)`.** Every test drives the clock
+  explicitly; a rate limiter tested against real time fails on a loaded
+  machine.
 
 ## Gotchas
 
@@ -66,6 +81,9 @@ extension points, and a single-channel WebSocket chat server.
 - **Channels.** The single implicit channel becomes a lookup from channel
   name to its own set of per-codec rings. `JOIN`, `PART`, `NAMES`, and a
   `channel` field on every server-originated message.
+- **Per-identity rate limits.** Today two sockets from one person get two
+  buckets. Needs a registry keyed by `Identity.ID`, with an eviction
+  policy, and it only means anything once logins exist.
 - **Real nick collision handling.** Nicks are server-assigned and unique
   today, so `register` cannot collide. With logins it can, and `init.go`
   is where that gets decided.

@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,5 +307,232 @@ func TestIdentityHelpers(t *testing.T) {
 	}
 	if got.Attrs["colour"] != "red" {
 		t.Error("attrs were not applied")
+	}
+}
+
+// fakeLimiter hands out fixed limits, and records which identities it was
+// asked about so a test can prove it was consulted per connection.
+type fakeLimiter struct {
+	client  hook.Limits
+	channel hook.Limits
+
+	mu    sync.Mutex
+	asked []string
+}
+
+func (f *fakeLimiter) ClientLimits(ctx context.Context, id hook.Identity) hook.Limits {
+	f.mu.Lock()
+	f.asked = append(f.asked, id.Nick)
+	f.mu.Unlock()
+	return f.client
+}
+
+func (f *fakeLimiter) ChannelLimits(ctx context.Context, channel string) hook.Limits {
+	return f.channel
+}
+
+// No Limiter installed is unlimited, which is the default every other test
+// in this package runs under.
+func TestNoLimiterIsUnlimited(t *testing.T) {
+	ta := newTestApp(t)
+	c := ta.dial(t)
+
+	for i := range 50 {
+		c.send(proto.VerbMsg, proto.In{Data: fmt.Sprintf("message %d", i)})
+		c.expectMsg("", fmt.Sprintf("message %d", i))
+	}
+}
+
+// A Limiter with no opinion is also unlimited: the zero Limits must not
+// throttle somebody to nothing.
+func TestZeroLimitsAreUnlimited(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{Limiter: &fakeLimiter{}})
+	c := ta.dial(t)
+
+	for i := range 50 {
+		c.send(proto.VerbMsg, proto.In{Data: fmt.Sprintf("message %d", i)})
+		c.expectMsg("", fmt.Sprintf("message %d", i))
+	}
+}
+
+func TestClientRateLimit(t *testing.T) {
+	// Three messages, then one an hour: the refill never happens during
+	// the test, so there is nothing timing-dependent about it.
+	ta := newTestAppWith(t, hook.Hooks{
+		Limiter: &fakeLimiter{client: hook.Limits{Burst: 3, Interval: time.Hour}},
+	})
+	alice, bob := ta.dial(t), ta.dial(t)
+
+	for i := range 3 {
+		want := fmt.Sprintf("burst %d", i)
+		alice.send(proto.VerbMsg, proto.In{Data: want})
+		alice.expectMsg(alice.nick, want)
+		bob.expectMsg(alice.nick, want) // bob is in the room the whole time
+	}
+
+	alice.send(proto.VerbMsg, proto.In{Data: "one too many"})
+	alice.expectErr(proto.ErrThrottled)
+
+	// The limit is the sender's alone: bob still has his whole budget.
+	bob.send(proto.VerbMsg, proto.In{Data: "bob is fine"})
+	bob.expectMsg(bob.nick, "bob is fine")
+
+	// And alice's next frame is bob's message, not her own refused one.
+	alice.expectMsg(bob.nick, "bob is fine")
+}
+
+// A throttled message must not reach anybody.
+func TestThrottledMessageIsNotDelivered(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Limiter: &fakeLimiter{client: hook.Limits{Burst: 1, Interval: time.Hour}},
+	})
+	alice, bob := ta.dial(t), ta.dial(t)
+
+	alice.send(proto.VerbMsg, proto.In{Data: "allowed"})
+	alice.expectMsg("", "allowed")
+	bob.expectMsg("", "allowed")
+
+	alice.send(proto.VerbMsg, proto.In{Data: "refused"})
+	alice.expectErr(proto.ErrThrottled)
+
+	// bob's next frame is the following message, not the refused one.
+	bob.send(proto.VerbMsg, proto.In{Data: "next"})
+	bob.expectMsg(bob.nick, "next")
+}
+
+// The channel's bucket is shared: one person can exhaust it for everybody,
+// which is the point of having it.
+func TestChannelRateLimit(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Limiter: &fakeLimiter{channel: hook.Limits{Burst: 2, Interval: time.Hour}},
+	})
+	alice, bob := ta.dial(t), ta.dial(t)
+
+	alice.send(proto.VerbMsg, proto.In{Data: "one"})
+	alice.expectMsg("", "one")
+	bob.expectMsg("", "one")
+
+	bob.send(proto.VerbMsg, proto.In{Data: "two"})
+	alice.expectMsg("", "two")
+	bob.expectMsg("", "two")
+
+	// The channel's two are gone, so the next message from anybody is
+	// refused — and refused as the channel's fault, not the sender's.
+	alice.send(proto.VerbMsg, proto.In{Data: "three"})
+	alice.expectErr(proto.ErrChanThrottled)
+
+	bob.send(proto.VerbMsg, proto.In{Data: "four"})
+	bob.expectErr(proto.ErrChanThrottled)
+}
+
+// The client's limit is checked first, so a client over its own budget is
+// told it is the one at fault.
+func TestClientLimitIsReportedBeforeChannelLimit(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Limiter: &fakeLimiter{
+			client:  hook.Limits{Burst: 1, Interval: time.Hour},
+			channel: hook.Limits{Burst: 1, Interval: time.Hour},
+		},
+	})
+	c := ta.dial(t)
+
+	c.send(proto.VerbMsg, proto.In{Data: "first"})
+	c.expectMsg("", "first")
+
+	c.send(proto.VerbMsg, proto.In{Data: "second"})
+	c.expectErr(proto.ErrThrottled)
+}
+
+// Private messages spend the sender's budget but not the channel's: a busy
+// room must not stop two people talking, and two people talking must not
+// use up the room.
+func TestPrivateMessagesUseTheClientLimitOnly(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Limiter: &fakeLimiter{
+			client:  hook.Limits{Burst: 2, Interval: time.Hour},
+			channel: hook.Limits{Burst: 1, Interval: time.Hour},
+		},
+	})
+	alice, bob := ta.dial(t), ta.dial(t)
+
+	// Exhaust the channel with somebody else's message.
+	bob.send(proto.VerbMsg, proto.In{Data: "fills the channel"})
+	alice.expectMsg(bob.nick, "fills the channel")
+	bob.expectMsg(bob.nick, "fills the channel")
+
+	// alice can still send privately, twice, on her own budget.
+	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "one"})
+	bob.expectPriv("one")
+	alice.expectPriv("one")
+
+	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "two"})
+	bob.expectPriv("two")
+	alice.expectPriv("two")
+
+	// And then her own limit stops her.
+	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "three"})
+	alice.expectErr(proto.ErrThrottled)
+}
+
+// The limit is asked for once per connection, with the identity, so a
+// layer can give different people different limits.
+func TestLimiterIsAskedPerConnectionWithIdentity(t *testing.T) {
+	lim := &fakeLimiter{}
+	ta := newTestAppWith(t, hook.Hooks{
+		Auth: fakeAuth{byToken: map[string]hook.Identity{
+			"a": {ID: "u1", Nick: "alice"},
+			"b": {ID: "u2", Nick: "bob"},
+		}},
+		Limiter: lim,
+	})
+
+	if _, err := ta.dialWith(t, "?token=a"); err != nil {
+		t.Fatalf("dial alice: %v", err)
+	}
+	if _, err := ta.dialWith(t, "?token=b"); err != nil {
+		t.Fatalf("dial bob: %v", err)
+	}
+
+	lim.mu.Lock()
+	defer lim.mu.Unlock()
+	if !slices.Contains(lim.asked, "alice") || !slices.Contains(lim.asked, "bob") {
+		t.Fatalf("the limiter was asked about %v, want both alice and bob", lim.asked)
+	}
+}
+
+// A refusal is per message, not per connection: a throttled client is
+// still connected and still receiving.
+func TestThrottlingDoesNotCloseTheConnection(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Limiter: &fakeLimiter{client: hook.Limits{Burst: 1, Interval: 50 * time.Millisecond}},
+	})
+	alice, bob := ta.dial(t), ta.dial(t)
+
+	alice.send(proto.VerbMsg, proto.In{Data: "first"})
+	alice.expectMsg("", "first")
+	bob.expectMsg("", "first")
+
+	alice.send(proto.VerbMsg, proto.In{Data: "too fast"})
+	alice.expectErr(proto.ErrThrottled)
+
+	// Still connected: alice receives what bob says.
+	bob.send(proto.VerbMsg, proto.In{Data: "still here"})
+	alice.expectMsg(bob.nick, "still here")
+	bob.expectMsg(bob.nick, "still here")
+
+	// And once the bucket refills, alice can talk again. This is the one
+	// place a real interval is used, so it is generous.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("the bucket never refilled")
+		}
+		alice.send(proto.VerbMsg, proto.In{Data: "recovered"})
+		verb, _ := alice.recv()
+		if verb == proto.VerbMsg {
+			bob.expectMsg(alice.nick, "recovered")
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

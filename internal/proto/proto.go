@@ -28,14 +28,16 @@ const (
 // Error descriptions. These are stable machine-readable codes, not prose:
 // a client should be able to switch on them without parsing English.
 const (
-	ErrProtocol = "protocol"      // unparseable frame or payload
-	ErrUnknown  = "unknown"       // verb the server does not implement
-	ErrEmpty    = "empty"         // message with no content
-	ErrTooLong  = "toolong"       // message body over the configured limit
-	ErrFraming  = "framing"       // wrong WebSocket message type for the negotiated codec
-	ErrNoSuch   = "nosuchnick"    // private message to nobody
-	ErrBacklog  = "recipientbusy" // recipient is not draining its queue
-	ErrSelf     = "self"          // private message to yourself
+	ErrProtocol      = "protocol"         // unparseable frame or payload
+	ErrUnknown       = "unknown"          // verb the server does not implement
+	ErrEmpty         = "empty"            // message with no content
+	ErrTooLong       = "toolong"          // message body over the configured limit
+	ErrFraming       = "framing"          // wrong WebSocket message type for the negotiated codec
+	ErrNoSuch        = "nosuchnick"       // private message to nobody
+	ErrBacklog       = "recipientbusy"    // recipient is not draining its queue
+	ErrSelf          = "self"             // private message to yourself
+	ErrThrottled     = "throttled"        // you are sending too fast
+	ErrChanThrottled = "channelthrottled" // the channel as a whole is
 )
 
 // ErrMalformed is returned by Split for anything that is not a well-formed
