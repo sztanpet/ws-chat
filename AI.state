@@ -6,23 +6,23 @@ only when you are touching that track.
 
 ## Latest
 
-`internal/broadcast`: the fan-out primitive, now with two implementations
-behind one interface. `MapChan` (map behind an RWMutex, buffered channel
-per subscriber) is the reference; `Ring` (one shared ring buffer, each
-subscriber reading at its own position) is the one to build on. Ring's
-Broadcast is O(1) in the subscriber count — 8ns flat against MapChan's
-48ns to 706us — and at an honest ~100% delivery it costs 17.7 ns/msg at a
-thousand subscribers against 98.7, roughly flat where MapChan's
-quadruples. Receiving became batch-oriented to make that possible. Full
-detail, baselines and the harness traps are in `state/broadcast.md`.
-Nothing consumes the package yet — the next milestone is still the walking
-skeleton (config + HTTP server + `/ws` upgrade + read/write pumps + an
-`httptest`-based client test).
+The walking skeleton is up: config, wire codecs, extension points, and a
+single-channel WebSocket chat server with private messages, all tested
+against real clients over an `httptest.Server`. Three goroutines per
+connection (read pump, broadcast write pump, private pump); the wire
+format is negotiated by subprotocol with MessagePack and JSON behind one
+`Codec` interface; authentication, chatter data, moderation and
+persistence are interfaces in `internal/hook` that the core never imports
+an implementation of. Detail in `state/server.md`; the fan-out underneath
+it is in `state/broadcast.md`. Next: channels — `JOIN`/`PART`/`NAMES` and
+a lookup from channel name to its own set of per-codec rings.
 
 ## State file index
 
 - `state/broadcast.md` — `internal/broadcast`, the fan-out primitive and
   its comparative benchmark harness.
+- `state/server.md` — config, wire codecs, extension points, and the
+  connection handling built on the fan-out.
 
 ## Release log
 
@@ -53,6 +53,14 @@ _(none yet)_
   Comparisons are made with a paced sender: an implementation whose send
   path is O(1) has nothing pacing it against its receivers and will lap
   them instead of feeding them.
+- **Everything that is not moving bytes between sockets is a hook.**
+  `internal/hook` defines auth, chatter data, message filtering and
+  persistence as interfaces; the core imports the interfaces and never an
+  implementation. The zero `Hooks` is a working server.
+- **The wire format is negotiated, not configured.** `proto.Codec` is an
+  interface over bytes, selected by WebSocket subprotocol. MessagePack
+  preferred, JSON the default for anything that did not ask. A ring holds
+  encoded bytes, so there is one broadcaster per codec.
 - **The write pump takes batches, not single messages.** `Sub.Recv` fills a
   slice, so one wakeup drains everything pending and can coalesce it into a
   single socket write. This is what makes shared-storage fan-out possible
