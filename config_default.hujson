@@ -1,0 +1,36 @@
+{
+	// Copy this file to config.hujson next to the binary and uncomment
+	// what you need. Everything here is the built-in default; an empty
+	// config.hujson is a valid config.
+
+	// Address the HTTP server listens on. Ignored when the process is
+	// started through systemd socket activation.
+	// "Addr": ":8080",
+
+	// Path to the data directory holding the SQLite files, relative to
+	// the binary.
+	// "DataDir": "data",
+
+	// Origins allowed to open a WebSocket. Empty means same-origin only;
+	// "*" disables the check entirely (do not do that in production).
+	// "AllowedOrigins": [],
+
+	// Per-connection outbound frame buffer. A client that falls this far
+	// behind is disconnected rather than allowed to stall fan-out.
+	// "WriteBuffer": 256,
+
+	// Per-connection rate limit: burst frames, and the refill interval.
+	// "RateBurst": 10,
+	// "RateInterval": "1s",
+
+	// How many messages per channel are kept in memory and replayed to a
+	// client on JOIN.
+	// "Scrollback": 150,
+
+	// Idle timeout: a connection that sends nothing (not even a PING)
+	// for this long is closed.
+	// "IdleTimeout": "90s",
+
+	// Log level: debug, info, warn, error.
+	// "LogLevel": "info",
+}

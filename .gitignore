@@ -1,0 +1,12 @@
+*.iml
+.deploy-credentials.sh
+config.hujson
+ws-chat
+ws-chat.exe
+chat.db
+data/*.db
+data/*.db-*
+data/*.cache
+
+logs
+scratch

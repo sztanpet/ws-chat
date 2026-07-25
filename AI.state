@@ -1,0 +1,49 @@
+# AI working state
+
+Globally-useful state only. Detail lives in `state/<track>.md` — see the
+index below. Read this file first every session; read a track's state file
+only when you are touching that track.
+
+## Latest
+
+Repository bootstrap. `git init`, Go module `github.com/sztanpet/ws-chat`
+(Go 1.26, toolchain 1.26.4), `Makefile`, `CLAUDE.md`, `.gitignore`,
+`.editorconfig`, `AGENTS.md`, `.sembleignore`, `config_default.hujson`.
+No Go source yet — `CLAUDE.md`'s Architecture section is the intended
+design, not a description of existing code. Next milestone: the first
+walking skeleton (config + HTTP server + `/ws` upgrade + read/write
+pumps + an `httptest`-based client test).
+
+## State file index
+
+_(none yet — create `state/<track>.md` when the first spec's work begins)_
+
+## Release log
+
+_(none yet)_
+
+## Key decisions
+
+- **WebSocket library: `github.com/coder/websocket`.** Context-aware,
+  zero-dependency, net/http-native. Chosen over gorilla/websocket (no
+  contexts, chattier API) and gobwas/ws (lower level than this needs).
+- **Persistence: SQLite via `modernc.org/sqlite`**, pure Go, no cgo, with
+  the single-writer/many-reader pool split — same as the sibling
+  kikapcsologo backend, so the tooling and query conventions carry over.
+- **Hand-written SQL in `internal/model/`**, no code generation.
+- **Fan-out is per-channel, never global.** Each channel owns its member
+  set and does its own broadcast; the hub's map is only touched on
+  join/part/lookup.
+- **Backpressure never propagates into the hub.** A full outbound buffer
+  disconnects that client; it must not block the sender.
+- **Wire protocol is `VERB {json}` text frames**, one command per frame.
+
+## Removed
+
+_(nothing yet)_
+
+## User preferences
+
+- Linus Torvalds persona when writing code; avoid needless complexity.
+- Every logical step is its own commit, in the documented kernel style.
+- `make pre-commit` (vendor + lint + `-race` tests) before every commit.
