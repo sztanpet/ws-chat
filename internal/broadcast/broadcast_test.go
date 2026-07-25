@@ -19,6 +19,7 @@ var impls = []struct {
 	new  func(size int) Broadcaster
 }{
 	{"mapchan", func(size int) Broadcaster { return NewMapChan(size) }},
+	{"ring", func(size int) Broadcaster { return NewRing(size) }},
 }
 
 const testSize = 8

@@ -3,7 +3,9 @@ package broadcast
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -14,46 +16,48 @@ import (
 //
 // There are two families, because no single setup measures this honestly:
 //
-//   - BenchmarkFanout has no receiver goroutines running. It isolates the
-//     send path — the member-set walk plus the enqueue — and it cannot
-//     drop, because the buffers are sized to the run and emptied outside
-//     the timer. This is the number to compare data structures with.
+//   - BenchmarkFanout has no receiver goroutines running. It isolates what
+//     the SENDER pays — the member-set walk plus the enqueue — and it
+//     cannot drop, because storage is sized to the run and emptied outside
+//     the timer. Its ns/msg column is meaningless for an implementation
+//     with shared storage: that work is not being divided, it is being
+//     postponed to a reader this family never runs.
 //
-//   - BenchmarkFanoutLive gives every subscriber a live drainer goroutine,
-//     so the receiver wakeups are inside the measurement. That is the
-//     server's real shape: every subscriber is a write pump that has to be
-//     scheduled, and an implementation that optimises the map walk while
-//     leaving N goroutine wakeups in place has optimised the wrong half.
+//   - BenchmarkFanoutLive gives every subscriber a live drainer goroutine
+//     and counts what actually arrives. This is the one that decides
+//     anything.
+//
+// Counting deliveries rather than Broadcast calls is not pedantry. A
+// broadcaster that drops on overrun can always be made to look fast by
+// running the sender past what the receivers can absorb — the drop path is
+// cheaper than the send path, so the faster it fails the better it scores.
+// The delivered/sent ratio is what stops that: it is the fraction of
+// intended deliveries that a subscriber actually received, and any run
+// where it is not close to 1.0 is a run that bought its ns/msg by throwing
+// messages away.
 //
 // The live family deliberately starts at 1000 subscribers. Below that a
 // sender in a tight loop simply outruns its receivers — it fills a 256-slot
 // buffer in microseconds, the subscriber is dropped for falling behind, and
 // the run degenerates into timing broadcasts to a nearly empty member set.
 // That is an artifact of an unthrottled sender, not a property of the
-// implementation, and the small-N send cost is what BenchmarkFanout is for.
-//
-// The tell that a live run has degenerated is a ns/msg BELOW the same
-// subscriber count's BenchmarkFanout figure: delivering to live receivers
-// cannot be cheaper than delivering to idle buffers, so a smaller number
-// means it was not delivering to all of them. Where the threshold sits
-// depends on the core count — 1000 is the floor on a 4-core box, and it is
-// worth re-checking the two families against each other on new hardware.
+// implementation. Where the threshold sits depends on the core count, so on
+// new hardware watch delivered/sent rather than trusting the constant.
 //
 // Reading the numbers:
 //
-//   - ns/op    cost of one Broadcast call to `subs` subscribers.
-//   - ns/msg   the same divided by the subscriber count — the per-delivery
-//              cost, which is what has to stay flat as a channel grows.
-//   - drops/op subscribers dropped per broadcast, i.e. the rate at which
-//              receivers fell behind and had to reconnect. Near zero is a
-//              clean run. A large value means the run is dominated by the
-//              drop path rather than the send path and the ns figures say
-//              little about fan-out. It is also the cheat detector: an
-//              implementation that posts a good time by quietly throwing
-//              messages away cannot hide it here.
-//   - B/op     the reference implementation allocates nothing on the
-//              broadcast path when nobody is dropped. An alternative that
-//              allocates per message is losing before it starts.
+//   - ns/op          cost of one Broadcast call to `subs` subscribers.
+//   - ns/msg         elapsed time per message actually DELIVERED. In
+//                    BenchmarkFanout, where nothing receives, it is per
+//                    message enqueued instead.
+//   - delivered/sent deliveries that happened over deliveries intended.
+//                    1.0 is a clean run. Anything less means the ns/msg
+//                    beside it was bought by dropping subscribers.
+//   - drops/op       subscribers dropped per broadcast, i.e. how often
+//                    receivers fell behind and had to reconnect.
+//   - B/op           both implementations allocate nothing per broadcast in
+//                    the steady state. An alternative that allocates per
+//                    message is losing before it starts.
 
 // benchSubCounts spans the range that matters: a private conversation, a
 // small room, a busy channel, and a channel big enough that the fan-out
@@ -64,14 +68,14 @@ var benchSubCounts = []int{1, 10, 100, 1_000, 10_000}
 // sender trivially outruns its receivers. See the package-level note above.
 var benchLiveSubCounts = []int{1_000, 10_000}
 
-// benchBuffer is the outbound buffer for live benchmark subscribers — the
-// same one the server would use, so the drop threshold under test is the
-// real one.
+// benchBuffer is the slack a subscriber gets in the live benchmarks — the
+// same the server would use, so the drop threshold under test is the real
+// one.
 const benchBuffer = DefaultBuffer
 
 // benchFanoutBudget caps the total buffered messages across all subscribers
-// in BenchmarkFanout, which sizes its buffers to the subscriber count so
-// that nothing can ever fill. 1<<20 slices is ~16MB of channel buffer.
+// in BenchmarkFanout, which sizes storage to the subscriber count so that
+// nothing can ever fill. 1<<20 slices is ~16MB.
 const benchFanoutBudget = 1 << 20
 
 // benchMsg is a plausible chat frame. Implementations share it by reference,
@@ -80,32 +84,64 @@ const benchFanoutBudget = 1 << 20
 var benchMsg = []byte(`MSG {"nick":"someone","channel":"#general","data":"hello world"}`)
 
 // benchBatch is the number of frames a drainer takes per wakeup. A real
-// write pump would size this to what it can coalesce into one socket
-// write.
+// write pump would size this to what it can coalesce into one socket write.
 const benchBatch = 16
 
-// drained builds a broadcaster with n subscribers, each with a goroutine
-// discarding its messages. The returned stop function closes the
-// broadcaster and waits for every drainer to exit.
-func drained(b *testing.B, mk func(int) Broadcaster, n, size int) (Broadcaster, func()) {
-	b.Helper()
-	bc := mk(size)
-
-	var wg sync.WaitGroup
-	for range n {
-		wg.Add(1)
-		go drainer(bc, bc.Subscribe(), &wg)
-	}
-
-	return bc, func() {
-		bc.Close()
-		wg.Wait()
-	}
+// counter is a per-drainer delivery count on its own cache line, so ten
+// thousand drainers incrementing do not serialize on one.
+type counter struct {
+	n atomic.Int64
+	_ [56]byte
 }
 
-// drainer receives and discards until the subscription ends for good. A
-// subscriber dropped for falling behind immediately resubscribes, exactly
-// like a real client reconnecting.
+// rig is a broadcaster with live drainers attached and a running count of
+// what they have received.
+type rig struct {
+	bc       Broadcaster
+	counters []*counter
+	total    *atomic.Int64 // non-nil only when the sender needs to pace
+	wg       sync.WaitGroup
+}
+
+func newRig(mk func(int) Broadcaster, subs, size int) *rig {
+	return newRigPaced(mk, subs, size, false)
+}
+
+// newRigPaced optionally adds a shared delivery total. It is off by default
+// because every drainer bumping one counter is contention that does not
+// belong in a fan-out measurement; only the paced benchmark needs a number
+// the sender can read cheaply.
+func newRigPaced(mk func(int) Broadcaster, subs, size int, paced bool) *rig {
+	r := &rig{bc: mk(size), counters: make([]*counter, subs)}
+	if paced {
+		r.total = &atomic.Int64{}
+	}
+	for i := range r.counters {
+		c := &counter{}
+		r.counters[i] = c
+		r.wg.Add(1)
+		go drainer(r.bc, r.bc.Subscribe(), c, r.total, &r.wg)
+	}
+	return r
+}
+
+// delivered totals what every drainer has received so far.
+func (r *rig) delivered() int64 {
+	var total int64
+	for _, c := range r.counters {
+		total += c.n.Load()
+	}
+	return total
+}
+
+func (r *rig) stop() {
+	r.bc.Close()
+	r.wg.Wait()
+}
+
+// drainer receives and discards until the subscription ends for good,
+// counting what it got. A subscriber dropped for falling behind immediately
+// resubscribes, exactly like a real client reconnecting.
 //
 // That reconnect is load-bearing for the benchmark, not decoration. A drop
 // is permanent, so without it a single scheduler hiccup removes a
@@ -114,13 +150,21 @@ func drained(b *testing.B, mk func(int) Broadcaster, n, size int) (Broadcaster, 
 // nothing in it and reporting a wonderful number. An earlier version of
 // this file did exactly that and claimed 8.65 ns/op for a 100-subscriber
 // fan-out.
-func drainer(bc Broadcaster, s Sub, wg *sync.WaitGroup) {
+func drainer(bc Broadcaster, s Sub, c *counter, total *atomic.Int64, wg *sync.WaitGroup) {
 	defer wg.Done()
 	dst := make([][]byte, benchBatch)
 	for {
-		if _, err := s.Recv(dst); err == nil {
+		n, err := s.Recv(dst)
+		if n > 0 {
+			c.n.Add(int64(n))
+			if total != nil {
+				total.Add(int64(n))
+			}
+		}
+		if err == nil {
 			continue
-		} else if !errors.Is(err, ErrLagged) {
+		}
+		if !errors.Is(err, ErrLagged) {
 			return // orderly Close: we are done
 		}
 		// Resubscribe. Once the broadcaster is closed this hands back an
@@ -130,7 +174,7 @@ func drainer(bc Broadcaster, s Sub, wg *sync.WaitGroup) {
 }
 
 // warm runs the fan-out untimed until the drainers are scheduled and their
-// buffers are empty. A cold run's first few thousand broadcasts outrun
+// queues are empty. A cold run's first few thousand broadcasts outrun
 // receiver goroutines that have not been given a P yet, and the timed
 // region should not start in the middle of that reconnect storm.
 func warm(bc Broadcaster) {
@@ -140,20 +184,48 @@ func warm(bc Broadcaster) {
 	time.Sleep(20 * time.Millisecond)
 }
 
-// report turns the raw timing into the per-delivery cost and the drop rate.
-func report(b *testing.B, subs int, dropped int64) {
+// reportSend is for the family with no receivers: cost per message handed
+// to the broadcaster.
+func reportSend(b *testing.B, subs int) {
 	b.Helper()
-	deliveries := float64(b.N) * float64(subs)
-	if deliveries > 0 {
-		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/deliveries, "ns/msg")
+	if sent := float64(b.N) * float64(subs); sent > 0 {
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/sent, "ns/msg")
+	}
+}
+
+// reportDelivery is for the families with live receivers: cost per message
+// that actually arrived, and what fraction of the intended ones did.
+func reportDelivery(b *testing.B, subs int, dropped, delivered int64) {
+	b.Helper()
+	if delivered > 0 {
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(delivered), "ns/msg")
+	}
+	if sent := float64(b.N) * float64(subs); sent > 0 {
+		b.ReportMetric(float64(delivered)/sent, "delivered/sent")
 	}
 	b.ReportMetric(float64(dropped)/float64(b.N), "drops/op")
 }
 
-// fanoutBuffer sizes a subscriber's buffer so that BenchmarkFanout can run
-// many iterations between drains without any subscriber filling up.
+// fanoutBuffer sizes storage so that BenchmarkFanout can run many
+// iterations between drains without any subscriber filling up.
 func fanoutBuffer(subs int) int {
 	return max(benchFanoutBudget/subs, benchBuffer)
+}
+
+// needsDrain reports whether an implementation's subscribers have to be
+// emptied to stop them being dropped for lagging.
+//
+// Implementations that give every subscriber its own queue do: leave one
+// unread and it fills. Ones with shared storage do not — an unread
+// subscriber costs the sender nothing and is only noticed when it next
+// reads, which in BenchmarkFanout is never.
+//
+// This is not a nicety. The untimed drain is O(b.N x subs), so an
+// implementation whose timed op is a hundred times cheaper gets a b.N a
+// hundred times larger and the drain stops finishing at all.
+func needsDrain(bc Broadcaster) bool {
+	_, shared := bc.(*Ring)
+	return !shared
 }
 
 // drainN takes exactly count messages off a subscription.
@@ -176,8 +248,7 @@ func drainN(s Sub, count int) {
 
 // BenchmarkFanout measures the send path alone: no receiver goroutines, so
 // no wakeups and no scheduler noise, just the member-set walk and the
-// enqueue. Buffers are sized to the run and emptied outside the timer, so a
-// drop here is impossible by construction and is treated as a harness bug.
+// enqueue.
 func BenchmarkFanout(b *testing.B) {
 	for _, impl := range impls {
 		for _, subs := range benchSubCounts {
@@ -191,14 +262,15 @@ func BenchmarkFanout(b *testing.B) {
 					list[i] = bc.Subscribe()
 				}
 				drainEvery := size / 2
+				mustDrain := needsDrain(bc)
 
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := range b.N {
-					if i > 0 && i%drainEvery == 0 {
+					if mustDrain && i > 0 && i%drainEvery == 0 {
 						// Untimed: the drain is harness bookkeeping, and
 						// keeping it out of the measurement is the whole
-						// reason the buffers are sized this way.
+						// reason storage is sized this way.
 						b.StopTimer()
 						for _, s := range list {
 							drainN(s, drainEvery)
@@ -212,7 +284,7 @@ func BenchmarkFanout(b *testing.B) {
 				if dropped := bc.Drops(); dropped > 0 {
 					b.Fatalf("%d drops in a benchmark that cannot drop: sizing is wrong", dropped)
 				}
-				report(b, subs, 0)
+				reportSend(b, subs)
 			})
 		}
 	}
@@ -220,23 +292,74 @@ func BenchmarkFanout(b *testing.B) {
 
 // BenchmarkFanoutLive is the production shape: one sender, N subscribers,
 // every one of them a live goroutine on the receiving end, so the receiver
-// wakeups are inside the measurement.
+// wakeups are inside the measurement and only messages that reach a
+// subscriber count.
 func BenchmarkFanoutLive(b *testing.B) {
 	for _, impl := range impls {
 		for _, subs := range benchLiveSubCounts {
 			b.Run(fmt.Sprintf("%s/subs=%d", impl.name, subs), func(b *testing.B) {
-				bc, stop := drained(b, impl.new, subs, benchBuffer)
-				defer stop()
-				warm(bc)
+				r := newRig(impl.new, subs, benchBuffer)
+				warm(r.bc)
 
-				before := bc.Drops()
+				drops0, delivered0 := r.bc.Drops(), r.delivered()
 				b.ReportAllocs()
 				b.ResetTimer()
 				for range b.N {
-					bc.Broadcast(benchMsg)
+					r.bc.Broadcast(benchMsg)
 				}
 				b.StopTimer()
-				report(b, subs, bc.Drops()-before)
+
+				drops, delivered := r.bc.Drops()-drops0, r.delivered()-delivered0
+				r.stop()
+				reportDelivery(b, subs, drops, delivered)
+			})
+		}
+	}
+}
+
+// BenchmarkFanoutPaced is the comparison that actually settles anything.
+//
+// The other live benchmark runs the sender flat out, which is fine for an
+// implementation whose Broadcast is expensive enough to pace itself against
+// its own receivers, and useless for one whose Broadcast is O(1): the
+// sender laps everyone and delivered/sent collapses, so the two are being
+// measured in completely different regimes and their ns/msg cannot be
+// compared.
+//
+// Here the sender is held to a bounded lead over what has actually been
+// received, which is what a real chat server has anyway — the send rate is
+// set by people typing, not by a loop. Both implementations then deliver
+// essentially everything, and ns/msg is a like-for-like cost per delivered
+// message.
+func BenchmarkFanoutPaced(b *testing.B) {
+	// How far ahead of the receivers the sender may get, per subscriber.
+	// Well under benchBuffer so that pacing, not dropping, is what bounds
+	// it.
+	const lead = 64
+
+	for _, impl := range impls {
+		for _, subs := range benchLiveSubCounts {
+			b.Run(fmt.Sprintf("%s/subs=%d", impl.name, subs), func(b *testing.B) {
+				r := newRigPaced(impl.new, subs, benchBuffer, true)
+				warm(r.bc)
+
+				drops0, delivered0 := r.bc.Drops(), r.delivered()
+				base := r.total.Load()
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := range b.N {
+					r.bc.Broadcast(benchMsg)
+
+					sent := int64(i+1) * int64(subs)
+					for sent-(r.total.Load()-base) > int64(subs)*lead {
+						runtime.Gosched()
+					}
+				}
+				b.StopTimer()
+
+				drops, delivered := r.bc.Drops()-drops0, r.delivered()-delivered0
+				r.stop()
+				reportDelivery(b, subs, drops, delivered)
 			})
 		}
 	}
@@ -244,35 +367,35 @@ func BenchmarkFanoutLive(b *testing.B) {
 
 // BenchmarkFanoutSaturated is the overload case: concurrent senders, live
 // receivers, and no attempt to keep the two in balance. With every P busy
-// sending there is no core left to receive on, so buffers fill and
-// subscribers get dropped and reconnect — deliberately. This does not
-// measure clean fan-out and the ns/msg here should not be compared with
-// the other two families.
+// sending there is no core left to receive on, so storage fills and
+// subscribers get dropped and reconnect — deliberately. delivered/sent is
+// well below 1.0 here by construction, and the ns/msg should not be
+// compared with the other two families.
 //
-// What it does measure is what the server does in a spam wave: how an
+// What it measures is what the server does in a spam wave: how an
 // implementation behaves when the drop path is hot and membership is
-// changing under concurrent broadcasts. drops/op is the headline output,
-// not a warning. In the reference implementation dropping takes the write
-// lock, which serializes against every concurrent broadcast, so this is
-// the benchmark that would justify a lock-free member set.
+// changing under concurrent broadcasts. How much still gets through, and at
+// what cost, is the comparison.
 func BenchmarkFanoutSaturated(b *testing.B) {
 	for _, impl := range impls {
 		for _, subs := range []int{100, 1_000} {
 			b.Run(fmt.Sprintf("%s/subs=%d", impl.name, subs), func(b *testing.B) {
-				bc, stop := drained(b, impl.new, subs, benchBuffer)
-				defer stop()
-				warm(bc)
+				r := newRig(impl.new, subs, benchBuffer)
+				warm(r.bc)
 
-				before := bc.Drops()
+				drops0, delivered0 := r.bc.Drops(), r.delivered()
 				b.ReportAllocs()
 				b.ResetTimer()
 				b.RunParallel(func(pb *testing.PB) {
 					for pb.Next() {
-						bc.Broadcast(benchMsg)
+						r.bc.Broadcast(benchMsg)
 					}
 				})
 				b.StopTimer()
-				report(b, subs, bc.Drops()-before)
+
+				drops, delivered := r.bc.Drops()-drops0, r.delivered()-delivered0
+				r.stop()
+				reportDelivery(b, subs, drops, delivered)
 			})
 		}
 	}
@@ -289,13 +412,13 @@ func BenchmarkSubscribeUnsubscribe(b *testing.B) {
 	for _, impl := range impls {
 		for _, subs := range []int{0, 100, 1_000} {
 			b.Run(fmt.Sprintf("%s/existing=%d", impl.name, subs), func(b *testing.B) {
-				bc, stop := drained(b, impl.new, subs, benchBuffer)
-				defer stop()
+				r := newRig(impl.new, subs, benchBuffer)
+				defer r.stop()
 
 				b.ReportAllocs()
 				b.ResetTimer()
 				for range b.N {
-					bc.Subscribe().Close()
+					r.bc.Subscribe().Close()
 				}
 			})
 		}
@@ -303,16 +426,16 @@ func BenchmarkSubscribeUnsubscribe(b *testing.B) {
 }
 
 // BenchmarkChurnUnderLoad is the realistic mix: people joining and leaving
-// while the channel is busy. Membership changes take the write lock and
-// broadcasts take the read lock, so this is where an implementation that
-// made Broadcast cheap by making Subscribe expensive gets caught.
+// while the channel is busy. Membership changes and broadcasts contend, so
+// this is where an implementation that made Broadcast cheap by making
+// Subscribe expensive gets caught.
 func BenchmarkChurnUnderLoad(b *testing.B) {
 	for _, impl := range impls {
 		for _, senders := range []int{1, 4} {
 			b.Run(fmt.Sprintf("%s/senders=%d", impl.name, senders), func(b *testing.B) {
 				const subs = 1_000
-				bc, stop := drained(b, impl.new, subs, benchBuffer)
-				warm(bc)
+				r := newRig(impl.new, subs, benchBuffer)
+				warm(r.bc)
 
 				var wg sync.WaitGroup
 				quit := make(chan struct{})
@@ -326,7 +449,7 @@ func BenchmarkChurnUnderLoad(b *testing.B) {
 								return
 							default:
 							}
-							bc.Broadcast(benchMsg)
+							r.bc.Broadcast(benchMsg)
 						}
 					}()
 				}
@@ -334,13 +457,13 @@ func BenchmarkChurnUnderLoad(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for range b.N {
-					bc.Subscribe().Close()
+					r.bc.Subscribe().Close()
 				}
 				b.StopTimer()
 
 				close(quit)
 				wg.Wait()
-				stop()
+				r.stop()
 			})
 		}
 	}
