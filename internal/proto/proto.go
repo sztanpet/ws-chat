@@ -17,12 +17,30 @@ import (
 
 // Verbs the server understands from a client, and the ones it sends.
 const (
-	VerbMsg   = "MSG"     // both directions: a chat message
-	VerbPriv  = "PRIVMSG" // both directions: a message to one person
-	VerbReady = "READY"   // server -> client, once, on connect
-	VerbPing  = "PING"    // client -> server
-	VerbPong  = "PONG"    // server -> client
-	VerbErr   = "ERR"     // server -> client
+	VerbMsg     = "MSG"     // both directions: a chat message
+	VerbPriv    = "PRIVMSG" // both directions: a message to one person
+	VerbReady   = "READY"   // server -> client, once, on connect
+	VerbBacklog = "BACKLOG" // server -> client, once, after READY
+	VerbPing    = "PING"    // client -> server
+	VerbPong    = "PONG"    // server -> client
+	VerbErr     = "ERR"     // server -> client
+
+	// Moderation. The four commands come from a client with the standing
+	// to use them; the server answers all of them with one MOD frame to
+	// the whole channel, so a client needs one handler rather than four.
+	VerbMute   = "MUTE"
+	VerbUnmute = "UNMUTE"
+	VerbBan    = "BAN"
+	VerbUnban  = "UNBAN"
+	VerbMod    = "MOD"
+)
+
+// Moderation actions, as they appear in a MOD frame.
+const (
+	ActionMute   = "mute"
+	ActionUnmute = "unmute"
+	ActionBan    = "ban"
+	ActionUnban  = "unban"
 )
 
 // Error descriptions. These are stable machine-readable codes, not prose:
@@ -38,6 +56,12 @@ const (
 	ErrSelf          = "self"             // private message to yourself
 	ErrThrottled     = "throttled"        // you are sending too fast
 	ErrChanThrottled = "channelthrottled" // the channel as a whole is
+
+	// Moderation.
+	ErrMuted       = "muted"       // you may not speak here at the moment
+	ErrBanned      = "banned"      // you may not be here at all
+	ErrForbidden   = "forbidden"   // that command is not yours to use
+	ErrBadDuration = "badduration" // unparseable duration on a command
 )
 
 // ErrMalformed is returned by Split for anything that is not a well-formed
@@ -56,6 +80,19 @@ type Msg struct {
 	Nick      string `json:"nick" msgpack:"nick"`
 	Data      string `json:"data" msgpack:"data"`
 	Timestamp int64  `json:"timestamp" msgpack:"timestamp"` // unix milliseconds
+
+	// Roles and Attrs are whatever the directory layer attached to the
+	// sender, carried on every message they send.
+	//
+	// Repeating them per message rather than sending them once and having
+	// clients keep a table is a deliberate trade: a client can render any
+	// message on its own, with no state and no ordering problem when
+	// somebody's roles change mid-conversation. It costs bytes on every
+	// message, which is part of why MessagePack is the preferred codec.
+	// Both are omitted entirely when empty, so a server with no directory
+	// installed pays nothing.
+	Roles []string          `json:"roles,omitempty" msgpack:"roles,omitempty"`
+	Attrs map[string]string `json:"attrs,omitempty" msgpack:"attrs,omitempty"`
 }
 
 // In is a chat message as a client sends it: the body and nothing else.
@@ -74,6 +111,11 @@ type Priv struct {
 	Data      string `json:"data" msgpack:"data"`
 	Timestamp int64  `json:"timestamp" msgpack:"timestamp"`
 	Sent      bool   `json:"sent,omitempty" msgpack:"sent,omitempty"`
+
+	// Roles and Attrs describe the other party, the same way Msg carries
+	// them for the sender.
+	Roles []string          `json:"roles,omitempty" msgpack:"roles,omitempty"`
+	Attrs map[string]string `json:"attrs,omitempty" msgpack:"attrs,omitempty"`
 }
 
 // InPriv is a private message as a client sends it: who it is for, and the
@@ -90,6 +132,45 @@ type InPriv struct {
 // connection up.
 type Ready struct {
 	Nick string `json:"nick" msgpack:"nick"`
+}
+
+// Backlog is the recent history of the channel, sent once on connect so a
+// client arrives with context instead of an empty window.
+//
+// It is one frame with an array rather than a burst of MSG frames. A client
+// can then tell "here is what you missed" from "this just happened" without
+// a per-message flag, and render the block in one pass.
+type Backlog struct {
+	Messages []Msg `json:"messages" msgpack:"messages"`
+}
+
+// InMod is a moderation command from a client.
+type InMod struct {
+	Nick string `json:"nick" msgpack:"nick"`
+
+	// Duration is a Go duration string ("10m", "24h"). Empty means the
+	// action does not expire.
+	Duration string `json:"duration,omitempty" msgpack:"duration,omitempty"`
+
+	Reason string `json:"reason,omitempty" msgpack:"reason,omitempty"`
+}
+
+// Mod is a moderation action as the server announces it to the channel.
+//
+// It goes to everybody, including the person it is about. Moderation that
+// happens invisibly gets re-litigated in the channel by people guessing at
+// what happened.
+type Mod struct {
+	ID        uint64 `json:"id" msgpack:"id"`
+	Action    string `json:"action" msgpack:"action"`
+	Nick      string `json:"nick" msgpack:"nick"`
+	By        string `json:"by" msgpack:"by"`
+	Timestamp int64  `json:"timestamp" msgpack:"timestamp"`
+
+	// Until is when the action expires, in unix milliseconds. Zero means it
+	// does not.
+	Until  int64  `json:"until,omitempty" msgpack:"until,omitempty"`
+	Reason string `json:"reason,omitempty" msgpack:"reason,omitempty"`
 }
 
 // Err is a refusal. Description is one of the codes above.

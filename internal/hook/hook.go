@@ -71,6 +71,23 @@ type Identity struct {
 // Anonymous reports whether nobody has claimed this connection.
 func (i Identity) Anonymous() bool { return i.ID == "" }
 
+// Key is what moderation state is filed under: the stable id when there is
+// one, and the display name when there is not.
+//
+// The anonymous case is weak on purpose rather than by accident. Keying an
+// anonymous user by name means a reconnect under a new name escapes a mute,
+// and there is nothing better available — an address is shared by everyone
+// behind a NAT and changed by anyone with a phone. Moderation of anonymous
+// users is a speed bump; moderation of logged-in users is not, and that is
+// an argument for requiring a login to speak, which is a deployment's
+// decision to make through Authenticator.
+func (i Identity) Key() string {
+	if i.ID != "" {
+		return "id:" + i.ID
+	}
+	return "nick:" + i.Nick
+}
+
 // Has reports whether the identity carries a role.
 func (i Identity) Has(role string) bool {
 	for _, r := range i.Roles {
@@ -186,11 +203,39 @@ type Filter interface {
 	Allow(ctx context.Context, from Identity, data string) (allowed bool, reason string)
 }
 
-// Recorder writes messages down. Both methods run on a background worker,
-// after the message has already been delivered.
+// Moderation is a moderation action, as recorded.
+type Moderation struct {
+	ID     uint64
+	Action string // one of proto's Action constants
+	By     Identity
+	Target string // the nick the action names
+	Key    string // the Identity.Key the action is filed under
+	Reason string
+	Until  time.Time // zero when the action does not expire
+	At     time.Time
+}
+
+// Recorder writes things down. Every method runs on a background worker,
+// after the thing has already happened.
 type Recorder interface {
 	Message(ctx context.Context, m Message) error
 	Private(ctx context.Context, p Private) error
+	Moderation(ctx context.Context, m Moderation) error
+}
+
+// Authorizer decides who may use the moderation commands.
+//
+// Unlike every other hook, its default is DENY. The rest of them default to
+// permissive because the cost of being wrong is a server that does less
+// than somebody wanted; here the cost of being wrong is anybody in the room
+// being able to ban anybody else. A server with no Authorizer installed has
+// no moderators, which is the correct behaviour for a server that has not
+// been told who they are.
+//
+// Roles are opaque to the core, so this is the only place that can say
+// whether "moderator" in an Identity means anything.
+type Authorizer interface {
+	CanModerate(ctx context.Context, id Identity) bool
 }
 
 // Hooks is every extension point, bundled. Nil fields are simply not
@@ -201,6 +246,7 @@ type Hooks struct {
 	Filter    Filter
 	Limiter   Limiter
 	Recorder  Recorder
+	Authz     Authorizer
 }
 
 // Apply overlays what the directory knows onto an identity. Empty fields in

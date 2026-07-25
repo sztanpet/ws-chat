@@ -2,6 +2,7 @@ package proto
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -17,7 +18,11 @@ func eachCodec(t *testing.T, fn func(t *testing.T, c Codec)) {
 
 func TestCodecRoundTrip(t *testing.T) {
 	eachCodec(t, func(t *testing.T, c Codec) {
-		want := Msg{ID: 42, Nick: "someone", Data: "hello world", Timestamp: 1700000000000}
+		want := Msg{
+			ID: 42, Nick: "someone", Data: "hello world", Timestamp: 1700000000000,
+			Roles: []string{"mod", "sub"},
+			Attrs: map[string]string{"colour": "red"},
+		}
 
 		frame, err := c.Encode(VerbMsg, want)
 		if err != nil {
@@ -36,7 +41,7 @@ func TestCodecRoundTrip(t *testing.T) {
 		if err := c.Unmarshal(payload, &got); err != nil {
 			t.Fatalf("Unmarshal: %v", err)
 		}
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("round trip gave %+v, want %+v", got, want)
 		}
 	})
