@@ -136,7 +136,7 @@ func TestAuthNamesTheConnection(t *testing.T) {
 		t.Fatalf("READY nick = %q, want %q", c.nick, "alice")
 	}
 
-	c.send(proto.VerbMsg, proto.In{Data: "hello"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "hello"})
 	if msg := c.expectMsg("alice", "hello"); msg.Nick != "alice" {
 		t.Fatalf("message nick = %q, want %q", msg.Nick, "alice")
 	}
@@ -199,11 +199,11 @@ func TestFilterRefusesMessages(t *testing.T) {
 	})
 	c := ta.dial(t)
 
-	c.send(proto.VerbMsg, proto.In{Data: "this has badword in it"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "this has badword in it"})
 	c.expectErr("muted")
 
 	// And the refusal is per message, not per connection.
-	c.send(proto.VerbMsg, proto.In{Data: "this one is fine"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "this one is fine"})
 	c.expectMsg("", "this one is fine")
 }
 
@@ -213,7 +213,7 @@ func TestFilterAppliesToPrivateMessages(t *testing.T) {
 	})
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "badword"})
+	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "badword"})
 	alice.expectErr("muted")
 }
 
@@ -236,7 +236,7 @@ func TestRecorderSeesMessages(t *testing.T) {
 		t.Fatalf("dial bob: %v", err)
 	}
 
-	alice.send(proto.VerbMsg, proto.In{Data: "public"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "public"})
 	alice.expectMsg("alice", "public")
 	bob.expectMsg("alice", "public")
 
@@ -255,7 +255,7 @@ func TestRecorderSeesMessages(t *testing.T) {
 		t.Fatal("the public message was never recorded")
 	}
 
-	alice.send(proto.VerbPriv, proto.InPriv{Nick: "bob", Data: "secret"})
+	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: "bob", Data: "secret"})
 	bob.expectPriv("secret")
 	alice.expectPriv("secret")
 
@@ -281,7 +281,7 @@ func TestRecorderFailureDoesNotAffectDelivery(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{Recorder: rec})
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbMsg, proto.In{Data: "still delivered"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "still delivered"})
 	alice.expectMsg("", "still delivered")
 	bob.expectMsg("", "still delivered")
 }
@@ -295,7 +295,7 @@ func TestNoHooksInstalled(t *testing.T) {
 	if !strings.HasPrefix(c.nick, "anon") {
 		t.Fatalf("nick = %q, want an assigned anonymous name", c.nick)
 	}
-	c.send(proto.VerbMsg, proto.In{Data: "no layers here"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "no layers here"})
 	c.expectMsg("", "no layers here")
 }
 
@@ -355,7 +355,7 @@ func TestNoLimiterIsUnlimited(t *testing.T) {
 	c := ta.dial(t)
 
 	for i := range 50 {
-		c.send(proto.VerbMsg, proto.In{Data: fmt.Sprintf("message %d", i)})
+		c.send(proto.Command{Verb: proto.VerbMsg, Data: fmt.Sprintf("message %d", i)})
 		c.expectMsg("", fmt.Sprintf("message %d", i))
 	}
 }
@@ -367,7 +367,7 @@ func TestZeroLimitsAreUnlimited(t *testing.T) {
 	c := ta.dial(t)
 
 	for i := range 50 {
-		c.send(proto.VerbMsg, proto.In{Data: fmt.Sprintf("message %d", i)})
+		c.send(proto.Command{Verb: proto.VerbMsg, Data: fmt.Sprintf("message %d", i)})
 		c.expectMsg("", fmt.Sprintf("message %d", i))
 	}
 }
@@ -382,16 +382,16 @@ func TestClientRateLimit(t *testing.T) {
 
 	for i := range 3 {
 		want := fmt.Sprintf("burst %d", i)
-		alice.send(proto.VerbMsg, proto.In{Data: want})
+		alice.send(proto.Command{Verb: proto.VerbMsg, Data: want})
 		alice.expectMsg(alice.nick, want)
 		bob.expectMsg(alice.nick, want) // bob is in the room the whole time
 	}
 
-	alice.send(proto.VerbMsg, proto.In{Data: "one too many"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "one too many"})
 	alice.expectErr(proto.ErrThrottled)
 
 	// The limit is the sender's alone: bob still has his whole budget.
-	bob.send(proto.VerbMsg, proto.In{Data: "bob is fine"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "bob is fine"})
 	bob.expectMsg(bob.nick, "bob is fine")
 
 	// And alice's next frame is bob's message, not her own refused one.
@@ -405,15 +405,15 @@ func TestThrottledMessageIsNotDelivered(t *testing.T) {
 	})
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbMsg, proto.In{Data: "allowed"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "allowed"})
 	alice.expectMsg("", "allowed")
 	bob.expectMsg("", "allowed")
 
-	alice.send(proto.VerbMsg, proto.In{Data: "refused"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "refused"})
 	alice.expectErr(proto.ErrThrottled)
 
 	// bob's next frame is the following message, not the refused one.
-	bob.send(proto.VerbMsg, proto.In{Data: "next"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "next"})
 	bob.expectMsg(bob.nick, "next")
 }
 
@@ -425,20 +425,20 @@ func TestChannelRateLimit(t *testing.T) {
 	})
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbMsg, proto.In{Data: "one"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "one"})
 	alice.expectMsg("", "one")
 	bob.expectMsg("", "one")
 
-	bob.send(proto.VerbMsg, proto.In{Data: "two"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "two"})
 	alice.expectMsg("", "two")
 	bob.expectMsg("", "two")
 
 	// The channel's two are gone, so the next message from anybody is
 	// refused — and refused as the channel's fault, not the sender's.
-	alice.send(proto.VerbMsg, proto.In{Data: "three"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "three"})
 	alice.expectErr(proto.ErrChanThrottled)
 
-	bob.send(proto.VerbMsg, proto.In{Data: "four"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "four"})
 	bob.expectErr(proto.ErrChanThrottled)
 }
 
@@ -453,10 +453,10 @@ func TestClientLimitIsReportedBeforeChannelLimit(t *testing.T) {
 	})
 	c := ta.dial(t)
 
-	c.send(proto.VerbMsg, proto.In{Data: "first"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "first"})
 	c.expectMsg("", "first")
 
-	c.send(proto.VerbMsg, proto.In{Data: "second"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "second"})
 	c.expectErr(proto.ErrThrottled)
 }
 
@@ -473,21 +473,21 @@ func TestPrivateMessagesUseTheClientLimitOnly(t *testing.T) {
 	alice, bob := ta.dial(t), ta.dial(t)
 
 	// Exhaust the channel with somebody else's message.
-	bob.send(proto.VerbMsg, proto.In{Data: "fills the channel"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "fills the channel"})
 	alice.expectMsg(bob.nick, "fills the channel")
 	bob.expectMsg(bob.nick, "fills the channel")
 
 	// alice can still send privately, twice, on her own budget.
-	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "one"})
+	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "one"})
 	bob.expectPriv("one")
 	alice.expectPriv("one")
 
-	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "two"})
+	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "two"})
 	bob.expectPriv("two")
 	alice.expectPriv("two")
 
 	// And then her own limit stops her.
-	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "three"})
+	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "three"})
 	alice.expectErr(proto.ErrThrottled)
 }
 
@@ -525,15 +525,15 @@ func TestThrottlingDoesNotCloseTheConnection(t *testing.T) {
 	})
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbMsg, proto.In{Data: "first"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "first"})
 	alice.expectMsg("", "first")
 	bob.expectMsg("", "first")
 
-	alice.send(proto.VerbMsg, proto.In{Data: "too fast"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "too fast"})
 	alice.expectErr(proto.ErrThrottled)
 
 	// Still connected: alice receives what bob says.
-	bob.send(proto.VerbMsg, proto.In{Data: "still here"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "still here"})
 	alice.expectMsg(bob.nick, "still here")
 	bob.expectMsg(bob.nick, "still here")
 
@@ -544,7 +544,7 @@ func TestThrottlingDoesNotCloseTheConnection(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("the bucket never refilled")
 		}
-		alice.send(proto.VerbMsg, proto.In{Data: "recovered"})
+		alice.send(proto.Command{Verb: proto.VerbMsg, Data: "recovered"})
 		verb, _ := alice.recv()
 		if verb == proto.VerbMsg {
 			bob.expectMsg(alice.nick, "recovered")
@@ -606,22 +606,22 @@ func TestAccountRateLimitIsSharedAcrossConnections(t *testing.T) {
 	room := []*client{first, second, bob}
 
 	// Two from one socket, one from the other: that is the account's three.
-	first.send(proto.VerbMsg, proto.In{Data: "one"})
+	first.send(proto.Command{Verb: proto.VerbMsg, Data: "one"})
 	expectAll(room, "alice", "one")
-	first.send(proto.VerbMsg, proto.In{Data: "two"})
+	first.send(proto.Command{Verb: proto.VerbMsg, Data: "two"})
 	expectAll(room, "alice", "two")
-	second.send(proto.VerbMsg, proto.In{Data: "three"})
+	second.send(proto.Command{Verb: proto.VerbMsg, Data: "three"})
 	expectAll(room, "alice2", "three")
 
 	// A fourth is refused on EITHER socket — opening a second one bought
 	// nothing.
-	second.send(proto.VerbMsg, proto.In{Data: "four"})
+	second.send(proto.Command{Verb: proto.VerbMsg, Data: "four"})
 	second.expectErr(proto.ErrThrottled)
-	first.send(proto.VerbMsg, proto.In{Data: "also four"})
+	first.send(proto.Command{Verb: proto.VerbMsg, Data: "also four"})
 	first.expectErr(proto.ErrThrottled)
 
 	// And it is that account's budget, not everybody's.
-	bob.send(proto.VerbMsg, proto.In{Data: "bob is fine"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "bob is fine"})
 	expectAll(room, "bob", "bob is fine")
 }
 
@@ -646,16 +646,16 @@ func TestAccountKeyFromAuthAttributes(t *testing.T) {
 	room := []*client{alice, bob, carol}
 
 	// Two different people, one organisation, one budget.
-	alice.send(proto.VerbMsg, proto.In{Data: "one"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "one"})
 	expectAll(room, "alice", "one")
-	bob.send(proto.VerbMsg, proto.In{Data: "two"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "two"})
 	expectAll(room, "bob", "two")
 
-	bob.send(proto.VerbMsg, proto.In{Data: "three"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "three"})
 	bob.expectErr(proto.ErrThrottled)
 
 	// A different organisation is untouched.
-	carol.send(proto.VerbMsg, proto.In{Data: "different org"})
+	carol.send(proto.Command{Verb: proto.VerbMsg, Data: "different org"})
 	expectAll(room, "carol", "different org")
 }
 
@@ -671,9 +671,9 @@ func TestAccountLimitSurvivesReconnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	first.send(proto.VerbMsg, proto.In{Data: "spent it"})
+	first.send(proto.Command{Verb: proto.VerbMsg, Data: "spent it"})
 	first.expectMsg("alice", "spent it")
-	first.send(proto.VerbMsg, proto.In{Data: "refused"})
+	first.send(proto.Command{Verb: proto.VerbMsg, Data: "refused"})
 	first.expectErr(proto.ErrThrottled)
 
 	// Go away and come back.
@@ -683,7 +683,7 @@ func TestAccountLimitSurvivesReconnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconnect: %v", err)
 	}
-	second.send(proto.VerbMsg, proto.In{Data: "try again"})
+	second.send(proto.Command{Verb: proto.VerbMsg, Data: "try again"})
 	second.expectErr(proto.ErrThrottled)
 }
 
@@ -703,14 +703,14 @@ func TestPerConnectionIsTheDefault(t *testing.T) {
 
 	room := []*client{first, second}
 
-	first.send(proto.VerbMsg, proto.In{Data: "one"})
+	first.send(proto.Command{Verb: proto.VerbMsg, Data: "one"})
 	expectAll(room, "alice", "one")
-	first.send(proto.VerbMsg, proto.In{Data: "refused"})
+	first.send(proto.Command{Verb: proto.VerbMsg, Data: "refused"})
 	first.expectErr(proto.ErrThrottled)
 
 	// The same account's other socket has its own budget, because no key
 	// was given.
-	second.send(proto.VerbMsg, proto.In{Data: "still allowed"})
+	second.send(proto.Command{Verb: proto.VerbMsg, Data: "still allowed"})
 	expectAll(room, "alice2", "still allowed")
 }
 
@@ -726,7 +726,7 @@ func TestSharedLimiterReclamation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	c.send(proto.VerbMsg, proto.In{Data: "spend one"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "spend one"})
 	c.expectMsg("alice", "spend one")
 
 	// Held by a live connection: not reclaimable however long we wait.

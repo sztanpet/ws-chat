@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/sztanpet/ws-chat/internal/config"
 	"github.com/sztanpet/ws-chat/internal/hook"
@@ -105,9 +107,7 @@ func (ta *testApp) dialCodec(t *testing.T, codec proto.Codec) *client {
 		t.Fatalf("first frame was %s, want %s", verb, proto.VerbReady)
 	}
 	var ready proto.Ready
-	if err := c.codec.Unmarshal(payload, &ready); err != nil {
-		t.Fatalf("bad READY payload %q: %v", payload, err)
-	}
+	c.decode(payload, &ready)
 	if ready.Nick == "" {
 		t.Fatal("READY carried no nick")
 	}
@@ -121,9 +121,7 @@ func (ta *testApp) dialCodec(t *testing.T, codec proto.Codec) *client {
 			t.Fatalf("second frame was %s, want %s", verb, proto.VerbBacklog)
 		}
 		var backlog proto.Backlog
-		if err := c.codec.Unmarshal(payload, &backlog); err != nil {
-			t.Fatalf("bad BACKLOG payload %q: %v", payload, err)
-		}
+		c.decode(payload, &backlog)
 		c.backlog = backlog.Messages
 	}
 	return c
@@ -137,12 +135,20 @@ func (c *client) msgType() websocket.MessageType {
 	return websocket.MessageText
 }
 
-// send encodes and sends a command.
-func (c *client) send(verb string, payload any) {
+// send encodes and sends a command. The verb is a field in the command, so
+// there is one document and one encode.
+func (c *client) send(cmd proto.Command) {
 	c.t.Helper()
-	frame, err := c.codec.Encode(verb, payload)
+
+	var frame []byte
+	var err error
+	if c.codec.Binary() {
+		frame, err = msgpack.Marshal(cmd)
+	} else {
+		frame, err = json.Marshal(cmd)
+	}
 	if err != nil {
-		c.t.Fatalf("encode %s: %v", verb, err)
+		c.t.Fatalf("encode %s: %v", cmd.Verb, err)
 	}
 	c.sendRaw(frame, c.msgType())
 }
@@ -157,8 +163,14 @@ func (c *client) sendRaw(frame []byte, typ websocket.MessageType) {
 	}
 }
 
-// recv reads one frame, failing the test rather than hanging.
-func (c *client) recv() (verb string, payload []byte) {
+// recv reads one frame and reports its verb along with the whole frame.
+//
+// The frame is returned intact rather than split, because there is nothing
+// to split any more: the verb is a field inside the document. A test that
+// wants the rest decodes the same bytes into the type the verb named. A
+// real client would decode once into a union struct of its own, the way the
+// server does with proto.Command.
+func (c *client) recv() (verb string, frame []byte) {
 	c.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -170,11 +182,29 @@ func (c *client) recv() (verb string, payload []byte) {
 	if typ != c.msgType() {
 		c.t.Fatalf("got a %v frame, want %v", typ, c.msgType())
 	}
-	verb, payload, err = c.codec.Decode(frame)
-	if err != nil {
-		c.t.Fatalf("server sent an unparseable frame %q: %v", frame, err)
+
+	var header struct {
+		Verb string `json:"verb" msgpack:"verb"`
 	}
-	return verb, payload
+	c.decode(frame, &header)
+	if header.Verb == "" {
+		c.t.Fatalf("server sent a frame with no verb: %q", frame)
+	}
+	return header.Verb, frame
+}
+
+// decode unmarshals a frame with this client's codec.
+func (c *client) decode(frame []byte, v any) {
+	c.t.Helper()
+	var err error
+	if c.codec.Binary() {
+		err = msgpack.Unmarshal(frame, v)
+	} else {
+		err = json.Unmarshal(frame, v)
+	}
+	if err != nil {
+		c.t.Fatalf("cannot decode %q: %v", frame, err)
+	}
 }
 
 // expectMsg reads one frame and requires it to be a MSG with this body.
@@ -185,9 +215,7 @@ func (c *client) expectMsg(nick, data string) proto.Msg {
 		c.t.Fatalf("got %s, want %s", verb, proto.VerbMsg)
 	}
 	var msg proto.Msg
-	if err := c.codec.Unmarshal(payload, &msg); err != nil {
-		c.t.Fatalf("bad MSG payload %q: %v", payload, err)
-	}
+	c.decode(payload, &msg)
 	if data != "" && msg.Data != data {
 		c.t.Fatalf("data = %q, want %q", msg.Data, data)
 	}
@@ -205,9 +233,7 @@ func (c *client) expectPriv(data string) proto.Priv {
 		c.t.Fatalf("got %s %s, want %s", verb, payload, proto.VerbPriv)
 	}
 	var msg proto.Priv
-	if err := c.codec.Unmarshal(payload, &msg); err != nil {
-		c.t.Fatalf("bad PRIVMSG payload %q: %v", payload, err)
-	}
+	c.decode(payload, &msg)
 	if msg.Data != data {
 		c.t.Fatalf("data = %q, want %q", msg.Data, data)
 	}
@@ -233,9 +259,7 @@ func (c *client) expectErr(description string) {
 		c.t.Fatalf("got %s %s, want %s %s", verb, payload, proto.VerbErr, description)
 	}
 	var e proto.Err
-	if err := c.codec.Unmarshal(payload, &e); err != nil {
-		c.t.Fatalf("bad ERR payload %q: %v", payload, err)
-	}
+	c.decode(payload, &e)
 	if e.Description != description {
 		c.t.Fatalf("ERR description = %q, want %q", e.Description, description)
 	}
@@ -248,9 +272,7 @@ func contextWithTimeout() (context.Context, context.CancelFunc) {
 
 func mustUnmarshal(t *testing.T, c *client, data []byte, v any) {
 	t.Helper()
-	if err := c.codec.Unmarshal(data, v); err != nil {
-		t.Fatalf("bad payload %q: %v", data, err)
-	}
+	c.decode(data, v)
 }
 
 // expectClosed requires the connection to be closed by the server.

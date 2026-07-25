@@ -11,9 +11,13 @@ import (
 //
 // This exists because the framing is not the protocol. What the verbs mean,
 // who may send them and what the server does about it is the protocol; how
-// a frame is spelled on the wire is a detail that a client should be able
-// to choose. A browser wants JSON it can read in devtools. A bot moving a
-// lot of traffic wants MessagePack. Neither should force the other.
+// a frame is spelled on the wire is a detail a client should be able to
+// choose. A browser wants JSON it can read in devtools. A bot moving a lot
+// of traffic wants MessagePack. Neither should force the other.
+//
+// Because the verb lives inside the document, a codec is now just its
+// encoder: Marshal one way, Unmarshal the other, and an inbound frame costs
+// exactly one pass over the bytes.
 //
 // Implementations must be safe for concurrent use — one codec serves every
 // connection that negotiated it.
@@ -26,20 +30,21 @@ type Codec interface {
 	// the one it will accept.
 	Binary() bool
 
-	// Encode builds a frame. A nil payload means a bare verb, like PING.
-	Encode(verb string, payload any) ([]byte, error)
+	// Encode builds a frame. The payload carries its own verb, which is
+	// what the Outbound interface is for.
+	Encode(payload Outbound) ([]byte, error)
 
-	// Decode splits a frame into its verb and its still-encoded payload.
-	// The payload is carried, not parsed: the framing layer has no opinion
-	// about what any particular verb contains.
-	Decode(frame []byte) (verb string, payload []byte, err error)
-
-	// Unmarshal decodes a payload from Decode into v.
-	Unmarshal(payload []byte, v any) error
+	// Decode parses an inbound frame in a single pass.
+	Decode(frame []byte, cmd *Command) error
 }
 
 // ErrUnsupported is returned for a subprotocol nothing implements.
 var ErrUnsupported = errors.New("proto: unsupported codec")
+
+// ErrNoVerb is returned for an outbound payload with no verb set. It cannot
+// happen through the New* constructors and is a programming error if it
+// does.
+var ErrNoVerb = errors.New("proto: outbound frame has no verb")
 
 // The subprotocol names clients negotiate with.
 const (
@@ -79,4 +84,12 @@ func ByName(name string) (Codec, error) {
 		}
 	}
 	return nil, fmt.Errorf("%w: %q", ErrUnsupported, name)
+}
+
+// checkVerb guards the one mistake the Outbound interface exists to catch.
+func checkVerb(payload Outbound) error {
+	if payload == nil || payload.frameVerb() == "" {
+		return ErrNoVerb
+	}
+	return nil
 }

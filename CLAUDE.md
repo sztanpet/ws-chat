@@ -74,21 +74,43 @@ channel's member set for that reason.
 
 ### Wire protocol
 
-One command per frame: a verb and a payload the framing layer carries but
-does not look inside. Unknown verbs get an `ERR` back and do not close the
-connection.
+One command per frame, and **the frame is a single encoded document with
+the verb inside it**:
+
+```json
+{"verb":"MSG","data":"hello"}
+```
+
+The verb being a field rather than a prefix is what keeps an inbound frame
+to **one decode**. A `VERB {payload}` framing has to split the string, read
+the verb, decide what shape the rest is, and then parse the rest — two
+passes over the same bytes on every message anybody sends. Here the verb
+and its arguments come out of one `Unmarshal`.
+
+That is why `proto.Command` is one flat struct covering every inbound verb
+rather than one struct per verb. A union of a handful of short string
+fields costs nothing to decode into, and one-struct-per-verb would
+reintroduce exactly the second parse this design removes. Unknown verbs get
+an `ERR` back and do not close the connection.
 
 **The format is negotiated, not configured.** `internal/proto` defines a
-`Codec` interface — `Encode`, `Decode`, `Unmarshal`, plus whether frames
-are binary — and a client picks one with a WebSocket subprotocol:
+`Codec` interface — `Encode`, `Decode`, plus whether frames are binary —
+and a client picks one with a WebSocket subprotocol:
 
-- `chat.msgpack` — MessagePack, a two-element `[verb, payload]` array.
-  Offered first and the one to prefer: ~20% smaller frames on a typical
-  message and no number-to-string round trip.
-- `chat.json` — text, `VERB {"json":"payload"}`: an uppercase verb, one
-  space, a JSON object. A bare verb has no payload (`PING`). The default
-  for a client that negotiates nothing, because a client that did not ask
-  is one being written by hand against a console.
+- `chat.msgpack` — MessagePack. Offered first and the one to prefer: ~20%
+  smaller frames on a typical message and no number-to-string round trip.
+- `chat.json` — the same document as JSON. The default for a client that
+  negotiates nothing, because a client that did not ask is one being
+  written by hand against a console.
+
+Because the verb lives in the document, a codec is now *just* its encoder —
+`Marshal` one way, `Unmarshal` the other. There is no framing code left: no
+splitting, no length prefix, no bare-verb special case.
+
+Outbound payloads carry their own verb and are built with the `New*`
+constructors. `Encode` takes a `proto.Outbound`, which exists so a frame
+cannot be encoded without one — a frame with an empty verb is one no client
+can dispatch, and it would otherwise be a silent bug.
 
 Both codecs are held to the same test table in `codec_test.go`; if one
 needs its own test to pass they are not interchangeable. Struct fields
@@ -145,7 +167,8 @@ that puts a `nick` in its payload is ignored.
 to parse.
 
 A frame arriving as the wrong WebSocket message type for the negotiated
-codec is refused with `ERR framing` rather than guessed at.
+codec is refused with `ERR framing` rather than guessed at, and a
+well-formed document with no `verb` is refused with `ERR protocol`.
 
 ### Extension points
 

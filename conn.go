@@ -146,7 +146,7 @@ func (c *conn) serve(parent context.Context) {
 	// Only now is the connection real: subscribed, addressable, and able to
 	// receive. The handshake finished before any of that, so a client that
 	// talks first would race its own setup.
-	ready, err := c.codec.Encode(proto.VerbReady, proto.Ready{Nick: c.nick()})
+	ready, err := c.codec.Encode(proto.NewReady(c.nick()))
 	if err != nil {
 		c.log.Error("cannot format READY", "err", err)
 		c.ws.CloseNow()
@@ -199,7 +199,7 @@ func (c *conn) sendBacklog(ctx context.Context) {
 	if c.app.cfg.Backlog < 1 {
 		return // disabled: no frame at all, which is the one other case
 	}
-	c.sendVerb(ctx, proto.VerbBacklog, proto.Backlog{Messages: c.app.backlog(ctx)})
+	c.sendFrame(ctx, proto.NewBacklog(c.app.backlog(ctx)))
 }
 
 // privPump writes the messages addressed to this client alone.
@@ -280,38 +280,36 @@ func (c *conn) readPump(ctx context.Context) error {
 			continue
 		}
 
-		verb, payload, err := c.codec.Decode(frame)
-		if err != nil {
+		// One decode for the verb and its arguments together. Dispatching
+		// on a prefix and then parsing the rest would read the same bytes
+		// twice, on every message anybody sends.
+		var cmd proto.Command
+		if err := c.codec.Decode(frame, &cmd); err != nil {
 			c.reply(ctx, proto.ErrProtocol)
 			continue
 		}
 
-		switch verb {
+		switch cmd.Verb {
 		case proto.VerbMsg:
-			c.handleMsg(ctx, payload)
+			c.handleMsg(ctx, cmd)
 		case proto.VerbPriv:
-			c.handlePriv(ctx, payload)
+			c.handlePriv(ctx, cmd)
 		case proto.VerbMute, proto.VerbUnmute, proto.VerbBan, proto.VerbUnban:
-			c.handleMod(ctx, verb, payload)
+			c.handleMod(ctx, cmd)
 		case proto.VerbPing:
-			c.sendVerb(ctx, proto.VerbPong, nil)
+			c.sendFrame(ctx, proto.NewPong())
 		default:
 			c.reply(ctx, proto.ErrUnknown)
 		}
 	}
 }
 
-func (c *conn) handleMsg(ctx context.Context, payload []byte) {
-	var in proto.In
-	if err := c.codec.Unmarshal(payload, &in); err != nil {
-		c.reply(ctx, proto.ErrProtocol)
-		return
-	}
+func (c *conn) handleMsg(ctx context.Context, cmd proto.Command) {
 	switch {
-	case in.Data == "":
+	case cmd.Data == "":
 		c.reply(ctx, proto.ErrEmpty)
 		return
-	case len(in.Data) > c.app.cfg.MaxMessage:
+	case len(cmd.Data) > c.app.cfg.MaxMessage:
 		c.reply(ctx, proto.ErrTooLong)
 		return
 	}
@@ -336,7 +334,7 @@ func (c *conn) handleMsg(ctx context.Context, payload []byte) {
 		return
 	}
 
-	if ok, reason := c.app.allow(ctx, c.id, in.Data); !ok {
+	if ok, reason := c.app.allow(ctx, c.id, cmd.Data); !ok {
 		c.reply(ctx, reason)
 		return
 	}
@@ -344,7 +342,7 @@ func (c *conn) handleMsg(ctx context.Context, payload []byte) {
 	// The id and the timestamp are the server's to assign: a client's clock
 	// is not evidence, and ordering has to come from one place.
 	at := time.Now()
-	id, err := c.app.broadcastMsg(c.id, in.Data, at)
+	id, err := c.app.broadcastMsg(c.id, cmd.Data, at)
 	if err != nil {
 		c.log.Error("cannot encode outgoing message", "err", err)
 		c.reply(ctx, proto.ErrProtocol)
@@ -353,24 +351,19 @@ func (c *conn) handleMsg(ctx context.Context, payload []byte) {
 
 	// Delivered first, persisted after. A store having a bad day must cost
 	// history, never delivery.
-	c.app.recordMessage(hook.Message{ID: id, From: c.id, Data: in.Data, At: at})
+	c.app.recordMessage(hook.Message{ID: id, From: c.id, Data: cmd.Data, At: at})
 }
 
 // handlePriv delivers a message to one named client.
-func (c *conn) handlePriv(ctx context.Context, payload []byte) {
-	var in proto.InPriv
-	if err := c.codec.Unmarshal(payload, &in); err != nil {
-		c.reply(ctx, proto.ErrProtocol)
-		return
-	}
+func (c *conn) handlePriv(ctx context.Context, cmd proto.Command) {
 	switch {
-	case in.Data == "":
+	case cmd.Data == "":
 		c.reply(ctx, proto.ErrEmpty)
 		return
-	case len(in.Data) > c.app.cfg.MaxMessage:
+	case len(cmd.Data) > c.app.cfg.MaxMessage:
 		c.reply(ctx, proto.ErrTooLong)
 		return
-	case in.Nick == c.nick():
+	case cmd.Nick == c.nick():
 		c.reply(ctx, proto.ErrSelf)
 		return
 	}
@@ -389,12 +382,12 @@ func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 		return
 	}
 
-	if ok, reason := c.app.allow(ctx, c.id, in.Data); !ok {
+	if ok, reason := c.app.allow(ctx, c.id, cmd.Data); !ok {
 		c.reply(ctx, reason)
 		return
 	}
 
-	target, ok := c.app.lookup(in.Nick)
+	target, ok := c.app.lookup(cmd.Nick)
 	if !ok {
 		c.reply(ctx, proto.ErrNoSuch)
 		return
@@ -410,10 +403,10 @@ func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 	// from one connection to another, which is why it is the one place that
 	// has to think about it — broadcasts cannot, and that is a real
 	// constraint on channels, noted in CLAUDE.md.
-	frame, err := target.codec.Encode(proto.VerbPriv, proto.Priv{
-		ID: id, Nick: c.nick(), Data: in.Data, Timestamp: now,
+	frame, err := target.codec.Encode(proto.NewPriv(proto.Priv{
+		ID: id, Nick: c.nick(), Data: cmd.Data, Timestamp: now,
 		Roles: c.id.Roles, Attrs: c.id.Attrs,
-	})
+	}))
 	if err != nil {
 		c.log.Error("cannot encode private message", "err", err)
 		c.reply(ctx, proto.ErrProtocol)
@@ -429,10 +422,10 @@ func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 
 	// The sender's echo names the recipient, so a client can render both
 	// halves of a conversation from the same frame type.
-	echo, err := c.codec.Encode(proto.VerbPriv, proto.Priv{
-		ID: id, Nick: in.Nick, Data: in.Data, Timestamp: now, Sent: true,
+	echo, err := c.codec.Encode(proto.NewPriv(proto.Priv{
+		ID: id, Nick: cmd.Nick, Data: cmd.Data, Timestamp: now, Sent: true,
 		Roles: target.id.Roles, Attrs: target.id.Attrs,
-	})
+	}))
 	if err != nil {
 		c.log.Error("cannot format private message echo", "err", err)
 		return
@@ -442,20 +435,20 @@ func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 	// Recorded after delivery, like everything else. Both identities are
 	// passed on: a store wants stable ids, not display names.
 	c.app.recordPrivate(hook.Private{
-		ID: id, From: c.id, To: target.id, Data: in.Data, At: at,
+		ID: id, From: c.id, To: target.id, Data: cmd.Data, At: at,
 	})
 }
 
 // reply sends an ERR to this client alone.
 func (c *conn) reply(ctx context.Context, description string) {
-	c.sendVerb(ctx, proto.VerbErr, proto.Err{Description: description})
+	c.sendFrame(ctx, proto.NewErr(description))
 }
 
-// sendVerb encodes and sends a frame to this client alone.
-func (c *conn) sendVerb(ctx context.Context, verb string, payload any) {
-	frame, err := c.codec.Encode(verb, payload)
+// sendFrame encodes and sends a frame to this client alone.
+func (c *conn) sendFrame(ctx context.Context, payload proto.Outbound) {
+	frame, err := c.codec.Encode(payload)
 	if err != nil {
-		c.log.Error("cannot encode frame", "verb", verb, "err", err)
+		c.log.Error("cannot encode frame", "err", err)
 		return
 	}
 	c.send(ctx, frame)

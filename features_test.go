@@ -28,7 +28,7 @@ func TestBacklogReplay(t *testing.T) {
 	}
 
 	for i := range 3 {
-		alice.send(proto.VerbMsg, proto.In{Data: fmt.Sprintf("message %d", i)})
+		alice.send(proto.Command{Verb: proto.VerbMsg, Data: fmt.Sprintf("message %d", i)})
 		alice.expectMsg("", fmt.Sprintf("message %d", i))
 	}
 
@@ -51,7 +51,7 @@ func TestBacklogReplay(t *testing.T) {
 	}
 
 	// And then live traffic follows it.
-	alice.send(proto.VerbMsg, proto.In{Data: "live"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "live"})
 	bob.expectMsg(alice.nick, "live")
 }
 
@@ -60,7 +60,7 @@ func TestBacklogIsCapped(t *testing.T) {
 	alice := ta.dial(t)
 
 	for i := range 6 {
-		alice.send(proto.VerbMsg, proto.In{Data: fmt.Sprintf("m%d", i)})
+		alice.send(proto.Command{Verb: proto.VerbMsg, Data: fmt.Sprintf("m%d", i)})
 		alice.expectMsg("", fmt.Sprintf("m%d", i))
 	}
 
@@ -80,7 +80,7 @@ func TestBacklogDisabled(t *testing.T) {
 	ta := newTestApp(t, func(c *config.Config) { c.Backlog = 0 })
 	alice := ta.dial(t)
 
-	alice.send(proto.VerbMsg, proto.In{Data: "said before you arrived"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "said before you arrived"})
 	alice.expectMsg("", "said before you arrived")
 
 	// dial asserts the frame sequence, so getting here at all means no
@@ -89,7 +89,7 @@ func TestBacklogDisabled(t *testing.T) {
 	if len(bob.backlog) != 0 {
 		t.Fatalf("backlog disabled but %d messages arrived", len(bob.backlog))
 	}
-	alice.send(proto.VerbMsg, proto.In{Data: "live"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "live"})
 	bob.expectMsg(alice.nick, "live")
 }
 
@@ -98,7 +98,7 @@ func TestBacklogExcludesPrivateMessages(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "for bob only"})
+	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "for bob only"})
 	bob.expectPriv("for bob only")
 	alice.expectPriv("for bob only")
 
@@ -122,7 +122,7 @@ func TestBacklogOrderMatchesDelivery(t *testing.T) {
 		if i%2 == 1 {
 			sender = bob
 		}
-		sender.send(proto.VerbMsg, proto.In{Data: fmt.Sprintf("m%d", i)})
+		sender.send(proto.Command{Verb: proto.VerbMsg, Data: fmt.Sprintf("m%d", i)})
 	}
 
 	var delivered []uint64
@@ -163,7 +163,7 @@ func TestMessagesCarryRolesAndAttrs(t *testing.T) {
 		t.Fatalf("dial bob: %v", err)
 	}
 
-	alice.send(proto.VerbMsg, proto.In{Data: "hello"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "hello"})
 	for _, c := range []*client{alice, bob} {
 		msg := c.expectMsg("alice", "hello")
 		if len(msg.Roles) != 2 || msg.Roles[0] != "mod" {
@@ -176,7 +176,7 @@ func TestMessagesCarryRolesAndAttrs(t *testing.T) {
 
 	// Somebody with nothing attached carries nothing, rather than empty
 	// collections on every message.
-	bob.send(proto.VerbMsg, proto.In{Data: "plain"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "plain"})
 	msg := alice.expectMsg("bob", "plain")
 	if len(msg.Roles) != 0 || len(msg.Attrs) != 0 {
 		t.Errorf("an identity with no data carried roles=%v attrs=%v", msg.Roles, msg.Attrs)
@@ -198,7 +198,7 @@ func TestPrivateMessagesCarryRolesAndAttrs(t *testing.T) {
 	alice, _ := ta.dialWith(t, "?token=a")
 	bob, _ := ta.dialWith(t, "?token=b")
 
-	alice.send(proto.VerbPriv, proto.InPriv{Nick: "bob", Data: "hi"})
+	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: "bob", Data: "hi"})
 
 	// The recipient's copy describes the sender.
 	if got := bob.expectPriv("hi"); len(got.Roles) != 1 || got.Roles[0] != "mod" {
@@ -220,7 +220,7 @@ func TestBacklogCarriesRolesAndAttrs(t *testing.T) {
 	})
 
 	alice, _ := ta.dialWith(t, "?token=a")
-	alice.send(proto.VerbMsg, proto.In{Data: "for the record"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "for the record"})
 	alice.expectMsg("alice", "for the record")
 
 	bob, err := ta.dialWith(t, "?token=b")
@@ -243,11 +243,11 @@ func TestInvalidUTF8Refused(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dialCodec(t, proto.MsgPack{})
 
-	c.send(proto.VerbMsg, proto.In{Data: "well \xff hello"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "well \xff hello"})
 	c.expectErr(filter.ReasonInvalidUTF8)
 
 	// And the connection survives it.
-	c.send(proto.VerbMsg, proto.In{Data: "fine now"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "fine now"})
 	c.expectMsg("", "fine now")
 }
 
@@ -256,15 +256,15 @@ func TestZalgoRefused(t *testing.T) {
 	c := ta.dial(t)
 
 	const combining = "́"
-	c.send(proto.VerbMsg, proto.In{Data: "h" + strings.Repeat(combining, 20)})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "h" + strings.Repeat(combining, 20)})
 	c.expectErr(filter.ReasonZalgo)
 
 	// Five is allowed; the default threshold is generous on purpose.
-	c.send(proto.VerbMsg, proto.In{Data: "h" + strings.Repeat(combining, 5)})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "h" + strings.Repeat(combining, 5)})
 	c.expectMsg("", "h"+strings.Repeat(combining, 5))
 
 	// Normal text that uses marks is unaffected.
-	c.send(proto.VerbMsg, proto.In{Data: "Tiếng Việt"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "Tiếng Việt"})
 	c.expectMsg("", "Tiếng Việt")
 }
 
@@ -272,10 +272,10 @@ func TestZalgoThresholdIsConfigurable(t *testing.T) {
 	ta := newTestApp(t, func(c *config.Config) { c.MaxDiacritics = 2 })
 	c := ta.dial(t)
 
-	c.send(proto.VerbMsg, proto.In{Data: "h́́́"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "h́́́"})
 	c.expectErr(filter.ReasonZalgo)
 
-	c.send(proto.VerbMsg, proto.In{Data: "h́́"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "h́́"})
 	c.expectMsg("", "h́́")
 }
 
@@ -284,7 +284,7 @@ func TestFiltersCanBeDisabled(t *testing.T) {
 	c := ta.dial(t)
 
 	data := "h" + strings.Repeat("́", 50)
-	c.send(proto.VerbMsg, proto.In{Data: data})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: data})
 	c.expectMsg("", data)
 }
 
@@ -297,14 +297,14 @@ func TestBuiltInFiltersRunBeforeTheHook(t *testing.T) {
 	c := ta.dial(t)
 
 	// Zalgo is caught by a built-in even though the hook would allow it.
-	c.send(proto.VerbMsg, proto.In{Data: "h" + strings.Repeat("́", 20)})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "h" + strings.Repeat("́", 20)})
 	c.expectErr(filter.ReasonZalgo)
 
 	// The hook still refuses what it refuses.
-	c.send(proto.VerbMsg, proto.In{Data: "badword"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "badword"})
 	c.expectErr("muted")
 
-	c.send(proto.VerbMsg, proto.In{Data: "fine"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "fine"})
 	c.expectMsg("", "fine")
 }
 
@@ -312,7 +312,7 @@ func TestFiltersApplyToPrivateMessages(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "h" + strings.Repeat("́", 20)})
+	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "h" + strings.Repeat("́", 20)})
 	alice.expectErr(filter.ReasonZalgo)
 }
 
@@ -355,9 +355,7 @@ func (c *client) expectMod(action, nick string) proto.Mod {
 		c.t.Fatalf("got %s %s, want %s", verb, payload, proto.VerbMod)
 	}
 	var m proto.Mod
-	if err := c.codec.Unmarshal(payload, &m); err != nil {
-		c.t.Fatalf("bad MOD payload %q: %v", payload, err)
-	}
+	c.decode(payload, &m)
 	if m.Action != action {
 		c.t.Fatalf("action = %q, want %q", m.Action, action)
 	}
@@ -373,29 +371,29 @@ func TestModerationDeniedByDefault(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbMute, proto.InMod{Nick: bob.nick})
+	alice.send(proto.Command{Verb: proto.VerbMute, Nick: bob.nick})
 	alice.expectErr(proto.ErrForbidden)
 
 	// And nothing happened to bob.
-	bob.send(proto.VerbMsg, proto.In{Data: "still talking"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "still talking"})
 	bob.expectMsg("", "still talking")
 }
 
 func TestNonModeratorRefused(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
-	user.send(proto.VerbMute, proto.InMod{Nick: "themod"})
+	user.send(proto.Command{Verb: proto.VerbMute, Nick: "themod"})
 	user.expectErr(proto.ErrForbidden)
 
 	// The moderator saw nothing, because nothing happened.
-	mod.send(proto.VerbMsg, proto.In{Data: "still here"})
+	mod.send(proto.Command{Verb: proto.VerbMsg, Data: "still here"})
 	mod.expectMsg("themod", "still here")
 }
 
 func TestMuteSilences(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.VerbMute, proto.InMod{Nick: "auser", Reason: "spam"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Reason: "spam"})
 
 	// Everybody is told, including the person it is about.
 	for _, c := range []*client{mod, user} {
@@ -411,40 +409,40 @@ func TestMuteSilences(t *testing.T) {
 		}
 	}
 
-	user.send(proto.VerbMsg, proto.In{Data: "can i talk"})
+	user.send(proto.Command{Verb: proto.VerbMsg, Data: "can i talk"})
 	user.expectErr(proto.ErrMuted)
 
 	// A mute is not a disconnect: the user still receives.
-	mod.send(proto.VerbMsg, proto.In{Data: "you cannot"})
+	mod.send(proto.Command{Verb: proto.VerbMsg, Data: "you cannot"})
 	user.expectMsg("themod", "you cannot")
 }
 
 func TestMuteBlocksPrivateMessagesToo(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.VerbMute, proto.InMod{Nick: "auser"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
 	mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
-	user.send(proto.VerbPriv, proto.InPriv{Nick: "themod", Data: "let me out"})
+	user.send(proto.Command{Verb: proto.VerbPriv, Nick: "themod", Data: "let me out"})
 	user.expectErr(proto.ErrMuted)
 }
 
 func TestUnmute(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.VerbMute, proto.InMod{Nick: "auser"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
 	mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
-	user.send(proto.VerbMsg, proto.In{Data: "blocked"})
+	user.send(proto.Command{Verb: proto.VerbMsg, Data: "blocked"})
 	user.expectErr(proto.ErrMuted)
 
-	mod.send(proto.VerbUnmute, proto.InMod{Nick: "auser"})
+	mod.send(proto.Command{Verb: proto.VerbUnmute, Nick: "auser"})
 	mod.expectMod(proto.ActionUnmute, "auser")
 	user.expectMod(proto.ActionUnmute, "auser")
 
-	user.send(proto.VerbMsg, proto.In{Data: "free"})
+	user.send(proto.Command{Verb: proto.VerbMsg, Data: "free"})
 	user.expectMsg("auser", "free")
 	mod.expectMsg("auser", "free")
 }
@@ -453,7 +451,7 @@ func TestTimedMuteReportsItsDeadline(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
 	before := time.Now()
-	mod.send(proto.VerbMute, proto.InMod{Nick: "auser", Duration: "10m"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Duration: "10m"})
 	m := mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
@@ -470,7 +468,7 @@ func TestBadDuration(t *testing.T) {
 	_, mod, _ := modApp(t, hook.Hooks{})
 
 	for _, d := range []string{"ten minutes", "-5m", "0s", "10"} {
-		mod.send(proto.VerbMute, proto.InMod{Nick: "auser", Duration: d})
+		mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Duration: d})
 		mod.expectErr(proto.ErrBadDuration)
 	}
 }
@@ -478,14 +476,14 @@ func TestBadDuration(t *testing.T) {
 func TestModerationOfUnknownNick(t *testing.T) {
 	_, mod, _ := modApp(t, hook.Hooks{})
 
-	mod.send(proto.VerbMute, proto.InMod{Nick: "nobodyhere"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "nobodyhere"})
 	mod.expectErr(proto.ErrNoSuch)
 }
 
 func TestBanDisconnectsAndRefusesReconnection(t *testing.T) {
 	ta, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.VerbBan, proto.InMod{Nick: "auser", Reason: "enough"})
+	mod.send(proto.Command{Verb: proto.VerbBan, Nick: "auser", Reason: "enough"})
 
 	// The room is told.
 	mod.expectMod(proto.ActionBan, "auser")
@@ -509,14 +507,14 @@ func TestBanDisconnectsAndRefusesReconnection(t *testing.T) {
 func TestUnbanNamesSomebodyWhoIsGone(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.VerbBan, proto.InMod{Nick: "auser"})
+	mod.send(proto.Command{Verb: proto.VerbBan, Nick: "auser"})
 	mod.expectMod(proto.ActionBan, "auser")
 	user.expectClosed()
 
 	// Unbanning names somebody who is no longer connected, which the
 	// server cannot resolve — the limitation is real and worth pinning
 	// down in a test rather than discovering later.
-	mod.send(proto.VerbUnban, proto.InMod{Nick: "auser"})
+	mod.send(proto.Command{Verb: proto.VerbUnban, Nick: "auser"})
 	mod.expectErr(proto.ErrNoSuch)
 }
 
@@ -524,7 +522,7 @@ func TestModerationIsRecorded(t *testing.T) {
 	rec := newFakeRecorder()
 	_, mod, user := modApp(t, hook.Hooks{Recorder: rec})
 
-	mod.send(proto.VerbMute, proto.InMod{Nick: "auser", Duration: "5m", Reason: "spam"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Duration: "5m", Reason: "spam"})
 	mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
@@ -558,7 +556,7 @@ func TestModerationIsRecorded(t *testing.T) {
 func TestModerationIsNotInTheBacklog(t *testing.T) {
 	ta, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.VerbMute, proto.InMod{Nick: "auser"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
 	mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
@@ -645,7 +643,7 @@ func TestHistoryHookSeesDeliveredMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	alice.send(proto.VerbMsg, proto.In{Data: "remember this"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "remember this"})
 	alice.expectMsg("alice", "remember this")
 
 	hist.mu.Lock()
@@ -672,7 +670,7 @@ func TestHistoryHookDoesNotSeePrivateMessages(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{History: hist})
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "private"})
+	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "private"})
 	bob.expectPriv("private")
 	alice.expectPriv("private")
 
@@ -694,7 +692,7 @@ func TestHistoryFailureIsNotFatal(t *testing.T) {
 	}
 
 	// And the connection works.
-	c.send(proto.VerbMsg, proto.In{Data: "still fine"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "still fine"})
 	c.expectMsg("", "still fine")
 }
 

@@ -21,23 +21,17 @@ import (
 // is broken and reconnect in a loop.
 
 // handleMod runs one of MUTE, UNMUTE, BAN or UNBAN.
-func (c *conn) handleMod(ctx context.Context, verb string, payload []byte) {
+func (c *conn) handleMod(ctx context.Context, cmd proto.Command) {
 	if !c.app.canModerate(ctx, c.id) {
 		c.reply(ctx, proto.ErrForbidden)
 		return
 	}
-
-	var in proto.InMod
-	if err := c.codec.Unmarshal(payload, &in); err != nil {
-		c.reply(ctx, proto.ErrProtocol)
-		return
-	}
-	if in.Nick == "" {
+	if cmd.Nick == "" {
 		c.reply(ctx, proto.ErrProtocol)
 		return
 	}
 
-	until, err := deadline(in.Duration)
+	until, err := deadline(cmd.Duration)
 	if err != nil {
 		c.reply(ctx, proto.ErrBadDuration)
 		return
@@ -47,7 +41,7 @@ func (c *conn) handleMod(ctx context.Context, verb string, payload []byte) {
 	// are the ones connected. Acting on somebody who has already left needs
 	// the directory to resolve a name to a key, which is a hook away and
 	// noted in state/server.md.
-	target, ok := c.app.lookup(in.Nick)
+	target, ok := c.app.lookup(cmd.Nick)
 	if !ok {
 		c.reply(ctx, proto.ErrNoSuch)
 		return
@@ -55,7 +49,7 @@ func (c *conn) handleMod(ctx context.Context, verb string, payload []byte) {
 	key := target.id.Key()
 
 	var action string
-	switch verb {
+	switch cmd.Verb {
 	case proto.VerbMute:
 		c.app.mod.Mute(key, until)
 		action = proto.ActionMute
@@ -76,16 +70,16 @@ func (c *conn) handleMod(ctx context.Context, verb string, payload []byte) {
 	}
 
 	at := time.Now()
-	id, err := c.app.broadcast(proto.VerbMod, func(id uint64) any {
-		return proto.Mod{
+	id, err := c.app.broadcast(func(id uint64) proto.Outbound {
+		return proto.NewMod(proto.Mod{
 			ID:        id,
 			Action:    action,
-			Nick:      in.Nick,
+			Nick:      cmd.Nick,
 			By:        c.nick(),
 			Timestamp: at.UnixMilli(),
 			Until:     millis(until),
-			Reason:    in.Reason,
-		}
+			Reason:    cmd.Reason,
+		})
 	})
 	if err != nil {
 		c.log.Error("cannot encode moderation action", "action", action, "err", err)
@@ -97,9 +91,9 @@ func (c *conn) handleMod(ctx context.Context, verb string, payload []byte) {
 		ID:     id,
 		Action: action,
 		By:     c.id,
-		Target: in.Nick,
+		Target: cmd.Nick,
 		Key:    key,
-		Reason: in.Reason,
+		Reason: cmd.Reason,
 		Until:  until,
 		At:     at,
 	})
@@ -113,7 +107,7 @@ func (c *conn) handleMod(ctx context.Context, verb string, payload []byte) {
 		c.app.disconnect(target, "banned")
 	}
 
-	c.log.Info("moderation", "action", action, "target", in.Nick, "until", until, "reason", in.Reason)
+	c.log.Info("moderation", "action", action, "target", cmd.Nick, "until", until, "reason", cmd.Reason)
 }
 
 // deadline turns a duration string into an absolute time. An empty string

@@ -31,7 +31,7 @@ func TestBroadcast(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbMsg, proto.In{Data: "hello everyone"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "hello everyone"})
 
 	// The sender sees its own message too — it is a broadcast, not an echo,
 	// and a client should render one stream rather than reconcile two.
@@ -54,11 +54,11 @@ func TestMessageIDsAreMonotonic(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbMsg, proto.In{Data: "one"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "one"})
 	first := alice.expectMsg("", "one")
 	bob.expectMsg("", "one")
 
-	bob.send(proto.VerbMsg, proto.In{Data: "two"})
+	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "two"})
 	second := alice.expectMsg("", "two")
 
 	if second.ID <= first.ID {
@@ -72,9 +72,10 @@ func TestNickIsAssignedByServer(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	// A client that claims a nick in its payload is ignored: In has no such
-	// field, so this sends the wire form directly.
-	alice.sendRaw([]byte(`MSG {"data":"hi","nick":"root"}`), websocket.MessageText)
+	// A client naming itself in a MSG is ignored. The field exists — a
+	// PRIVMSG needs it — so this is a real thing a client could try, not a
+	// hypothetical.
+	alice.sendRaw([]byte(`{"verb":"MSG","data":"hi","nick":"root"}`), websocket.MessageText)
 	msg := alice.expectMsg("", "hi")
 	if msg.Nick != alice.nick {
 		t.Fatalf("nick = %q, want the assigned %q", msg.Nick, alice.nick)
@@ -88,7 +89,7 @@ func TestPing(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
 
-	c.send(proto.VerbPing, nil)
+	c.send(proto.Command{Verb: proto.VerbPing})
 	if verb, _ := c.recv(); verb != proto.VerbPong {
 		t.Fatalf("got %s, want %s", verb, proto.VerbPong)
 	}
@@ -100,13 +101,15 @@ func TestProtocolErrors(t *testing.T) {
 		frame string
 		want  string
 	}{
-		{"unknown verb", `FLARP {"data":"x"}`, proto.ErrUnknown},
-		{"not a frame", `{"data":"x"}`, proto.ErrProtocol},
-		{"lowercase verb", `msg {"data":"x"}`, proto.ErrProtocol},
-		{"bad json", `MSG {"data":`, proto.ErrProtocol},
-		{"no payload", `MSG`, proto.ErrProtocol},
-		{"empty message", `MSG {"data":""}`, proto.ErrEmpty},
-		{"trailing space", `MSG `, proto.ErrProtocol},
+		{"unknown verb", `{"verb":"FLARP","data":"x"}`, proto.ErrUnknown},
+		{"no verb", `{"data":"x"}`, proto.ErrProtocol},
+		{"wrong case", `{"verb":"msg","data":"x"}`, proto.ErrUnknown},
+		{"truncated", `{"verb":"MSG","data":`, proto.ErrProtocol},
+		{"not a document", `MSG {"data":"x"}`, proto.ErrProtocol},
+		{"not json at all", `hello`, proto.ErrProtocol},
+		{"an array", `["MSG","x"]`, proto.ErrProtocol},
+		{"verb but no body", `{"verb":"MSG"}`, proto.ErrEmpty},
+		{"empty message", `{"verb":"MSG","data":""}`, proto.ErrEmpty},
 	}
 
 	for _, tt := range tests {
@@ -123,11 +126,11 @@ func TestMessageTooLong(t *testing.T) {
 	ta := newTestApp(t, func(c *config.Config) { c.MaxMessage = 8 })
 	c := ta.dial(t)
 
-	c.send(proto.VerbMsg, proto.In{Data: "123456789"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "123456789"})
 	c.expectErr(proto.ErrTooLong)
 
 	// The boundary itself is allowed.
-	c.send(proto.VerbMsg, proto.In{Data: "12345678"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "12345678"})
 	c.expectMsg("", "12345678")
 }
 
@@ -137,10 +140,10 @@ func TestErrorsDoNotCloseTheConnection(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
 
-	c.sendRaw([]byte(`FLARP`), websocket.MessageText)
+	c.sendRaw([]byte(`{"verb":"FLARP"}`), websocket.MessageText)
 	c.expectErr(proto.ErrUnknown)
 
-	c.send(proto.VerbMsg, proto.In{Data: "still here"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "still here"})
 	c.expectMsg("", "still here")
 }
 
@@ -150,7 +153,7 @@ func TestWrongFramingRejected(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t) // JSON, so text
 
-	c.sendRaw([]byte("MSG {}"), websocket.MessageBinary)
+	c.sendRaw([]byte(`{"verb":"MSG","data":"x"}`), websocket.MessageBinary)
 	c.expectErr(proto.ErrFraming)
 }
 
@@ -158,7 +161,7 @@ func TestPrivateMessage(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob, carol := ta.dial(t), ta.dial(t), ta.dial(t)
 
-	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "just for you"})
+	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "just for you"})
 
 	// The recipient's copy names the sender and is not marked as sent.
 	got := bob.expectPriv("just for you")
@@ -184,7 +187,7 @@ func TestPrivateMessage(t *testing.T) {
 	// Nobody else sees it. Carol is made to prove it by receiving the next
 	// broadcast instead: if the private message had reached her it would be
 	// first in her stream.
-	alice.send(proto.VerbMsg, proto.In{Data: "public again"})
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "public again"})
 	carol.expectMsg("", "public again")
 }
 
@@ -193,19 +196,19 @@ func TestPrivateMessageErrors(t *testing.T) {
 
 	t.Run("no such nick", func(t *testing.T) {
 		c := ta.dial(t)
-		c.send(proto.VerbPriv, proto.InPriv{Nick: "nobody", Data: "hello?"})
+		c.send(proto.Command{Verb: proto.VerbPriv, Nick: "nobody", Data: "hello?"})
 		c.expectErr(proto.ErrNoSuch)
 	})
 
 	t.Run("to self", func(t *testing.T) {
 		c := ta.dial(t)
-		c.send(proto.VerbPriv, proto.InPriv{Nick: c.nick, Data: "hello me"})
+		c.send(proto.Command{Verb: proto.VerbPriv, Nick: c.nick, Data: "hello me"})
 		c.expectErr(proto.ErrSelf)
 	})
 
 	t.Run("empty", func(t *testing.T) {
 		c := ta.dial(t)
-		c.send(proto.VerbPriv, proto.InPriv{Nick: "someone", Data: ""})
+		c.send(proto.Command{Verb: proto.VerbPriv, Nick: "someone", Data: ""})
 		c.expectErr(proto.ErrEmpty)
 	})
 
@@ -255,10 +258,10 @@ func TestPrivateMessageToSilentRecipientDoesNotStallSender(t *testing.T) {
 	alice := ta.dial(t)
 	silent := ta.dial(t) // never reads again after this
 
-	pm := proto.InPriv{Nick: silent.nick, Data: "anyone there"}
+	pm := proto.Command{Verb: proto.VerbPriv, Nick: silent.nick, Data: "anyone there"}
 	deadline := time.Now().Add(20 * time.Second)
 	for range 50 {
-		alice.send(proto.VerbPriv, pm)
+		alice.send(pm)
 		verb, payload := alice.recv() // fails the test if it takes >5s
 
 		if verb == proto.VerbErr {
@@ -286,7 +289,7 @@ func TestShutdownClosesConnections(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
 
-	c.send(proto.VerbMsg, proto.In{Data: "still up"})
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "still up"})
 	c.expectMsg("", "still up")
 
 	ta.app.close()
@@ -306,7 +309,7 @@ func TestEveryCodecDelivers(t *testing.T) {
 			alice := ta.dialCodec(t, codec)
 			bob := ta.dialCodec(t, codec)
 
-			alice.send(proto.VerbMsg, proto.In{Data: "hello over " + codec.Name()})
+			alice.send(proto.Command{Verb: proto.VerbMsg, Data: "hello over " + codec.Name()})
 			for _, c := range []*client{alice, bob} {
 				msg := c.expectMsg(alice.nick, "hello over "+codec.Name())
 				if msg.ID == 0 || msg.Timestamp == 0 {
@@ -314,18 +317,18 @@ func TestEveryCodecDelivers(t *testing.T) {
 				}
 			}
 
-			alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "privately"})
+			alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "privately"})
 			if got := bob.expectPriv("privately"); got.Nick != alice.nick {
 				t.Errorf("recipient sees %q, want %q", got.Nick, alice.nick)
 			}
 			alice.expectPriv("privately")
 
-			alice.send(proto.VerbPing, nil)
+			alice.send(proto.Command{Verb: proto.VerbPing})
 			if verb, _ := alice.recv(); verb != proto.VerbPong {
 				t.Errorf("got %s, want %s", verb, proto.VerbPong)
 			}
 
-			alice.send(proto.VerbMsg, proto.In{Data: ""})
+			alice.send(proto.Command{Verb: proto.VerbMsg, Data: ""})
 			alice.expectErr(proto.ErrEmpty)
 		})
 	}
@@ -339,7 +342,7 @@ func TestCodecsMixInOneRoom(t *testing.T) {
 	jsonClient := ta.dialCodec(t, proto.JSON{})
 	packClient := ta.dialCodec(t, proto.MsgPack{})
 
-	jsonClient.send(proto.VerbMsg, proto.In{Data: "everyone hears this"})
+	jsonClient.send(proto.Command{Verb: proto.VerbMsg, Data: "everyone hears this"})
 	first := jsonClient.expectMsg(jsonClient.nick, "everyone hears this")
 	second := packClient.expectMsg(jsonClient.nick, "everyone hears this")
 	if first.ID != second.ID {
@@ -347,13 +350,13 @@ func TestCodecsMixInOneRoom(t *testing.T) {
 	}
 
 	// And back the other way.
-	packClient.send(proto.VerbMsg, proto.In{Data: "so do they"})
+	packClient.send(proto.Command{Verb: proto.VerbMsg, Data: "so do they"})
 	jsonClient.expectMsg(packClient.nick, "so do they")
 	packClient.expectMsg(packClient.nick, "so do they")
 
 	// A private message is encoded in the RECIPIENT's format, not the
 	// sender's.
-	jsonClient.send(proto.VerbPriv, proto.InPriv{Nick: packClient.nick, Data: "just you"})
+	jsonClient.send(proto.Command{Verb: proto.VerbPriv, Nick: packClient.nick, Data: "just you"})
 	if got := packClient.expectPriv("just you"); got.Nick != jsonClient.nick {
 		t.Fatalf("recipient sees %q, want %q", got.Nick, jsonClient.nick)
 	}
@@ -393,7 +396,7 @@ func TestOrderIsConsistentAcrossCodecs(t *testing.T) {
 
 	const n = 20
 	for i := range n {
-		jsonClient.send(proto.VerbMsg, proto.In{Data: fmt.Sprintf("message %d", i)})
+		jsonClient.send(proto.Command{Verb: proto.VerbMsg, Data: fmt.Sprintf("message %d", i)})
 	}
 
 	var jsonIDs, packIDs []uint64

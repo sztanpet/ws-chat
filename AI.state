@@ -86,6 +86,10 @@ _(none yet)_
   interface over bytes, selected by WebSocket subprotocol. MessagePack
   preferred, JSON the default for anything that did not ask. A ring holds
   encoded bytes, so there is one broadcaster per codec.
+- **The verb lives inside the encoded document**, so an inbound frame costs
+  one decode. `proto.Command` is a flat union of every inbound field; one
+  struct per verb would reintroduce the second parse. This left the codecs
+  as nothing but Marshal/Unmarshal — there is no framing code.
 - **The write pump takes batches, not single messages.** `Sub.Recv` fills a
   slice, so one wakeup drains everything pending and can coalesce it into a
   single socket write. This is what makes shared-storage fan-out possible

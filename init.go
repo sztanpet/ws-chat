@@ -227,8 +227,8 @@ func (a *app) lookup(nick string) (*conn, bool) {
 // what a joining client is shown cannot disagree with the order the room
 // saw.
 func (a *app) broadcastMsg(from hook.Identity, data string, at time.Time) (uint64, error) {
-	return a.broadcastWith(proto.VerbMsg,
-		func(id uint64) any {
+	return a.broadcastWith(
+		func(id uint64) proto.Outbound {
 			return wireMsg(hook.Message{ID: id, From: from, Data: data, At: at})
 		},
 		func(id uint64) {
@@ -242,14 +242,14 @@ func (a *app) broadcastMsg(from hook.Identity, data string, at time.Time) (uint6
 // wireMsg is the one place a recorded message becomes a frame, so the
 // backlog and live traffic cannot describe the same message differently.
 func wireMsg(m hook.Message) proto.Msg {
-	return proto.Msg{
+	return proto.NewMsg(proto.Msg{
 		ID:        m.ID,
 		Nick:      m.From.Nick,
 		Data:      m.Data,
 		Timestamp: m.At.UnixMilli(),
 		Roles:     m.From.Roles,
 		Attrs:     m.From.Attrs,
-	}
+	})
 }
 
 // backlog is what a connecting client is replayed.
@@ -281,11 +281,11 @@ func (a *app) backlog(ctx context.Context) []proto.Msg {
 // broadcast encodes the payload once per codec and hands each ring its own
 // copy, under the lock that keeps every client's view of the order the
 // same.
-func (a *app) broadcast(verb string, build func(id uint64) any) (uint64, error) {
-	return a.broadcastWith(verb, build, nil)
+func (a *app) broadcast(build func(id uint64) proto.Outbound) (uint64, error) {
+	return a.broadcastWith(build, nil)
 }
 
-func (a *app) broadcastWith(verb string, build func(id uint64) any, after func(uint64)) (uint64, error) {
+func (a *app) broadcastWith(build func(id uint64) proto.Outbound, after func(uint64)) (uint64, error) {
 	frames := make(map[string][]byte, len(a.bcs))
 
 	a.sendMu.Lock()
@@ -297,7 +297,7 @@ func (a *app) broadcastWith(verb string, build func(id uint64) any, after func(u
 	// Encode everything before delivering anything: a codec that fails must
 	// not leave half the room having seen the message.
 	for _, codec := range proto.Codecs() {
-		frame, err := codec.Encode(verb, payload)
+		frame, err := codec.Encode(payload)
 		if err != nil {
 			return 0, err
 		}

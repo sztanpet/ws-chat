@@ -36,6 +36,14 @@ extension points, and a single-channel WebSocket chat server.
   else's read pump; a recipient whose queue is full is refused (`ERR
   recipientbusy`) rather than waited on. Every socket write is bounded by
   `WriteTimeout` for the same reason.
+- **The verb is a field inside the frame, not a prefix.** One decode per
+  inbound frame instead of a split plus a parse. `proto.Command` is a flat
+  union of every inbound field for the same reason — one struct per verb
+  would put the second parse back.
+- **Outbound payloads carry their own verb**, set by the `New*`
+  constructors, and `Encode` takes a `proto.Outbound` so a verbless frame
+  cannot be built. It would otherwise be a silent bug: a client would
+  simply ignore the frame.
 - **One broadcaster per codec.** A ring holds encoded bytes, so clients on
   different wire formats cannot share one. A message is encoded once per
   codec — O(codecs), not O(members).

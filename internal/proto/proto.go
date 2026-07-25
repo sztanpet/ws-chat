@@ -1,38 +1,47 @@
-// Package proto implements the wire format: one command per frame, in the
-// form
+// Package proto is the wire format: one command per frame, and the frame is
+// a single encoded document with the verb inside it.
 //
-//	VERB {"json":"payload"}
+//	{"verb":"MSG","data":"hello"}
 //
-// An uppercase verb, a single space, and a JSON object. A frame with no
-// payload is the bare verb. There is no batching and no trailing newline —
-// one frame is one command, which is what makes a client's parser three
-// lines long.
+// The verb being a field rather than a prefix is what keeps an inbound
+// frame to ONE decode. A "VERB {payload}" framing has to split the string,
+// read the verb, decide what shape the rest is, and then parse the rest —
+// two passes over the same bytes on every message a client sends. Here the
+// verb and its arguments arrive together and come out of one Unmarshal.
+//
+// That is also why Command is one flat struct covering every inbound verb
+// rather than one struct per verb: a union of a handful of short string
+// fields costs nothing to decode into, and the alternative reintroduces
+// exactly the second parse this design exists to remove.
+//
+// It removes the framing code entirely as a side benefit. Both codecs are
+// now their encoder's Marshal and Unmarshal and nothing else — no
+// splitting, no length prefix, no bare-verb special case.
 package proto
 
-import (
-	"encoding/json"
-	"errors"
-	"fmt"
-)
+import "errors"
 
-// Verbs the server understands from a client, and the ones it sends.
+// Verbs a client sends.
 const (
-	VerbMsg     = "MSG"     // both directions: a chat message
-	VerbPriv    = "PRIVMSG" // both directions: a message to one person
-	VerbReady   = "READY"   // server -> client, once, on connect
-	VerbBacklog = "BACKLOG" // server -> client, once, after READY
-	VerbPing    = "PING"    // client -> server
-	VerbPong    = "PONG"    // server -> client
-	VerbErr     = "ERR"     // server -> client
+	VerbMsg  = "MSG"
+	VerbPriv = "PRIVMSG"
+	VerbPing = "PING"
 
-	// Moderation. The four commands come from a client with the standing
-	// to use them; the server answers all of them with one MOD frame to
-	// the whole channel, so a client needs one handler rather than four.
+	// Moderation. All four are answered with one MOD frame to the whole
+	// channel, so a client needs one handler rather than four.
 	VerbMute   = "MUTE"
 	VerbUnmute = "UNMUTE"
 	VerbBan    = "BAN"
 	VerbUnban  = "UNBAN"
-	VerbMod    = "MOD"
+)
+
+// Verbs the server sends. MSG and PRIVMSG travel in both directions.
+const (
+	VerbReady   = "READY"   // once, on connect
+	VerbBacklog = "BACKLOG" // once, after READY
+	VerbPong    = "PONG"
+	VerbErr     = "ERR"
+	VerbMod     = "MOD"
 )
 
 // Moderation actions, as they appear in a MOD frame.
@@ -46,36 +55,67 @@ const (
 // Error descriptions. These are stable machine-readable codes, not prose:
 // a client should be able to switch on them without parsing English.
 const (
-	ErrProtocol      = "protocol"         // unparseable frame or payload
-	ErrUnknown       = "unknown"          // verb the server does not implement
-	ErrEmpty         = "empty"            // message with no content
-	ErrTooLong       = "toolong"          // message body over the configured limit
-	ErrFraming       = "framing"          // wrong WebSocket message type for the negotiated codec
-	ErrNoSuch        = "nosuchnick"       // private message to nobody
-	ErrBacklog       = "recipientbusy"    // recipient is not draining its queue
-	ErrSelf          = "self"             // private message to yourself
-	ErrThrottled     = "throttled"        // you are sending too fast
-	ErrChanThrottled = "channelthrottled" // the channel as a whole is
+	ErrProtocol = "protocol" // unparseable frame
+	ErrUnknown  = "unknown"  // verb the server does not implement
+	ErrEmpty    = "empty"    // message with no content
+	ErrTooLong  = "toolong"  // message body over the configured limit
+	ErrFraming  = "framing"  // wrong WebSocket message type for the codec
+
+	ErrNoSuch  = "nosuchnick"    // addressed to nobody
+	ErrBacklog = "recipientbusy" // recipient is not draining its queue
+	ErrSelf    = "self"          // private message to yourself
+
+	// Rate limits. Two codes, not one: a client needs to know whether it is
+	// being told to slow down or whether the whole room is busy, because
+	// only one of those is something it can do anything about.
+	ErrThrottled     = "throttled"
+	ErrChanThrottled = "channelthrottled"
 
 	// Moderation.
-	ErrMuted       = "muted"       // you may not speak here at the moment
-	ErrBanned      = "banned"      // you may not be here at all
-	ErrForbidden   = "forbidden"   // that command is not yours to use
-	ErrBadDuration = "badduration" // unparseable duration on a command
+	ErrMuted       = "muted"
+	ErrBanned      = "banned"
+	ErrForbidden   = "forbidden"
+	ErrBadDuration = "badduration"
 )
 
-// ErrMalformed is returned by Split for anything that is not a well-formed
-// frame.
+// ErrMalformed is what a codec returns for a frame it cannot decode.
 var ErrMalformed = errors.New("proto: malformed frame")
 
-// maxVerbLen bounds the verb so a garbage frame cannot make the server
-// allocate or log something enormous.
-const maxVerbLen = 16
+// Command is every field a client may send, in one struct.
+//
+// One struct rather than one per verb, deliberately: it is what lets a
+// frame cost a single Unmarshal. The fields overlap heavily across the
+// verbs anyway — a nick and a body is most of the protocol — and the ones
+// that do not apply are simply absent from the encoded frame.
+type Command struct {
+	Verb string `json:"verb" msgpack:"verb"`
 
-// Msg is a chat message as the server sends it. Every server-originated
-// message carries the channel-scoped id and the server's timestamp, so a
-// client never has to trust its own clock or invent ordering.
+	// Data is the message body, for MSG and PRIVMSG.
+	Data string `json:"data,omitempty" msgpack:"data,omitempty"`
+
+	// Nick is who the command is about: the recipient of a PRIVMSG, the
+	// target of a moderation command.
+	Nick string `json:"nick,omitempty" msgpack:"nick,omitempty"`
+
+	// Duration is a Go duration string ("10m") on a moderation command.
+	// Empty means the action does not expire.
+	Duration string `json:"duration,omitempty" msgpack:"duration,omitempty"`
+
+	// Reason accompanies a moderation command.
+	Reason string `json:"reason,omitempty" msgpack:"reason,omitempty"`
+}
+
+// Outbound is implemented by every frame the server sends.
+//
+// It exists so a payload cannot be encoded without a verb. A frame with an
+// empty verb is one no client can dispatch, and forgetting to set the field
+// would otherwise be a silent bug that shows up only as a client quietly
+// ignoring messages. The New* constructors are how it is set.
+type Outbound interface{ frameVerb() string }
+
+// Msg is a chat message.
 type Msg struct {
+	Verb      string `json:"verb" msgpack:"verb"`
 	ID        uint64 `json:"id" msgpack:"id"`
 	Nick      string `json:"nick" msgpack:"nick"`
 	Data      string `json:"data" msgpack:"data"`
@@ -95,17 +135,17 @@ type Msg struct {
 	Attrs map[string]string `json:"attrs,omitempty" msgpack:"attrs,omitempty"`
 }
 
-// In is a chat message as a client sends it: the body and nothing else.
-// Everything the client might claim about itself is assigned by the server.
-type In struct {
-	Data string `json:"data" msgpack:"data"`
-}
+func (m Msg) frameVerb() string { return m.Verb }
 
-// Priv is a private message as the server sends it. Both parties get one:
-// the recipient's copy names the sender, and the sender's own echo names the
-// recipient and sets Sent, so a client can render its own outgoing messages
-// from the same frame it renders incoming ones.
+// NewMsg is m with its verb set.
+func NewMsg(m Msg) Msg { m.Verb = VerbMsg; return m }
+
+// Priv is a private message. Both parties get one: the recipient's copy
+// names the sender, and the sender's own echo names the recipient and sets
+// Sent, so a client can render its own outgoing messages from the same
+// frame it renders incoming ones.
 type Priv struct {
+	Verb      string `json:"verb" msgpack:"verb"`
 	ID        uint64 `json:"id" msgpack:"id"`
 	Nick      string `json:"nick" msgpack:"nick"`
 	Data      string `json:"data" msgpack:"data"`
@@ -118,12 +158,10 @@ type Priv struct {
 	Attrs map[string]string `json:"attrs,omitempty" msgpack:"attrs,omitempty"`
 }
 
-// InPriv is a private message as a client sends it: who it is for, and the
-// body.
-type InPriv struct {
-	Nick string `json:"nick" msgpack:"nick"`
-	Data string `json:"data" msgpack:"data"`
-}
+func (p Priv) frameVerb() string { return p.Verb }
+
+// NewPriv is p with its verb set.
+func NewPriv(p Priv) Priv { p.Verb = VerbPriv; return p }
 
 // Ready is the first frame the server sends. It tells the client the name
 // it was given, and — more importantly — that it is subscribed: a client
@@ -131,8 +169,14 @@ type InPriv struct {
 // WebSocket handshake completes before the server has finished wiring the
 // connection up.
 type Ready struct {
+	Verb string `json:"verb" msgpack:"verb"`
 	Nick string `json:"nick" msgpack:"nick"`
 }
+
+func (r Ready) frameVerb() string { return r.Verb }
+
+// NewReady is a READY frame.
+func NewReady(nick string) Ready { return Ready{Verb: VerbReady, Nick: nick} }
 
 // Backlog is the recent history of the channel, sent once on connect so a
 // client arrives with context instead of an empty window.
@@ -149,18 +193,15 @@ type Ready struct {
 // better than a gap it cannot detect at all. Ids are monotonic, so the
 // check is a comparison against the last id in the backlog.
 type Backlog struct {
-	Messages []Msg `json:"messages" msgpack:"messages"`
+	Verb     string `json:"verb" msgpack:"verb"`
+	Messages []Msg  `json:"messages" msgpack:"messages"`
 }
 
-// InMod is a moderation command from a client.
-type InMod struct {
-	Nick string `json:"nick" msgpack:"nick"`
+func (b Backlog) frameVerb() string { return b.Verb }
 
-	// Duration is a Go duration string ("10m", "24h"). Empty means the
-	// action does not expire.
-	Duration string `json:"duration,omitempty" msgpack:"duration,omitempty"`
-
-	Reason string `json:"reason,omitempty" msgpack:"reason,omitempty"`
+// NewBacklog is a BACKLOG frame.
+func NewBacklog(messages []Msg) Backlog {
+	return Backlog{Verb: VerbBacklog, Messages: messages}
 }
 
 // Mod is a moderation action as the server announces it to the channel.
@@ -169,6 +210,7 @@ type InMod struct {
 // happens invisibly gets re-litigated in the channel by people guessing at
 // what happened.
 type Mod struct {
+	Verb      string `json:"verb" msgpack:"verb"`
 	ID        uint64 `json:"id" msgpack:"id"`
 	Action    string `json:"action" msgpack:"action"`
 	Nick      string `json:"nick" msgpack:"nick"`
@@ -181,73 +223,30 @@ type Mod struct {
 	Reason string `json:"reason,omitempty" msgpack:"reason,omitempty"`
 }
 
+func (m Mod) frameVerb() string { return m.Verb }
+
+// NewMod is m with its verb set.
+func NewMod(m Mod) Mod { m.Verb = VerbMod; return m }
+
+// Pong answers a PING.
+type Pong struct {
+	Verb string `json:"verb" msgpack:"verb"`
+}
+
+func (p Pong) frameVerb() string { return p.Verb }
+
+// NewPong is a PONG frame.
+func NewPong() Pong { return Pong{Verb: VerbPong} }
+
 // Err is a refusal. Description is one of the codes above.
 type Err struct {
+	Verb        string `json:"verb" msgpack:"verb"`
 	Description string `json:"description" msgpack:"description"`
 }
 
-// Split separates a text frame into its verb and its raw JSON payload. The
-// payload is nil for a bare verb; it is not parsed here, only carried. It
-// is the framing half of the JSON codec.
-func Split(frame []byte) (verb string, payload []byte, err error) {
-	if len(frame) == 0 {
-		return "", nil, fmt.Errorf("%w: empty", ErrMalformed)
-	}
+func (e Err) frameVerb() string { return e.Verb }
 
-	sp := -1
-	for i, b := range frame {
-		if b == ' ' {
-			sp = i
-			break
-		}
-	}
-
-	if sp < 0 {
-		verb = string(frame)
-	} else {
-		verb = string(frame[:sp])
-		payload = frame[sp+1:]
-	}
-
-	if !validVerb(verb) {
-		return "", nil, fmt.Errorf("%w: bad verb", ErrMalformed)
-	}
-	if sp >= 0 && len(payload) == 0 {
-		return "", nil, fmt.Errorf("%w: trailing space with no payload", ErrMalformed)
-	}
-	return verb, payload, nil
-}
-
-func validVerb(v string) bool {
-	if v == "" || len(v) > maxVerbLen {
-		return false
-	}
-	for _, c := range []byte(v) {
-		if c < 'A' || c > 'Z' {
-			return false
-		}
-	}
-	return true
-}
-
-// Format builds a text frame. A nil payload produces the bare verb. It is
-// the framing half of the JSON codec.
-func Format(verb string, payload any) ([]byte, error) {
-	if !validVerb(verb) {
-		return nil, fmt.Errorf("%w: bad verb %q", ErrMalformed, verb)
-	}
-	if payload == nil {
-		return []byte(verb), nil
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-
-	frame := make([]byte, 0, len(verb)+1+len(body))
-	frame = append(frame, verb...)
-	frame = append(frame, ' ')
-	frame = append(frame, body...)
-	return frame, nil
+// NewErr is an ERR frame carrying one of the codes above.
+func NewErr(description string) Err {
+	return Err{Verb: VerbErr, Description: description}
 }
