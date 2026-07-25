@@ -10,8 +10,13 @@ extension points, and a single-channel WebSocket chat server.
   cannot drift. Commit `fca8ba8`.
 - `internal/proto` — verbs, payload structs, and the `Codec` interface with
   JSON and MessagePack implementations. Commits `42b526b`, `f673e75`.
-- `internal/hook` — `Authenticator`, `Directory`, `Filter`, `Recorder`.
-  Commit `49b1a1c`.
+- `internal/hook` — `Authenticator`, `Directory`, `Filter`, `Limiter`,
+  `Recorder`, `Authorizer`. Commits `49b1a1c`, `18abbf3`.
+- `internal/ratelimit` — token bucket. Commit `fecb04e`.
+- `internal/filter` — the message filter chain, with UTF-8 and zalgo
+  built in. Commit `cda8cf7`.
+- `internal/moderation` — mute and ban state with lazy expiry. Commit
+  `bdde971`.
 - `main` — server, connection handling, private messages, hook wiring.
   Commit `f1ee0c2`.
 
@@ -61,6 +66,28 @@ extension points, and a single-channel WebSocket chat server.
   explicitly; a rate limiter tested against real time fails on a loaded
   machine.
 
+- **The backlog is written under the same lock that orders the fan-out**,
+  so what a joining client is shown cannot disagree with what the room
+  saw. There is a test for exactly that.
+- **`BACKLOG` is always sent when enabled, even when empty.** A
+  conditional frame would make "the room is new" and "the backlog is off"
+  look the same to a client and turn every client's first-frame handling
+  into a guess.
+- **Sender roles/attrs ride on every message** rather than being sent once
+  with clients keeping a table. Costs bytes; buys stateless rendering and
+  no ordering problem when roles change mid-conversation.
+- **Moderation is announced to everyone, including its target.** Invisible
+  moderation gets re-litigated in the room by people guessing.
+- **A banned client usually does not see its own MOD frame.** Its write
+  pump is racing its socket being closed, so the close frame carries the
+  reason. Waiting for the write pump would let a slow client delay its own
+  ban.
+- **`MOD` frames are not chat and do not enter the backlog.**
+- **Mutes are enforced on both message paths.** Somebody silenced in the
+  room does not get to carry on in private.
+- **Bans are checked before the upgrade**, so a banned client gets an HTTP
+  403 rather than a socket that opens and shuts.
+
 ## Gotchas
 
 1. **`net/http`'s `Shutdown` ignores hijacked connections**, and every
@@ -75,12 +102,28 @@ extension points, and a single-channel WebSocket chat server.
    parked in.
 4. A **test that dials and immediately sends** is racing the server's
    setup. Wait for `READY`; the harness does.
+5. **A test client that connects after any message now gets a `BACKLOG`
+   frame**, which the harness consumes. Tests that dial into a server with
+   history and then read a frame will see the backlog first if they do
+   their own dialling.
+6. **Moderation can only name somebody who is connected.** `lookup` is by
+   nick over the connection directory, so unbanning a banned user fails
+   with `nosuchnick` — they were disconnected by the ban. There is a test
+   pinning that down as known behaviour rather than a surprise.
 
 ## Pending
 
 - **Channels.** The single implicit channel becomes a lookup from channel
   name to its own set of per-codec rings. `JOIN`, `PART`, `NAMES`, and a
-  `channel` field on every server-originated message.
+  `channel` field on every server-originated message. The backlog, the
+  channel rate limiter and the moderation store all become per channel.
+- **Resolving a nick to a key without a connection.** Moderation, and
+  especially *un*-moderation, needs to name somebody who is not connected.
+  That wants a `Directory` lookup by nick, which the interface does not
+  have yet.
+- **Moderation state is memory-only.** It is recorded through `Recorder`
+  but never loaded back, so a restart forgets every mute and ban. Loading
+  wants a hook method that reads them at startup.
 - **Per-identity rate limits.** Today two sockets from one person get two
   buckets. Needs a registry keyed by `Identity.ID`, with an eviction
   policy, and it only means anything once logins exist.

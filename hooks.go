@@ -96,14 +96,24 @@ func (a *app) channelLimiter(ctx context.Context, channel string) *ratelimit.Buc
 	return ratelimit.New(limits.Burst, limits.Interval)
 }
 
-// allow asks the filter whether a message may be sent. It runs on the
-// sender's read pump, so a filter that blocks holds up one client — its
-// own.
+// allow runs the filter chain: the built-in text filters and then whatever
+// the deployment installed. It runs on the sender's read pump, so a filter
+// that blocks holds up one client — its own.
 func (a *app) allow(ctx context.Context, from hook.Identity, data string) (bool, string) {
-	if a.hooks.Filter == nil {
+	if a.filters == nil {
 		return true, ""
 	}
-	return a.hooks.Filter.Allow(ctx, from, data)
+	return a.filters.Allow(ctx, from, data)
+}
+
+// canModerate reports whether this identity may use the moderation
+// commands. The default is DENY: a server that has not been told who its
+// moderators are does not have any.
+func (a *app) canModerate(ctx context.Context, id hook.Identity) bool {
+	if a.hooks.Authz == nil {
+		return false
+	}
+	return a.hooks.Authz.CanModerate(ctx, id)
 }
 
 // record queues a persistence job. It never blocks and never fails the
@@ -129,6 +139,10 @@ func (a *app) recordMessage(m hook.Message) {
 
 func (a *app) recordPrivate(p hook.Private) {
 	a.record(func(ctx context.Context) error { return a.hooks.Recorder.Private(ctx, p) })
+}
+
+func (a *app) recordModeration(m hook.Moderation) {
+	a.record(func(ctx context.Context) error { return a.hooks.Recorder.Moderation(ctx, m) })
 }
 
 // recordWorker drains the persistence queue until the server shuts down.

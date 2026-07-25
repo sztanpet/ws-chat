@@ -102,18 +102,33 @@ different codecs cannot disagree about what happened first. Private
 messages are encoded with the **recipient's** codec, since the two ends
 negotiate separately.
 
-Implemented today — client → server: `MSG`, `PRIVMSG`, `PING`. Server →
-client: `READY`, `MSG`, `PRIVMSG`, `PONG`, `ERR`.
+Implemented today — client → server: `MSG`, `PRIVMSG`, `PING`, `MUTE`,
+`UNMUTE`, `BAN`, `UNBAN`. Server → client: `READY`, `BACKLOG`, `MSG`,
+`PRIVMSG`, `MOD`, `PONG`, `ERR`.
 
-*(Not built yet)*: `JOIN`, `PART`, `NAMES`, and the moderation verbs
-`MUTE`, `UNMUTE`, `BAN`, `UNBAN` with their echoes.
+*(Not built yet)*: `JOIN`, `PART`, `NAMES`.
 
-`READY` is the first frame the server sends and carries the connection's
-assigned nick. It exists because the WebSocket handshake completes before
-the server has subscribed the connection: a client that talks before
-`READY` can miss its own message. Every server-originated message carries
-`nick`, `timestamp` (unix millis) and a server-assigned monotonic `id`
-— and, once channels exist, `channel`.
+A connection always begins `READY`, then `BACKLOG` (unless the backlog is
+switched off), then live traffic. `READY` carries the assigned nick and
+exists because the WebSocket handshake completes before the server has
+subscribed the connection — a client that talks before `READY` can miss
+its own message. `BACKLOG` is one frame containing an array of the recent
+history, not a burst of `MSG` frames, so a client can tell "here is what
+you missed" from "this just happened" without a per-message flag.
+
+Every server-originated message carries `nick`, `timestamp` (unix millis)
+and a server-assigned monotonic `id` — and, once channels exist,
+`channel`. `MSG` and `PRIVMSG` also carry the sender's `roles` and
+`attrs`, whatever the `Directory` hook attached to them, repeated on
+every message so a client can render any message on its own with no state
+and no ordering problem when somebody's roles change mid-conversation.
+Both are omitted when empty, so a server with no directory pays nothing.
+
+The four moderation commands all produce one `MOD` frame to the whole
+channel, so a client needs one handler rather than four. A banned client
+is disconnected and will usually *not* see the `MOD` frame — its write
+pump is racing its own socket closing — which is why the close frame
+carries a reason of its own.
 
 The id, the timestamp and the nick are the server's to assign. A client
 that puts a `nick` in its payload is ignored.
@@ -145,20 +160,78 @@ persisted.
   their login.
 - **`Filter`** decides whether a message may be sent. On the hot path, in
   front of every message, so it must be a lookup and not a round trip.
-  Its refusal reason becomes the `ERR` code verbatim.
+  Its refusal reason becomes the `ERR` code verbatim. It runs *last*, in a
+  chain behind the built-in text filters in `internal/filter` — see below.
 - **`Limiter`** supplies rate limits — `ClientLimits` per connection,
   `ChannelLimits` per channel. **Policy only**: the enforcing is the
   server's, on a token bucket in `internal/ratelimit`, so an
   implementation is asked once and never sees an individual message.
   Defaults are unlimited, and so is any `Limits` with a non-positive
   field — "no limit" and "a limit of nothing" must not be one typo apart.
-- **`Recorder`** writes messages down, public and private. It runs on a
-  background worker **after** delivery, off a bounded queue, and drops
-  with a counter when that queue is full. A store having a bad day costs
-  history, never delivery.
+- **`Recorder`** writes things down: public messages, private messages and
+  moderation actions. It runs on a background worker **after** the thing
+  has happened, off a bounded queue, and drops with a counter when that
+  queue is full. A store having a bad day costs history, never delivery.
+- **`Authorizer`** decides who may use the moderation commands. **Its
+  default is deny**, unlike every other hook. The rest default permissive
+  because the cost of being wrong is a server that does less than somebody
+  wanted; here it is anybody in the room being able to ban anybody else. A
+  server with no `Authorizer` has no moderators, which is correct for a
+  server that has not been told who they are. Roles are opaque to the
+  core, so this is the only thing that can say whether `"moderator"` in an
+  `Identity` means anything.
 
 `hooks.go` is the only place any of them is called, so the rules about
 which may block live in one file.
+
+### Message filters
+
+`internal/filter` holds the filters the server runs in front of every
+message and the `Chain` that runs them. A filter is a `hook.Filter`, so
+a built-in and a deployment's own are the same kind of thing; what makes
+these built in is that the server installs them by default, because they
+are protocol hygiene rather than policy.
+
+The chain is text validity first, then policy — a message that is not
+valid text must never reach a filter written assuming it was:
+
+1. **`UTF8`** refuses invalid UTF-8. This is *not* redundant with the
+   WebSocket layer, which is the tempting assumption. A JSON client sends
+   TEXT frames, which coder/websocket validates, and `encoding/json` would
+   anyway replace bad bytes with U+FFFD. But a **MessagePack client sends
+   BINARY frames**, nothing validates them, and a msgpack string is just
+   bytes — so invalid UTF-8 arrives intact and would be fanned out to
+   every other client, including the JSON ones, whose frames would then be
+   invalid on the wire.
+2. **`Zalgo`** refuses more than `MaxDiacritics` (default 5) *consecutive*
+   combining marks. Consecutive, because that is what stacking is —
+   counting marks across the whole message would refuse a long sentence in
+   any script that uses them. Five is well clear of Devanagari, Thai,
+   Hebrew with niqqud and Vietnamese, which stack marks legitimately.
+3. Then the `Filter` hook, if one is installed.
+
+An empty chain is nil, so a server with everything switched off skips the
+call rather than looping over nothing.
+
+### Moderation
+
+`internal/moderation` is a `Store` of who is muted and who is banned, with
+lazy expiry. It is state only: it does not decide who may moderate (that
+is `Authorizer`), does not persist (that is `Recorder`), and does not know
+what a connection is.
+
+Mutes are checked on both message paths — a mute is a mute, and somebody
+silenced in the room does not get to carry on in private. Bans are checked
+**before the upgrade**, so a banned client gets an HTTP 403 rather than a
+socket that opens and shuts.
+
+State is filed under `Identity.Key()`: the stable id when there is one,
+the display name when there is not. The anonymous case is weak on purpose
+rather than by accident — a reconnect under a new name escapes a mute, and
+there is nothing better available, since an address is shared by everyone
+behind a NAT. Moderation of anonymous users is a speed bump; that is an
+argument for requiring a login to speak, which is a deployment's decision
+to make through `Authenticator`.
 
 ### Database *(not built yet)*
 

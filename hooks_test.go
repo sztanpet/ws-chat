@@ -59,6 +59,7 @@ func (f fakeFilter) Allow(ctx context.Context, from hook.Identity, data string) 
 type fakeRecorder struct {
 	msgs  chan hook.Message
 	privs chan hook.Private
+	mods  chan hook.Moderation
 	fail  error
 }
 
@@ -66,7 +67,13 @@ func newFakeRecorder() *fakeRecorder {
 	return &fakeRecorder{
 		msgs:  make(chan hook.Message, 16),
 		privs: make(chan hook.Private, 16),
+		mods:  make(chan hook.Moderation, 16),
 	}
+}
+
+func (f *fakeRecorder) Moderation(ctx context.Context, m hook.Moderation) error {
+	f.mods <- m
+	return f.fail
 }
 
 func (f *fakeRecorder) Message(ctx context.Context, m hook.Message) error {
@@ -101,6 +108,16 @@ func (ta *testApp) dialWith(t *testing.T, query string) (*client, error) {
 	var ready proto.Ready
 	mustUnmarshal(t, c, payload, &ready)
 	c.nick = ready.Nick
+
+	if ta.cfg.Backlog > 0 {
+		verb, payload := c.recv()
+		if verb != proto.VerbBacklog {
+			t.Fatalf("second frame was %s, want %s", verb, proto.VerbBacklog)
+		}
+		var backlog proto.Backlog
+		mustUnmarshal(t, c, payload, &backlog)
+		c.backlog = backlog.Messages
+	}
 	return c, nil
 }
 

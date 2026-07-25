@@ -61,10 +61,11 @@ func newTestAppWith(t *testing.T, hooks hook.Hooks, tweak ...func(*config.Config
 // speaks whichever codec it negotiated, so the same assertions work over
 // either wire format.
 type client struct {
-	t     *testing.T
-	ws    *websocket.Conn
-	codec proto.Codec
-	nick  string // as assigned by the server, from the READY frame
+	t       *testing.T
+	ws      *websocket.Conn
+	codec   proto.Codec
+	nick    string      // as assigned by the server, from the READY frame
+	backlog []proto.Msg // what it was replayed on connect
 }
 
 // dial connects with the default (JSON) codec.
@@ -111,6 +112,20 @@ func (ta *testApp) dialCodec(t *testing.T, codec proto.Codec) *client {
 		t.Fatal("READY carried no nick")
 	}
 	c.nick = ready.Nick
+
+	// Then the backlog, unless it is switched off. Always exactly one
+	// frame, so the harness never has to guess.
+	if ta.cfg.Backlog > 0 {
+		verb, payload := c.recv()
+		if verb != proto.VerbBacklog {
+			t.Fatalf("second frame was %s, want %s", verb, proto.VerbBacklog)
+		}
+		var backlog proto.Backlog
+		if err := c.codec.Unmarshal(payload, &backlog); err != nil {
+			t.Fatalf("bad BACKLOG payload %q: %v", payload, err)
+		}
+		c.backlog = backlog.Messages
+	}
 	return c
 }
 
@@ -173,7 +188,7 @@ func (c *client) expectMsg(nick, data string) proto.Msg {
 	if err := c.codec.Unmarshal(payload, &msg); err != nil {
 		c.t.Fatalf("bad MSG payload %q: %v", payload, err)
 	}
-	if msg.Data != data {
+	if data != "" && msg.Data != data {
 		c.t.Fatalf("data = %q, want %q", msg.Data, data)
 	}
 	if nick != "" && msg.Nick != nick {

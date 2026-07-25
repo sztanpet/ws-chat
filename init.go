@@ -6,12 +6,15 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 
 	"github.com/sztanpet/ws-chat/internal/broadcast"
 	"github.com/sztanpet/ws-chat/internal/config"
+	"github.com/sztanpet/ws-chat/internal/filter"
 	"github.com/sztanpet/ws-chat/internal/hook"
+	"github.com/sztanpet/ws-chat/internal/moderation"
 	"github.com/sztanpet/ws-chat/internal/proto"
 	"github.com/sztanpet/ws-chat/internal/ratelimit"
 )
@@ -42,6 +45,20 @@ type app struct {
 	// connection joins. Channels replace it with a lookup from channel name
 	// to its own set.
 	bcs map[string]broadcast.Broadcaster
+
+	// filters is the chain run in front of every message: the built-in
+	// text-hygiene filters, then whatever the deployment installed. Built
+	// once, since none of it changes at runtime.
+	filters hook.Filter
+
+	// mod is who is muted and who is banned. One store for now; per
+	// channel once channels exist.
+	mod *moderation.Store
+
+	// history is the last cfg.Backlog messages, replayed to a client when
+	// it connects. Guarded by sendMu, the same lock that orders the
+	// broadcast, so the history cannot disagree with what was delivered.
+	history []proto.Msg
 
 	// chanLimit is the bucket every member of the channel shares. Nil means
 	// unlimited, which is the default. One per channel once channels exist.
@@ -108,6 +125,15 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 		a.bcs[codec.Name()] = broadcast.NewRing(cfg.Capacity)
 	}
 	a.chanLimit = a.channelLimiter(context.Background(), mainChannel)
+	a.mod = moderation.New()
+
+	// Text hygiene first, then policy. A message that is not valid text
+	// should never reach a filter that was written assuming it was.
+	a.filters = filter.Chain(
+		filter.UTF8{},
+		filter.Zalgo{Max: cfg.MaxDiacritics},
+		hooks.Filter,
+	)
 
 	a.ctx, a.stopConn = context.WithCancel(context.Background())
 	if hooks.Recorder != nil {
@@ -164,10 +190,48 @@ func (a *app) lookup(nick string) (*conn, bool) {
 	return c, ok
 }
 
+// broadcastMsg is broadcast for a chat message, which additionally goes
+// into the history a connecting client is replayed.
+//
+// The history is appended under the same lock that orders the fan-out, so
+// what a joining client is shown cannot disagree with what the room saw.
+func (a *app) broadcastMsg(build func(id uint64) proto.Msg) (uint64, error) {
+	return a.broadcastWith(proto.VerbMsg,
+		func(id uint64) any { return build(id) },
+		func(payload any) { a.remember(payload.(proto.Msg)) },
+	)
+}
+
+// remember appends to the replay history. The caller holds sendMu.
+func (a *app) remember(msg proto.Msg) {
+	if a.cfg.Backlog < 1 {
+		return
+	}
+	if len(a.history) == a.cfg.Backlog {
+		copy(a.history, a.history[1:])
+		a.history = a.history[:len(a.history)-1]
+	}
+	a.history = append(a.history, msg)
+}
+
+// backlog copies the replay history.
+func (a *app) backlog() []proto.Msg {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+	if len(a.history) == 0 {
+		return nil
+	}
+	return slices.Clone(a.history)
+}
+
 // broadcast encodes the payload once per codec and hands each ring its own
 // copy, under the lock that keeps every client's view of the order the
 // same.
 func (a *app) broadcast(verb string, build func(id uint64) any) (uint64, error) {
+	return a.broadcastWith(verb, build, nil)
+}
+
+func (a *app) broadcastWith(verb string, build func(id uint64) any, after func(any)) (uint64, error) {
 	frames := make(map[string][]byte, len(a.bcs))
 
 	a.sendMu.Lock()
@@ -184,6 +248,9 @@ func (a *app) broadcast(verb string, build func(id uint64) any) (uint64, error) 
 			return 0, err
 		}
 		frames[codec.Name()] = frame
+	}
+	if after != nil {
+		after(payload)
 	}
 	for name, frame := range frames {
 		a.bcs[name].Broadcast(frame)

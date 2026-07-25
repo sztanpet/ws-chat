@@ -82,6 +82,13 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 	// The wire format is negotiated, not configured: a browser wants JSON
 	// it can read in devtools, a bot moving traffic wants MessagePack, and
 	// the server does not have to care which.
+	// Barred before the handshake: a banned client gets an HTTP status it
+	// can read rather than a socket that opens and shuts.
+	if a.banned(id) {
+		refuseBanned(w)
+		return
+	}
+
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: a.cfg.AllowedOrigins,
 		Subprotocols:   proto.Names(),
@@ -144,6 +151,10 @@ func (c *conn) serve(parent context.Context) {
 		return
 	}
 
+	// Then what it missed. Sent after READY and before anything live, so a
+	// client can render the history and then start appending.
+	c.sendBacklog(ctx)
+
 	var pumps sync.WaitGroup
 	pumps.Add(2)
 	go func() { defer pumps.Done(); c.writePump(ctx) }()
@@ -165,6 +176,21 @@ func (c *conn) serve(parent context.Context) {
 
 	c.ws.CloseNow()
 	c.log.Debug("disconnected", "err", rerr)
+}
+
+// sendBacklog replays the recent history to a client that has just
+// arrived.
+//
+// The frame is sent even when the history is empty, so the sequence a
+// client sees is always READY, BACKLOG, then live traffic. A conditional
+// frame would make "the room is new" and "the backlog is disabled" look
+// the same to a client, and would make every client's first-frame handling
+// a guess.
+func (c *conn) sendBacklog(ctx context.Context) {
+	if c.app.cfg.Backlog < 1 {
+		return // disabled: no frame at all, which is the one other case
+	}
+	c.sendVerb(ctx, proto.VerbBacklog, proto.Backlog{Messages: c.app.backlog()})
 }
 
 // privPump writes the messages addressed to this client alone.
@@ -256,6 +282,8 @@ func (c *conn) readPump(ctx context.Context) error {
 			c.handleMsg(ctx, payload)
 		case proto.VerbPriv:
 			c.handlePriv(ctx, payload)
+		case proto.VerbMute, proto.VerbUnmute, proto.VerbBan, proto.VerbUnban:
+			c.handleMod(ctx, verb, payload)
 		case proto.VerbPing:
 			c.sendVerb(ctx, proto.VerbPong, nil)
 		default:
@@ -294,6 +322,10 @@ func (c *conn) handleMsg(ctx context.Context, payload []byte) {
 		c.reply(ctx, proto.ErrChanThrottled)
 		return
 	}
+	if muted, _ := c.app.mod.Muted(c.id.Key()); muted {
+		c.reply(ctx, proto.ErrMuted)
+		return
+	}
 
 	if ok, reason := c.app.allow(ctx, c.id, in.Data); !ok {
 		c.reply(ctx, reason)
@@ -303,12 +335,14 @@ func (c *conn) handleMsg(ctx context.Context, payload []byte) {
 	// The id and the timestamp are the server's to assign: a client's clock
 	// is not evidence, and ordering has to come from one place.
 	at := time.Now()
-	id, err := c.app.broadcast(proto.VerbMsg, func(id uint64) any {
+	id, err := c.app.broadcastMsg(func(id uint64) proto.Msg {
 		return proto.Msg{
 			ID:        id,
 			Nick:      c.nick(),
 			Data:      in.Data,
 			Timestamp: at.UnixMilli(),
+			Roles:     c.id.Roles,
+			Attrs:     c.id.Attrs,
 		}
 	})
 	if err != nil {
@@ -348,6 +382,12 @@ func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 		c.reply(ctx, proto.ErrThrottled)
 		return
 	}
+	// A mute is a mute: somebody silenced in the room does not get to
+	// carry on in private.
+	if muted, _ := c.app.mod.Muted(c.id.Key()); muted {
+		c.reply(ctx, proto.ErrMuted)
+		return
+	}
 
 	if ok, reason := c.app.allow(ctx, c.id, in.Data); !ok {
 		c.reply(ctx, reason)
@@ -372,6 +412,7 @@ func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 	// constraint on channels, noted in CLAUDE.md.
 	frame, err := target.codec.Encode(proto.VerbPriv, proto.Priv{
 		ID: id, Nick: c.nick(), Data: in.Data, Timestamp: now,
+		Roles: c.id.Roles, Attrs: c.id.Attrs,
 	})
 	if err != nil {
 		c.log.Error("cannot encode private message", "err", err)
@@ -390,6 +431,7 @@ func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 	// halves of a conversation from the same frame type.
 	echo, err := c.codec.Encode(proto.VerbPriv, proto.Priv{
 		ID: id, Nick: in.Nick, Data: in.Data, Timestamp: now, Sent: true,
+		Roles: target.id.Roles, Attrs: target.id.Attrs,
 	})
 	if err != nil {
 		c.log.Error("cannot format private message echo", "err", err)

@@ -61,6 +61,15 @@ type Config struct {
 	// MaxMessage is the longest chat message body accepted, in bytes.
 	MaxMessage int
 
+	// Backlog is how many recent messages a connecting client is sent, so
+	// it arrives with context instead of an empty window. Zero disables it.
+	Backlog int
+
+	// MaxDiacritics is how many combining marks may be stacked on one
+	// character before a message is refused as zalgo. Non-positive disables
+	// the filter.
+	MaxDiacritics int
+
 	// PrivBuffer is how many private messages may be queued for one client
 	// before further ones are refused. It is deliberately small: private
 	// messages are rare, and a client that is not draining them is gone.
@@ -82,15 +91,17 @@ type Config struct {
 // Default returns the configuration used when nothing overrides it.
 func Default() Config {
 	return Config{
-		Addr:         ":8080",
-		Capacity:     256,
-		WriteBatch:   16,
-		MaxFrameSize: 32 << 10,
-		MaxMessage:   512,
-		PrivBuffer:   32,
-		WriteTimeout: Duration(10 * time.Second),
-		IdleTimeout:  Duration(90 * time.Second),
-		LogLevel:     "info",
+		Addr:          ":8080",
+		Capacity:      256,
+		WriteBatch:    16,
+		MaxFrameSize:  32 << 10,
+		MaxMessage:    512,
+		Backlog:       50,
+		MaxDiacritics: 5,
+		PrivBuffer:    32,
+		WriteTimeout:  Duration(10 * time.Second),
+		IdleTimeout:   Duration(90 * time.Second),
+		LogLevel:      "info",
 	}
 }
 
@@ -135,6 +146,8 @@ func (c Config) check() error {
 		return errors.New("MaxFrameSize must be at least 1")
 	case c.MaxMessage < 1:
 		return errors.New("MaxMessage must be at least 1")
+	case c.Backlog < 0:
+		return errors.New("Backlog must not be negative")
 	case c.PrivBuffer < 1:
 		return errors.New("PrivBuffer must be at least 1")
 	case c.WriteTimeout <= 0:

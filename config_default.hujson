@@ -28,6 +28,15 @@
 	// The longest chat message body accepted, in bytes.
 	// "MaxMessage": 512,
 
+	// How many recent messages a connecting client is sent, so it arrives
+	// with context instead of an empty window. 0 disables the backlog.
+	// "Backlog": 50,
+
+	// How many combining marks may be stacked on one character before a
+	// message is refused as zalgo. 0 disables the filter. Five is well
+	// clear of scripts that stack marks legitimately.
+	// "MaxDiacritics": 5,
+
 	// How many private messages may be queued for one client before
 	// further ones are refused with ERR recipientbusy.
 	// "PrivBuffer": 32,
