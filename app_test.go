@@ -67,6 +67,7 @@ type client struct {
 	ws      *websocket.Conn
 	codec   proto.Codec
 	nick    string      // as assigned by the server, from the READY frame
+	joined  []string    // channels it was put into on connect
 	backlog []proto.Msg // what it was replayed on connect
 }
 
@@ -112,19 +113,38 @@ func (ta *testApp) dialCodec(t *testing.T, codec proto.Codec) *client {
 		t.Fatal("READY carried no nick")
 	}
 	c.nick = ready.Nick
-
-	// Then the backlog, unless it is switched off. Always exactly one
-	// frame, so the harness never has to guess.
-	if ta.cfg.Backlog > 0 {
-		verb, payload := c.recv()
-		if verb != proto.VerbBacklog {
-			t.Fatalf("second frame was %s, want %s", verb, proto.VerbBacklog)
-		}
-		var backlog proto.Backlog
-		c.decode(payload, &backlog)
-		c.backlog = backlog.Messages
-	}
+	c.settle(ta)
 	return c
+}
+
+// settle consumes what a connection is sent on arrival: a JOIN and a
+// BACKLOG for each channel it was put into.
+//
+// It stops at the first frame that is neither, which is the point — a test
+// that dials and then reads gets live traffic, not setup.
+func (c *client) settle(ta *testApp) {
+	c.t.Helper()
+
+	joins := len(ta.app.autojoin(context.Background(), hook.Identity{}))
+	if ta.cfg.Backlog > 0 {
+		joins *= 2 // a BACKLOG follows each JOIN
+	}
+
+	for range joins {
+		verb, payload := c.recv()
+		switch verb {
+		case proto.VerbJoin:
+			var join proto.Join
+			c.decode(payload, &join)
+			c.joined = append(c.joined, join.Channel)
+		case proto.VerbBacklog:
+			var backlog proto.Backlog
+			c.decode(payload, &backlog)
+			c.backlog = append(c.backlog, backlog.Messages...)
+		default:
+			c.t.Fatalf("unexpected %s frame during connect", verb)
+		}
+	}
 }
 
 // msgType is the WebSocket message type this client's codec uses.
@@ -207,10 +227,26 @@ func (c *client) decode(frame []byte, v any) {
 	}
 }
 
+// nextInteresting reads until it finds a frame that is not presence.
+//
+// Presence is noise for a test that is about something else: every client
+// already in a room sees a JOIN when the next one dials, and a PART when
+// anybody leaves. Skipping it here rather than in recv keeps the presence
+// tests honest — they use recv and see everything.
+func (c *client) nextInteresting() (verb string, payload []byte) {
+	c.t.Helper()
+	for {
+		verb, payload = c.recv()
+		if verb != proto.VerbJoin && verb != proto.VerbPart {
+			return verb, payload
+		}
+	}
+}
+
 // expectMsg reads one frame and requires it to be a MSG with this body.
 func (c *client) expectMsg(nick, data string) proto.Msg {
 	c.t.Helper()
-	verb, payload := c.recv()
+	verb, payload := c.nextInteresting()
 	if verb != proto.VerbMsg {
 		c.t.Fatalf("got %s, want %s", verb, proto.VerbMsg)
 	}
@@ -228,7 +264,7 @@ func (c *client) expectMsg(nick, data string) proto.Msg {
 // expectPriv reads one frame and requires it to be a PRIVMSG with this body.
 func (c *client) expectPriv(data string) proto.Priv {
 	c.t.Helper()
-	verb, payload := c.recv()
+	verb, payload := c.nextInteresting()
 	if verb != proto.VerbPriv {
 		c.t.Fatalf("got %s %s, want %s", verb, payload, proto.VerbPriv)
 	}
@@ -254,7 +290,7 @@ func expectAll(clients []*client, nick, data string) {
 // expectErr reads one frame and requires it to be an ERR with this code.
 func (c *client) expectErr(description string) {
 	c.t.Helper()
-	verb, payload := c.recv()
+	verb, payload := c.nextInteresting()
 	if verb != proto.VerbErr {
 		c.t.Fatalf("got %s %s, want %s %s", verb, payload, proto.VerbErr, description)
 	}

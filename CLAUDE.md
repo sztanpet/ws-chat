@@ -62,15 +62,37 @@ shared buffer, each subscriber reading at its own position, so a
 broadcast is O(1) in the member count and never walks the subscribers.
 See `state/broadcast.md` for the measurements behind that choice.
 
-There is currently **one broadcaster**, a single implicit channel every
-connection joins. *(Not built yet)* Channels replace it with a lookup
-from channel name to its own `Ring`; nothing in the connection handling
-should need to change.
+### Channels
 
-A user has **one connection and many channel memberships**, not one
-connection per channel. The `map[nick]*conn` directory in `init.go` is
-what `PRIVMSG` is addressed through, and it is separate from any
-channel's member set for that reason.
+A `channel` (`channel.go`) is a fan-out, a rate limit and a member list.
+The fan-out is one `Ring` **per codec**, since a ring holds encoded bytes.
+
+A user has **one connection and many memberships**, not one connection
+per channel. There is a **write pump per membership** — `Sub.Recv` blocks
+and cannot be selected on, and the alternative (one merge channel in
+front of the socket) puts a channel hop back in front of every broadcast
+message, which is what `internal/broadcast` exists to avoid. So a
+connection in five channels runs five pumps and one read pump and one
+private pump; `coder/websocket` serializes their writes.
+
+The `map[nick]*conn` directory in `init.go` is what `PRIVMSG` is
+addressed through, separate from any channel's member set for that
+reason.
+
+Channels are **created on demand** and **reclaimed when empty**. Empty is
+free to reclaim: the ring holds frames for subscribers that no longer
+exist, and the backlog lives in the `History` hook, so there is nothing
+in an empty channel anybody can observe. `MaxChannels` is what stops a
+client inventing them until the server runs out of memory; a deployment
+that cares which names exist refuses the rest in `CanJoin`.
+
+**The order on joining is deterministic, and the code depends on it.**
+Subscribe, send the backlog directly, broadcast the `JOIN`, *then* start
+the pump. A client therefore sees `BACKLOG`, its own `JOIN`, then live
+traffic. Starting the pump any earlier makes the first two race, which it
+did. Parting is the mirror: the parting client is told **directly**
+before its subscription ends, because ending it discards what it had not
+read — its own `PART` would be the most likely message to lose.
 
 ### Wire protocol
 
@@ -124,11 +146,15 @@ different codecs cannot disagree about what happened first. Private
 messages are encoded with the **recipient's** codec, since the two ends
 negotiate separately.
 
-Implemented today — client → server: `MSG`, `PRIVMSG`, `PING`, `MUTE`,
-`UNMUTE`, `BAN`, `UNBAN`. Server → client: `READY`, `BACKLOG`, `MSG`,
-`PRIVMSG`, `MOD`, `PONG`, `ERR`.
+Client → server: `MSG`, `PRIVMSG`, `PING`, `JOIN`, `PART`, `NAMES`,
+`MUTE`, `UNMUTE`, `BAN`, `UNBAN`. Server → client: `READY`, `BACKLOG`,
+`MSG`, `PRIVMSG`, `JOIN`, `PART`, `NAMES`, `MOD`, `PONG`, `ERR`.
 
-*(Not built yet)*: `JOIN`, `PART`, `NAMES`.
+`MSG` names its channel; an empty channel means the configured default,
+so a client that only ever uses one room does not have to name it.
+Speaking into a room you are not in is refused with `ERR notjoined`
+rather than silently joining you — a client that thinks it is somewhere
+it is not should find out.
 
 A connection always begins `READY`, then `BACKLOG` (unless the backlog is
 switched off), then live traffic. `READY` carries the assigned nick and
@@ -206,6 +232,13 @@ persisted.
   account id, a payment tier, an organisation out of `Attrs` — since only
   it knows what the auth layer attached. The core compares keys for
   equality and nothing else.
+- **`Channels`** decides where a connection starts and where it may go.
+  `Autojoin` runs once per connection; returning nil means the configured
+  default, and an empty non-nil slice means it starts nowhere, which is a
+  deployment where clients `JOIN` explicitly. `CanJoin` gates a `JOIN` a
+  client asked for and its refusal reason becomes the `ERR` code.
+  **Autojoin does not consult `CanJoin`**: a layer that put somebody
+  somewhere has already decided they may be there.
 - **`History`** is the replay window a connecting client is shown.
   Separate from `Recorder` on purpose: `Recorder` is durability and runs
   behind delivery on a worker, `History` is read back on every connect and

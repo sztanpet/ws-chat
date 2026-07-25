@@ -58,8 +58,8 @@ const (
 // anything can speak, including a browser console and curl.
 func Codecs() []Codec { return []Codec{MsgPack{}, JSON{}} }
 
-// Names returns the subprotocols to advertise, in preference order.
-func Names() []string {
+// Subprotocols returns the wire formats to advertise, in preference order.
+func Subprotocols() []string {
 	codecs := Codecs()
 	names := make([]string, len(codecs))
 	for i, c := range codecs {

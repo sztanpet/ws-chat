@@ -33,6 +33,11 @@ type appMetrics struct {
 	laggedTotal   *metrics.Counter // subscribers dropped for falling behind
 	recordsFailed *metrics.Counter // persistence jobs that returned an error
 
+	// Channels.
+	channelsTotal *metrics.Counter // created
+	joinsTotal    *metrics.Counter
+	partsTotal    *metrics.Counter
+
 	// Moderation.
 	moderationTotal *metrics.CounterVec // by action
 }
@@ -60,6 +65,13 @@ func newMetrics(r *metrics.Registry) *appMetrics {
 		recordsFailed: r.Counter("records_failed_total",
 			"Persistence jobs that returned an error."),
 
+		channelsTotal: r.Counter("channels_created_total",
+			"Channels created on demand since start."),
+		joinsTotal: r.Counter("joins_total",
+			"Channel joins, including autojoins."),
+		partsTotal: r.Counter("parts_total",
+			"Channel parts, including those caused by a disconnect."),
+
 		moderationTotal: r.CounterVec("moderation_total",
 			"Moderation actions taken.", "action"),
 	}
@@ -74,10 +86,23 @@ func (a *app) registerStateMetrics(r *metrics.Registry) {
 		return int64(len(a.conns))
 	})
 
-	r.GaugeFunc("subscribers", "Live fan-out subscriptions across every codec.", func() int64 {
+	r.GaugeFunc("channels", "Channels that currently exist.", func() int64 {
+		a.channelsMu.RLock()
+		defer a.channelsMu.RUnlock()
+		return int64(len(a.channels))
+	})
+
+	r.GaugeFunc("memberships", "Channel memberships across every connection.", func() int64 {
+		a.channelsMu.RLock()
+		channels := make([]*channel, 0, len(a.channels))
+		for _, ch := range a.channels {
+			channels = append(channels, ch)
+		}
+		a.channelsMu.RUnlock()
+
 		var total int64
-		for _, bc := range a.bcs {
-			total += int64(bc.Len())
+		for _, ch := range channels {
+			total += int64(ch.len())
 		}
 		return total
 	})
@@ -101,9 +126,18 @@ func (a *app) registerStateMetrics(r *metrics.Registry) {
 	// counts its own. Reading them is better than maintaining a second
 	// number that can disagree with the first.
 	r.GaugeFunc("fanout_drops_total", "Subscribers dropped by the fan-out, as it counts them.", func() int64 {
+		a.channelsMu.RLock()
+		channels := make([]*channel, 0, len(a.channels))
+		for _, ch := range a.channels {
+			channels = append(channels, ch)
+		}
+		a.channelsMu.RUnlock()
+
 		var total int64
-		for _, bc := range a.bcs {
-			total += bc.Drops()
+		for _, ch := range channels {
+			for _, bc := range ch.bcs {
+				total += bc.Drops()
+			}
 		}
 		return total
 	})

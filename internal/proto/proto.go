@@ -27,6 +27,13 @@ const (
 	VerbPriv = "PRIVMSG"
 	VerbPing = "PING"
 
+	// Channels. JOIN and PART travel in both directions: a client asks
+	// with one, and the channel is told somebody arrived or left with the
+	// same verb.
+	VerbJoin  = "JOIN"
+	VerbPart  = "PART"
+	VerbNames = "NAMES"
+
 	// Moderation. All four are answered with one MOD frame to the whole
 	// channel, so a client needs one handler rather than four.
 	VerbMute   = "MUTE"
@@ -76,6 +83,12 @@ const (
 	ErrBanned      = "banned"
 	ErrForbidden   = "forbidden"
 	ErrBadDuration = "badduration"
+
+	// Channels.
+	ErrNoChannel     = "nosuchchannel" // not a usable channel name
+	ErrNotJoined     = "notjoined"     // you are not in that channel
+	ErrAlreadyJoined = "alreadyjoined" // you already are
+	ErrTooManyChans  = "toomanychannels"
 )
 
 // ErrMalformed is what a codec returns for a frame it cannot decode.
@@ -92,6 +105,11 @@ type Command struct {
 
 	// Data is the message body, for MSG and PRIVMSG.
 	Data string `json:"data,omitempty" msgpack:"data,omitempty"`
+
+	// Channel is which channel the command is about. Empty on a MSG means
+	// the default channel, so a client that only ever uses one does not
+	// have to name it.
+	Channel string `json:"channel,omitempty" msgpack:"channel,omitempty"`
 
 	// Nick is who the command is about: the recipient of a PRIVMSG, the
 	// target of a moderation command.
@@ -116,6 +134,7 @@ type Outbound interface{ frameVerb() string }
 // Msg is a chat message.
 type Msg struct {
 	Verb      string `json:"verb" msgpack:"verb"`
+	Channel   string `json:"channel" msgpack:"channel"`
 	ID        uint64 `json:"id" msgpack:"id"`
 	Nick      string `json:"nick" msgpack:"nick"`
 	Data      string `json:"data" msgpack:"data"`
@@ -194,14 +213,68 @@ func NewReady(nick string) Ready { return Ready{Verb: VerbReady, Nick: nick} }
 // check is a comparison against the last id in the backlog.
 type Backlog struct {
 	Verb     string `json:"verb" msgpack:"verb"`
+	Channel  string `json:"channel" msgpack:"channel"`
 	Messages []Msg  `json:"messages" msgpack:"messages"`
 }
 
 func (b Backlog) frameVerb() string { return b.Verb }
 
-// NewBacklog is a BACKLOG frame.
-func NewBacklog(messages []Msg) Backlog {
-	return Backlog{Verb: VerbBacklog, Messages: messages}
+// NewBacklog is a BACKLOG frame for one channel.
+func NewBacklog(channel string, messages []Msg) Backlog {
+	return Backlog{Verb: VerbBacklog, Channel: channel, Messages: messages}
+}
+
+// Join announces that somebody entered a channel. The client that asked
+// gets one too, which is how it learns the join succeeded.
+type Join struct {
+	Verb    string `json:"verb" msgpack:"verb"`
+	Channel string `json:"channel" msgpack:"channel"`
+	Nick    string `json:"nick" msgpack:"nick"`
+
+	// Roles and Attrs describe the person who joined, so a client can put
+	// them in its member list without waiting for them to speak.
+	Roles []string          `json:"roles,omitempty" msgpack:"roles,omitempty"`
+	Attrs map[string]string `json:"attrs,omitempty" msgpack:"attrs,omitempty"`
+}
+
+func (j Join) frameVerb() string { return j.Verb }
+
+// NewJoin is j with its verb set.
+func NewJoin(j Join) Join { j.Verb = VerbJoin; return j }
+
+// Part announces that somebody left a channel, whether they asked to or
+// simply disconnected.
+type Part struct {
+	Verb    string `json:"verb" msgpack:"verb"`
+	Channel string `json:"channel" msgpack:"channel"`
+	Nick    string `json:"nick" msgpack:"nick"`
+}
+
+func (p Part) frameVerb() string { return p.Verb }
+
+// NewPart is a PART frame.
+func NewPart(channel, nick string) Part {
+	return Part{Verb: VerbPart, Channel: channel, Nick: nick}
+}
+
+// Names is who is in a channel.
+//
+// Nicks is capped by the server, and Total says how many there really are,
+// because the alternative is a hundred-kilobyte frame for a channel with
+// ten thousand people in it. A client that wants all of them in a room
+// that big wants paging, which does not exist yet.
+type Names struct {
+	Verb    string   `json:"verb" msgpack:"verb"`
+	Channel string   `json:"channel" msgpack:"channel"`
+	Nicks   []string `json:"nicks" msgpack:"nicks"`
+	Total   int      `json:"total" msgpack:"total"`
+}
+
+func (n Names) frameVerb() string { return n.Verb }
+
+// NewNames is a NAMES frame.
+func NewNames(channel string, nicks []string, total int) Names {
+	return Names{Verb: VerbNames, Channel: channel, Nicks: nicks, Total: total}
 }
 
 // Mod is a moderation action as the server announces it to the channel.
@@ -211,6 +284,7 @@ func NewBacklog(messages []Msg) Backlog {
 // what happened.
 type Mod struct {
 	Verb      string `json:"verb" msgpack:"verb"`
+	Channel   string `json:"channel" msgpack:"channel"`
 	ID        uint64 `json:"id" msgpack:"id"`
 	Action    string `json:"action" msgpack:"action"`
 	Nick      string `json:"nick" msgpack:"nick"`

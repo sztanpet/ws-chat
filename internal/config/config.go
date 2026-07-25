@@ -72,6 +72,18 @@ type Config struct {
 	// MaxMessage is the longest chat message body accepted, in bytes.
 	MaxMessage int
 
+	// DefaultChannel is the channel an empty channel name means, and the
+	// one a connection joins when nothing says otherwise.
+	DefaultChannel string
+
+	// MaxChannels bounds how many channels can exist at once. Channels are
+	// created on demand by whoever joins one, so without a cap a client can
+	// invent them until the server runs out of memory.
+	MaxChannels int
+
+	// MaxChannelsPerConn bounds how many one connection may be in.
+	MaxChannelsPerConn int
+
 	// Backlog is how many recent messages a connecting client is sent, so
 	// it arrives with context instead of an empty window. Zero disables it.
 	Backlog int
@@ -113,17 +125,21 @@ type Config struct {
 // Default returns the configuration used when nothing overrides it.
 func Default() Config {
 	return Config{
-		Addr:          ":8080",
-		Capacity:      256,
-		WriteBatch:    16,
-		MaxFrameSize:  32 << 10,
-		MaxMessage:    512,
-		Backlog:       50,
-		MaxDiacritics: 5,
-		PrivBuffer:    32,
-		WriteTimeout:  Duration(10 * time.Second),
-		IdleTimeout:   Duration(90 * time.Second),
-		LogLevel:      "info",
+		Addr:               ":8080",
+		Capacity:           4096,
+		WriteBatch:         16,
+		MaxFrameSize:       32 << 10,
+		MaxMessage:         512,
+		DefaultChannel:     "main",
+		MaxChannels:        1024,
+		MaxChannelsPerConn: 32,
+		Backlog:            50,
+		MaxDiacritics:      5,
+		PrivBuffer:         32,
+		WriteTimeout:       Duration(10 * time.Second),
+		IdleTimeout:        Duration(90 * time.Second),
+		DebugAddr:          "127.0.0.1:6060",
+		LogLevel:           "info",
 	}
 }
 
@@ -170,6 +186,12 @@ func (c Config) check() error {
 		return errors.New("MaxMessage must be at least 1")
 	case c.Backlog < 0:
 		return errors.New("Backlog must not be negative")
+	case c.DefaultChannel == "":
+		return errors.New("DefaultChannel must not be empty")
+	case c.MaxChannels < 1:
+		return errors.New("MaxChannels must be at least 1")
+	case c.MaxChannelsPerConn < 1:
+		return errors.New("MaxChannelsPerConn must be at least 1")
 	case c.PrivBuffer < 1:
 		return errors.New("PrivBuffer must be at least 1")
 	case c.WriteTimeout <= 0:

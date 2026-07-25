@@ -17,9 +17,12 @@
 //
 // Rules an implementation has to live by:
 //
-//   - Authenticate and Chatter run once per connection, before it is
-//     serving. They may block; they delay one connection's setup and
+//   - Authenticate, Chatter and Autojoin run once per connection, before it
+//     is serving. They may block; they delay one connection's setup and
 //     nothing else.
+//   - CanJoin runs on the read pump in front of a JOIN, which is rare
+//     enough not to be a hot path but frequent enough not to be a round
+//     trip.
 //   - Allow runs on the sender's read pump, in front of every message. It
 //     is on the hot path, so it has to be fast — a lookup, not a round
 //     trip. It is the wrong place for anything that talks to a network.
@@ -267,6 +270,36 @@ type History interface {
 	Recent(ctx context.Context, channel string, n int) ([]Message, error)
 }
 
+// Channels decides which channels a connection starts in and which it may
+// enter. It is policy only: the server owns membership, fan-out and
+// presence, and asks this what is allowed.
+//
+// With no Channels installed a connection joins the configured default
+// channel and may join anything else it asks for, which is what the server
+// did before channels existed.
+type Channels interface {
+	// Autojoin returns the channels a connection is put into on connect,
+	// before it has said anything. It runs once per connection and may
+	// block.
+	//
+	// Returning nil means the configured default. Returning an empty
+	// non-nil slice means the connection starts in nothing at all, which is
+	// a deployment where clients are expected to JOIN explicitly.
+	//
+	// The channels it names are joined without consulting CanJoin: a layer
+	// that put somebody somewhere has already decided they may be there.
+	Autojoin(ctx context.Context, id Identity) []string
+
+	// CanJoin decides whether an identity may enter a channel it asked for.
+	// It runs on the connection's read pump, in front of a JOIN, so it
+	// should be a lookup rather than a round trip.
+	//
+	// The refusal reason becomes the ERR code the client is sent, so it
+	// should be a short machine-readable token ("inviteonly", "banned"),
+	// not a sentence.
+	CanJoin(ctx context.Context, id Identity, channel string) (allowed bool, reason string)
+}
+
 // Recorder writes things down. Every method runs on a background worker,
 // after the thing has already happened.
 type Recorder interface {
@@ -297,6 +330,7 @@ type Hooks struct {
 	Directory Directory
 	Filter    Filter
 	Limiter   Limiter
+	Channels  Channels
 	History   History
 	Recorder  Recorder
 	Authz     Authorizer

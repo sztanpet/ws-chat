@@ -129,6 +129,21 @@ extension points, and a single-channel WebSocket chat server.
 - **Refusals are counted inside `conn.reply`**, the one place an ERR is
   sent, so the metric cannot drift from what clients were told.
 
+- **A write pump per membership**, not one multiplexing over all of them.
+  `Recv` blocks and cannot be selected on, and a merge channel in front of
+  the socket would undo `internal/broadcast`.
+- **Join order is deterministic and load-bearing**: subscribe, backlog
+  directly, broadcast JOIN, *then* start the pump. A client sees BACKLOG,
+  its own JOIN, then live traffic. Starting the pump earlier raced them.
+- **The parting client is told directly**, before its subscription ends —
+  ending it discards unread frames, so its own PART is exactly the one
+  that would go missing.
+- **Empty channels are reclaimed and it costs nothing**: the ring holds
+  frames for subscribers that no longer exist, and the backlog is in the
+  History hook.
+- **Moderation is announced in every channel the target is in**, because
+  that is where the people who saw what they did are.
+
 ## Gotchas
 
 1. **`net/http`'s `Shutdown` ignores hijacked connections**, and every
@@ -158,10 +173,9 @@ extension points, and a single-channel WebSocket chat server.
 
 ## Pending
 
-- **Channels.** The single implicit channel becomes a lookup from channel
-  name to its own set of per-codec rings. `JOIN`, `PART`, `NAMES`, and a
-  `channel` field on every server-originated message. The backlog, the
-  channel rate limiter and the moderation store all become per channel.
+- **Channel-scoped moderation.** Mutes and bans are server-wide; muting
+  somebody in one room silences them everywhere. Per-channel moderation
+  wants the store keyed by (channel, identity).
 - **Resolving a nick to a key without a connection.** Moderation, and
   especially *un*-moderation, needs to name somebody who is not connected.
   That wants a `Directory` lookup by nick, which the interface does not

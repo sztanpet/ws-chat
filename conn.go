@@ -10,7 +10,6 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/sztanpet/ws-chat/internal/broadcast"
 	"github.com/sztanpet/ws-chat/internal/hook"
 	"github.com/sztanpet/ws-chat/internal/proto"
 	"github.com/sztanpet/ws-chat/internal/ratelimit"
@@ -39,10 +38,15 @@ import (
 // order, since they arrive on two different streams. Each stream is ordered
 // within itself, which is what a client actually needs.
 type conn struct {
-	app   *app
-	ws    *websocket.Conn
-	sub   broadcast.Sub
-	priv  chan []byte
+	app  *app
+	ws   *websocket.Conn
+	priv chan []byte
+
+	// memberships is the channels this connection is in, each with its own
+	// subscription and its own write pump.
+	membersMu   sync.RWMutex
+	memberships map[string]*membership
+
 	id    hook.Identity
 	codec proto.Codec
 
@@ -97,7 +101,7 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: a.cfg.AllowedOrigins,
-		Subprotocols:   proto.Names(),
+		Subprotocols:   proto.Subprotocols(),
 	})
 	if err != nil {
 		// Accept has already written the error response.
@@ -121,11 +125,12 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 	a.metrics.codecs.With(codec.Name()).Inc()
 
 	c := &conn{
-		app:   a,
-		ws:    ws,
-		priv:  make(chan []byte, a.cfg.PrivBuffer),
-		id:    id,
-		codec: codec,
+		app:         a,
+		ws:          ws,
+		priv:        make(chan []byte, a.cfg.PrivBuffer),
+		id:          id,
+		codec:       codec,
+		memberships: make(map[string]*membership),
 	}
 	c.limit, c.releaseLimit = a.clientLimiter(r.Context(), id)
 	c.log = a.log.With("nick", c.nick(), "remote", r.RemoteAddr, "codec", codec.Name())
@@ -146,35 +151,36 @@ func (c *conn) serve(parent context.Context) {
 		defer c.releaseLimit()
 	}
 
-	c.sub = c.app.bcs[c.codec.Name()].Subscribe()
 	c.app.register(c)
 	c.log.Debug("connected")
 
-	// Only now is the connection real: subscribed, addressable, and able to
-	// receive. The handshake finished before any of that, so a client that
-	// talks first would race its own setup.
+	// Only now is the connection real: addressable, and able to receive.
+	// The handshake finished before any of that, so a client that talks
+	// first would race its own setup.
 	ready, err := c.codec.Encode(proto.NewReady(c.nick()))
 	if err != nil {
 		c.log.Error("cannot format READY", "err", err)
 		c.ws.CloseNow()
 		c.app.unregister(c)
-		c.sub.Close()
 		return
 	}
 	if !c.write(ctx, ready) {
 		c.app.unregister(c)
-		c.sub.Close()
 		return
 	}
 
-	// Then what it missed. Sent after READY and before anything live, so a
-	// client can render the history and then start appending.
-	c.sendBacklog(ctx)
-
 	var pumps sync.WaitGroup
-	pumps.Add(2)
-	go func() { defer pumps.Done(); c.writePump(ctx) }()
+	pumps.Add(1)
 	go func() { defer pumps.Done(); c.privPump(ctx) }()
+
+	// Then wherever the connection belongs. Each join announces itself and
+	// replays that channel's history, so a client's first frames are READY,
+	// then a JOIN and a BACKLOG for each channel it landed in.
+	for _, name := range c.app.autojoin(ctx, c.id) {
+		if code := c.join(ctx, name, true); code != "" {
+			c.log.Warn("autojoin refused", "channel", name, "code", code)
+		}
+	}
 
 	rerr := c.readPump(ctx)
 
@@ -182,11 +188,12 @@ func (c *conn) serve(parent context.Context) {
 	// private message that will never be written.
 	c.app.unregister(c)
 
-	// Ending the subscription unblocks the write pump, which is parked in
-	// Recv; cancelling the context unblocks the private pump. Closing the
-	// socket is what unblocks a read pump instead, which is why the write
-	// pump does that when it is the one to fail.
-	c.sub.Close()
+	// Leaving every channel ends the subscriptions its write pumps are
+	// parked in and tells the rooms; cancelling the context unblocks the
+	// private pump. Closing the socket is what unblocks a read pump
+	// instead, which is why a write pump does that when it is the one to
+	// fail.
+	c.leaveAll(ctx)
 	cancel()
 	pumps.Wait()
 
@@ -202,11 +209,11 @@ func (c *conn) serve(parent context.Context) {
 // frame would make "the room is new" and "the backlog is disabled" look
 // the same to a client, and would make every client's first-frame handling
 // a guess.
-func (c *conn) sendBacklog(ctx context.Context) {
+func (c *conn) sendBacklog(ctx context.Context, channel string) {
 	if c.app.cfg.Backlog < 1 {
 		return // disabled: no frame at all, which is the one other case
 	}
-	c.sendFrame(ctx, proto.NewBacklog(c.app.backlog(ctx)))
+	c.sendFrame(ctx, proto.NewBacklog(channel, c.app.backlog(ctx, channel)))
 }
 
 // privPump writes the messages addressed to this client alone.
@@ -232,41 +239,6 @@ func (c *conn) deliver(frame []byte) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-// writePump feeds the client the broadcast stream. It is the only place a
-// fanned-out message is written.
-func (c *conn) writePump(ctx context.Context) {
-	// One Recv per wakeup, up to WriteBatch frames. The batching is what
-	// keeps a client that has fallen behind from costing one scheduler
-	// wakeup per message; the frames still go out one WebSocket message
-	// each, because the protocol is one command per frame.
-	batch := make([][]byte, c.app.cfg.WriteBatch)
-
-	for {
-		n, err := c.sub.Recv(batch)
-
-		for _, frame := range batch[:n] {
-			if !c.write(ctx, frame) {
-				return
-			}
-		}
-
-		switch {
-		case err == nil:
-			continue
-		case errors.Is(err, broadcast.ErrLagged):
-			// The client could not keep up. Say so on the way out rather
-			// than dropping the socket silently: a client that reconnects
-			// blind cannot tell this from a network failure.
-			c.app.metrics.laggedTotal.Inc()
-			c.log.Info("dropped: too slow")
-			c.close(websocket.StatusPolicyViolation, "too slow")
-			return
-		default:
-			return // orderly close
-		}
 	}
 }
 
@@ -303,6 +275,12 @@ func (c *conn) readPump(ctx context.Context) error {
 			c.handleMsg(ctx, cmd)
 		case proto.VerbPriv:
 			c.handlePriv(ctx, cmd)
+		case proto.VerbJoin:
+			c.handleJoin(ctx, cmd)
+		case proto.VerbPart:
+			c.handlePart(ctx, cmd)
+		case proto.VerbNames:
+			c.handleNames(ctx, cmd)
 		case proto.VerbMute, proto.VerbUnmute, proto.VerbBan, proto.VerbUnban:
 			c.handleMod(ctx, cmd)
 		case proto.VerbPing:
@@ -323,6 +301,16 @@ func (c *conn) handleMsg(ctx context.Context, cmd proto.Command) {
 		return
 	}
 
+	// A message goes to a channel this connection is in. Speaking into a
+	// room you are not in is refused rather than silently joining you: a
+	// client that thinks it is somewhere it is not should find out.
+	name := c.app.normalise(cmd.Channel)
+	m, ok := c.joined(name)
+	if !ok {
+		c.reply(ctx, proto.ErrNotJoined)
+		return
+	}
+
 	// Limits before the filter: the check is a nil comparison or a mutex,
 	// where the filter may be a lookup, and a throttled client should not
 	// cost the filter anything at all.
@@ -334,7 +322,7 @@ func (c *conn) handleMsg(ctx context.Context, cmd proto.Command) {
 		c.reply(ctx, proto.ErrThrottled)
 		return
 	}
-	if !c.app.chanLimit.Allow() {
+	if !m.ch.limit.Allow() {
 		c.reply(ctx, proto.ErrChanThrottled)
 		return
 	}
@@ -351,7 +339,7 @@ func (c *conn) handleMsg(ctx context.Context, cmd proto.Command) {
 	// The id and the timestamp are the server's to assign: a client's clock
 	// is not evidence, and ordering has to come from one place.
 	at := time.Now()
-	id, err := c.app.broadcastMsg(c.id, cmd.Data, at)
+	id, err := c.app.broadcastMsg(m.ch, c.id, cmd.Data, at)
 	if err != nil {
 		c.log.Error("cannot encode outgoing message", "err", err)
 		c.reply(ctx, proto.ErrProtocol)
@@ -497,4 +485,35 @@ func (c *conn) close(status websocket.StatusCode, reason string) {
 	if err := c.ws.Close(status, reason); err != nil {
 		c.ws.CloseNow()
 	}
+}
+
+// handleJoin puts the connection into a channel it asked for.
+func (c *conn) handleJoin(ctx context.Context, cmd proto.Command) {
+	if code := c.join(ctx, cmd.Channel, false); code != "" {
+		c.reply(ctx, code)
+	}
+}
+
+// handlePart takes it out of one.
+func (c *conn) handlePart(ctx context.Context, cmd proto.Command) {
+	if code := c.part(ctx, cmd.Channel); code != "" {
+		c.reply(ctx, code)
+	}
+}
+
+// handleNames answers with who is in a channel.
+//
+// Membership is required: who is in a room is the room's business, and a
+// server that answers it for anybody is a server that can be enumerated by
+// anybody.
+func (c *conn) handleNames(ctx context.Context, cmd proto.Command) {
+	name := c.app.normalise(cmd.Channel)
+	m, ok := c.joined(name)
+	if !ok {
+		c.reply(ctx, proto.ErrNotJoined)
+		return
+	}
+
+	nicks, total := m.ch.names()
+	c.sendFrame(ctx, proto.NewNames(name, nicks, total))
 }

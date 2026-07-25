@@ -350,7 +350,7 @@ func modApp(t *testing.T, hooks hook.Hooks, tweak ...func(*config.Config)) (*tes
 // expectMod reads one frame and requires it to be a moderation action.
 func (c *client) expectMod(action, nick string) proto.Mod {
 	c.t.Helper()
-	verb, payload := c.recv()
+	verb, payload := c.nextInteresting()
 	if verb != proto.VerbMod {
 		c.t.Fatalf("got %s %s, want %s", verb, payload, proto.VerbMod)
 	}

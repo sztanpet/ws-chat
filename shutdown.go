@@ -75,9 +75,7 @@ func (a *app) close() {
 	// Then unblock both pumps: the read pumps by cancelling their context,
 	// the write pumps by ending the subscriptions they are parked in.
 	a.stopConn()
-	for _, bc := range a.bcs {
-		bc.Close()
-	}
+	a.closeChannels()
 
 	// The persistence worker gets the same cancellation and makes a best
 	// effort to finish what is already queued.

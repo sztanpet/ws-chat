@@ -168,6 +168,9 @@ func (a *app) janitor(ctx context.Context) {
 			if n := a.mod.Sweep(); n > 0 {
 				a.log.Debug("reclaimed expired moderation", "count", n)
 			}
+			if n := a.sweepChannels(); n > 0 {
+				a.log.Debug("reclaimed empty channels", "count", n)
+			}
 		}
 	}
 }
@@ -199,6 +202,29 @@ func (a *app) canModerate(ctx context.Context, id hook.Identity) bool {
 		return false
 	}
 	return a.hooks.Authz.CanModerate(ctx, id)
+}
+
+// autojoin is where a connection starts. No Channels hook, or one with no
+// opinion, means the configured default channel — which is what the server
+// did before channels existed.
+func (a *app) autojoin(ctx context.Context, id hook.Identity) []string {
+	if a.hooks.Channels == nil {
+		return []string{a.cfg.DefaultChannel}
+	}
+	if channels := a.hooks.Channels.Autojoin(ctx, id); channels != nil {
+		return channels
+	}
+	return []string{a.cfg.DefaultChannel}
+}
+
+// canJoin asks whether an identity may enter a channel it named. With no
+// Channels hook installed anybody may join anything, which is the same
+// permissive default the other hooks have.
+func (a *app) canJoin(ctx context.Context, id hook.Identity, channel string) (bool, string) {
+	if a.hooks.Channels == nil {
+		return true, ""
+	}
+	return a.hooks.Channels.CanJoin(ctx, id, channel)
 }
 
 // record queues a persistence job. It never blocks and never fails the

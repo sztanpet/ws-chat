@@ -27,6 +27,10 @@ func TestCommandRoundTrip(t *testing.T) {
 			{Verb: VerbPing},
 			{Verb: VerbMute, Nick: "someone", Duration: "10m", Reason: "spam"},
 			{Verb: VerbUnban, Nick: "someone"},
+			{Verb: VerbJoin, Channel: "main"},
+			{Verb: VerbPart, Channel: "main"},
+			{Verb: VerbNames, Channel: "main"},
+			{Verb: VerbMsg, Channel: "other", Data: "in another room"},
 		} {
 			// A client encodes the same struct the server decodes into.
 			frame := mustMarshal(t, c, want)
@@ -75,7 +79,10 @@ func TestEveryOutboundNamesItself(t *testing.T) {
 		{VerbMsg, NewMsg(Msg{Data: "x"})},
 		{VerbPriv, NewPriv(Priv{Data: "x"})},
 		{VerbReady, NewReady("someone")},
-		{VerbBacklog, NewBacklog(nil)},
+		{VerbBacklog, NewBacklog("main", nil)},
+		{VerbJoin, NewJoin(Join{Channel: "main", Nick: "someone"})},
+		{VerbPart, NewPart("main", "someone")},
+		{VerbNames, NewNames("main", []string{"someone"}, 1)},
 		{VerbMod, NewMod(Mod{Action: ActionMute})},
 		{VerbPong, NewPong()},
 		{VerbErr, NewErr(ErrProtocol)},

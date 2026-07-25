@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/sztanpet/ws-chat/internal/broadcast"
 	"github.com/sztanpet/ws-chat/internal/config"
 	"github.com/sztanpet/ws-chat/internal/filter"
 	"github.com/sztanpet/ws-chat/internal/history"
@@ -37,16 +36,11 @@ type app struct {
 	recordsDone chan struct{}
 	dropped     atomic.Uint64
 
-	// bcs is the fan-out: one broadcaster per wire format, keyed by codec
-	// name. A ring holds encoded bytes and every subscriber gets the same
-	// ones, so clients that negotiated different codecs cannot share one —
-	// a message is encoded once per codec instead of once per subscriber,
-	// which keeps the cost O(codecs) rather than O(members).
-	//
-	// There is one set of these for now, a single implicit channel every
-	// connection joins. Channels replace it with a lookup from channel name
-	// to its own set.
-	bcs map[string]broadcast.Broadcaster
+	// channels is every channel that currently exists, created on demand
+	// and reclaimed when empty. Each owns its own fan-out (one broadcaster
+	// per codec), its own rate limit and its own member list.
+	channelsMu sync.RWMutex
+	channels   map[string]*channel
 
 	// filters is the chain run in front of every message: the built-in
 	// text-hygiene filters, then whatever the deployment installed. Built
@@ -67,15 +61,11 @@ type app struct {
 	limitersMu sync.Mutex
 	limiters   map[string]*limiterEntry
 
-	// chanLimit is the bucket every member of the channel shares. Nil means
-	// unlimited, which is the default. One per channel once channels exist.
-	chanLimit *ratelimit.Bucket
-
 	// sendMu is held while a message is assigned its id and written to
 	// every codec's ring. Without it two senders could reach the rings in
 	// different orders and clients on different codecs would disagree about
-	// what happened first. The critical section is two ring writes, about
-	// forty nanoseconds; consistent ordering is worth that.
+	// what happened first. The critical section is a couple of ring writes,
+	// tens of nanoseconds; consistent ordering is worth that.
 	sendMu sync.Mutex
 
 	mux       *http.ServeMux
@@ -129,18 +119,14 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 		cfg:      cfg,
 		hooks:    hooks,
 		log:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})),
-		bcs:      make(map[string]broadcast.Broadcaster, len(proto.Codecs())),
 		mux:      http.NewServeMux(),
 		conns:    make(map[string]*conn),
+		channels: make(map[string]*channel),
 		limiters: make(map[string]*limiterEntry),
 
 		records:     make(chan func(context.Context) error, recordQueue),
 		recordsDone: make(chan struct{}),
 	}
-	for _, codec := range proto.Codecs() {
-		a.bcs[codec.Name()] = broadcast.NewRing(cfg.Capacity)
-	}
-	a.chanLimit = a.channelLimiter(context.Background(), mainChannel)
 	a.mod = moderation.New()
 
 	// The default window is what the server did before the hook existed:
@@ -185,11 +171,6 @@ type limiterEntry struct {
 // rate limiters are reclaimed. Nothing waits on it, so it is deliberately
 // unhurried.
 const janitorInterval = time.Minute
-
-// mainChannel is the single implicit channel everything belongs to until
-// channels exist. It is passed to the hooks that take a channel name so
-// that those call sites already have one when they do.
-const mainChannel = "main"
 
 func (a *app) routes() {
 	a.mux.HandleFunc("GET /ws", a.handleWS)
@@ -239,13 +220,13 @@ func (a *app) lookup(nick string) (*conn, bool) {
 // The window is appended under the same lock that orders the fan-out, so
 // what a joining client is shown cannot disagree with the order the room
 // saw.
-func (a *app) broadcastMsg(from hook.Identity, data string, at time.Time) (uint64, error) {
-	return a.broadcastWith(
+func (a *app) broadcastMsg(ch *channel, from hook.Identity, data string, at time.Time) (uint64, error) {
+	return ch.broadcastTo(a,
 		func(id uint64) proto.Outbound {
-			return wireMsg(hook.Message{ID: id, From: from, Data: data, At: at})
+			return wireMsg(ch.name, hook.Message{ID: id, From: from, Data: data, At: at})
 		},
 		func(id uint64) {
-			a.hist.Append(context.Background(), mainChannel, hook.Message{
+			a.hist.Append(context.Background(), ch.name, hook.Message{
 				ID: id, From: from, Data: data, At: at,
 			})
 		},
@@ -254,8 +235,9 @@ func (a *app) broadcastMsg(from hook.Identity, data string, at time.Time) (uint6
 
 // wireMsg is the one place a recorded message becomes a frame, so the
 // backlog and live traffic cannot describe the same message differently.
-func wireMsg(m hook.Message) proto.Msg {
+func wireMsg(channel string, m hook.Message) proto.Msg {
 	return proto.NewMsg(proto.Msg{
+		Channel:   channel,
 		ID:        m.ID,
 		Nick:      m.From.Nick,
 		Data:      m.Data,
@@ -271,58 +253,24 @@ func wireMsg(m hook.Message) proto.Msg {
 // something slow, and Recent is allowed to be — it runs once per
 // connection. Holding the broadcast lock across it would let a slow store
 // stall the whole channel.
-func (a *app) backlog(ctx context.Context) []proto.Msg {
+func (a *app) backlog(ctx context.Context, channel string) []proto.Msg {
 	if a.cfg.Backlog < 1 {
 		return nil
 	}
 
-	recent, err := a.hist.Recent(ctx, mainChannel, a.cfg.Backlog)
+	recent, err := a.hist.Recent(ctx, channel, a.cfg.Backlog)
 	if err != nil {
 		// Failing to show history is not a reason to refuse somebody a
 		// connection. Log it; they get an empty window.
-		a.log.Error("cannot read history", "channel", mainChannel, "err", err)
+		a.log.Error("cannot read history", "channel", channel, "err", err)
 		return nil
 	}
 
 	msgs := make([]proto.Msg, len(recent))
 	for i, m := range recent {
-		msgs[i] = wireMsg(m)
+		msgs[i] = wireMsg(channel, m)
 	}
 	return msgs
-}
-
-// broadcast encodes the payload once per codec and hands each ring its own
-// copy, under the lock that keeps every client's view of the order the
-// same.
-func (a *app) broadcast(build func(id uint64) proto.Outbound) (uint64, error) {
-	return a.broadcastWith(build, nil)
-}
-
-func (a *app) broadcastWith(build func(id uint64) proto.Outbound, after func(uint64)) (uint64, error) {
-	frames := make(map[string][]byte, len(a.bcs))
-
-	a.sendMu.Lock()
-	defer a.sendMu.Unlock()
-
-	id := a.seq.Add(1)
-	payload := build(id)
-
-	// Encode everything before delivering anything: a codec that fails must
-	// not leave half the room having seen the message.
-	for _, codec := range proto.Codecs() {
-		frame, err := codec.Encode(payload)
-		if err != nil {
-			return 0, err
-		}
-		frames[codec.Name()] = frame
-	}
-	if after != nil {
-		after(id)
-	}
-	for name, frame := range frames {
-		a.bcs[name].Broadcast(frame)
-	}
-	return id, nil
 }
 
 func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {

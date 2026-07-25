@@ -108,16 +108,7 @@ func (ta *testApp) dialWith(t *testing.T, query string) (*client, error) {
 	var ready proto.Ready
 	mustUnmarshal(t, c, payload, &ready)
 	c.nick = ready.Nick
-
-	if ta.cfg.Backlog > 0 {
-		verb, payload := c.recv()
-		if verb != proto.VerbBacklog {
-			t.Fatalf("second frame was %s, want %s", verb, proto.VerbBacklog)
-		}
-		var backlog proto.Backlog
-		mustUnmarshal(t, c, payload, &backlog)
-		c.backlog = backlog.Messages
-	}
+	c.settle(ta)
 	return c, nil
 }
 

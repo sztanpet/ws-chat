@@ -33,6 +33,17 @@
 	// The longest chat message body accepted, in bytes.
 	// "MaxMessage": 512,
 
+	// The channel an empty channel name means, and the one a connection
+	// joins when nothing says otherwise.
+	// "DefaultChannel": "main",
+
+	// How many channels may exist at once, and how many one connection may
+	// be in. Channels are created on demand by whoever joins one, so
+	// without a cap a client can invent them until the server runs out of
+	// memory.
+	// "MaxChannels": 1024,
+	// "MaxChannelsPerConn": 32,
+
 	// How many recent messages a connecting client is sent, so it arrives
 	// with context instead of an empty window. 0 disables the backlog.
 	// "Backlog": 50,

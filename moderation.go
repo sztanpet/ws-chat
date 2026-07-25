@@ -70,16 +70,17 @@ func (c *conn) handleMod(ctx context.Context, cmd proto.Command) {
 	}
 
 	at := time.Now()
-	id, err := c.app.broadcast(func(id uint64) proto.Outbound {
-		return proto.NewMod(proto.Mod{
-			ID:        id,
-			Action:    action,
-			Nick:      cmd.Nick,
-			By:        c.nick(),
-			Timestamp: at.UnixMilli(),
-			Until:     millis(until),
-			Reason:    cmd.Reason,
-		})
+
+	// Announced in every channel the target is in, because that is where
+	// the people who saw what they did are. A room told nothing has to
+	// guess why somebody went quiet.
+	id, err := c.app.announceModeration(target, proto.Mod{
+		Action:    action,
+		Nick:      cmd.Nick,
+		By:        c.nick(),
+		Timestamp: at.UnixMilli(),
+		Until:     millis(until),
+		Reason:    cmd.Reason,
 	})
 	if err != nil {
 		c.log.Error("cannot encode moderation action", "action", action, "err", err)
@@ -109,6 +110,34 @@ func (c *conn) handleMod(ctx context.Context, cmd proto.Command) {
 	}
 
 	c.log.Info("moderation", "action", action, "target", cmd.Nick, "until", until, "reason", cmd.Reason)
+}
+
+// announceModeration tells every channel the target is in. It reports the
+// id of the last announcement, or zero if the target was in nothing.
+func (a *app) announceModeration(target *conn, mod proto.Mod) (uint64, error) {
+	target.membersMu.RLock()
+	channels := make([]*channel, 0, len(target.memberships))
+	for _, m := range target.memberships {
+		channels = append(channels, m.ch)
+	}
+	target.membersMu.RUnlock()
+
+	var last uint64
+	for _, ch := range channels {
+		id, err := ch.broadcastTo(a, func(id uint64) proto.Outbound {
+			mod.ID = id
+			mod.Channel = ch.name
+			return proto.NewMod(mod)
+		}, nil)
+		if err != nil {
+			return 0, err
+		}
+		last = id
+	}
+	if last == 0 {
+		last = a.seq.Add(1) // nothing announced, but the action still has an id
+	}
+	return last, nil
 }
 
 // deadline turns a duration string into an absolute time. An empty string

@@ -53,10 +53,10 @@ func TestMetricsCountConnectionsAndTraffic(t *testing.T) {
 	requireMetric(t, out, `wschat_commands_total{verb="PRIVMSG"} 1`)
 	requireMetric(t, out, `wschat_codec_negotiated_total{codec="chat.json"} 2`)
 
-	// Two subscriptions per connection: one on each codec's broadcaster is
-	// wrong, one per connection is right — a connection subscribes only to
-	// the codec it negotiated.
-	requireMetric(t, out, "wschat_subscribers 2")
+	// One channel, both connections in it.
+	requireMetric(t, out, "wschat_channels 1")
+	requireMetric(t, out, "wschat_memberships 2")
+	requireMetric(t, out, "wschat_joins_total 2")
 }
 
 // Every refusal is counted by the code the client was told, because they
