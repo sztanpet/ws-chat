@@ -26,10 +26,16 @@
 //   - ClientLimits and ChannelLimits are asked once each, when a connection
 //     or a channel is set up. They decide policy; the enforcing is the
 //     server's, on a token bucket, and costs a nil check when unlimited.
-//   - Message and Private run on a background worker AFTER delivery, so a
-//     slow or broken store delays persistence and never delivery. Their
-//     queue is bounded: when it is full, records are dropped and counted
-//     rather than allowed to become backpressure on the chat.
+//   - Message, Private and Moderation run on a background worker AFTER the
+//     thing has happened, so a slow or broken store delays persistence and
+//     never delivery. Their queue is bounded: when it is full, records are
+//     dropped and counted rather than allowed to become backpressure on
+//     the chat.
+//   - History.Append runs on the sender's path, under the lock that orders
+//     the fan-out, and must not block. It is for maintaining a replay
+//     window, not for durability — durability is Recorder, which is
+//     asynchronous precisely so it can be slow. History.Recent runs once
+//     per connection and may take its time.
 //   - All of them may be called concurrently.
 package hook
 
@@ -215,6 +221,31 @@ type Moderation struct {
 	At     time.Time
 }
 
+// History is the recent messages a connecting client is replayed, so it
+// arrives with context instead of an empty window.
+//
+// It is deliberately separate from Recorder. Recorder is durability and
+// runs behind delivery on a worker; History is a window the server reads
+// back on every connect and has to be fast. An implementation backed by a
+// database should keep its own memory cache, feed it from Append, and
+// serve Recent from that — or from the database, which is allowed to be
+// slow because Recent runs once per connection.
+//
+// The default implementation is history.Memory, which keeps the last N per
+// channel in memory. A server that installs nothing gets that.
+type History interface {
+	// Append records a delivered message. It runs on the sender's path,
+	// under the lock that orders the fan-out, so it must not block: this is
+	// bookkeeping, not persistence.
+	Append(ctx context.Context, channel string, m Message)
+
+	// Recent returns up to n messages, oldest first. It runs once per
+	// connection and may block. An error is not fatal — the client is sent
+	// an empty backlog and told nothing, because failing to show history is
+	// not a reason to refuse somebody a connection.
+	Recent(ctx context.Context, channel string, n int) ([]Message, error)
+}
+
 // Recorder writes things down. Every method runs on a background worker,
 // after the thing has already happened.
 type Recorder interface {
@@ -245,6 +276,7 @@ type Hooks struct {
 	Directory Directory
 	Filter    Filter
 	Limiter   Limiter
+	History   History
 	Recorder  Recorder
 	Authz     Authorizer
 }

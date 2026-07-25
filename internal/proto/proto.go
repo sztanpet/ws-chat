@@ -140,6 +140,14 @@ type Ready struct {
 // It is one frame with an array rather than a burst of MSG frames. A client
 // can then tell "here is what you missed" from "this just happened" without
 // a per-message flag, and render the block in one pass.
+//
+// A client MUST ignore a live message whose id it already has from the
+// backlog. The server subscribes a connection to the channel before it
+// reads the history, so a message sent in between arrives twice: once in
+// the backlog and once live. Doing it the other way round would lose that
+// message instead, and a duplicate a client can drop by id is strictly
+// better than a gap it cannot detect at all. Ids are monotonic, so the
+// check is a comparison against the last id in the backlog.
 type Backlog struct {
 	Messages []Msg `json:"messages" msgpack:"messages"`
 }
