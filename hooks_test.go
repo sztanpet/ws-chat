@@ -90,13 +90,13 @@ func (ta *testApp) dialWith(t *testing.T, query string) (*client, error) {
 	}
 	t.Cleanup(func() { ws.CloseNow() })
 
-	c := &client{t: t, ws: ws}
+	c := &client{t: t, ws: ws, codec: proto.Default()}
 	verb, payload := c.recv()
 	if verb != proto.VerbReady {
 		t.Fatalf("first frame was %s, want %s", verb, proto.VerbReady)
 	}
 	var ready proto.Ready
-	mustUnmarshal(t, payload, &ready)
+	mustUnmarshal(t, c, payload, &ready)
 	c.nick = ready.Nick
 	return c, nil
 }
@@ -116,7 +116,7 @@ func TestAuthNamesTheConnection(t *testing.T) {
 		t.Fatalf("READY nick = %q, want %q", c.nick, "alice")
 	}
 
-	c.send(`MSG {"data":"hello"}`)
+	c.send(proto.VerbMsg, proto.In{Data: "hello"})
 	if msg := c.expectMsg("alice", "hello"); msg.Nick != "alice" {
 		t.Fatalf("message nick = %q, want %q", msg.Nick, "alice")
 	}
@@ -179,11 +179,11 @@ func TestFilterRefusesMessages(t *testing.T) {
 	})
 	c := ta.dial(t)
 
-	c.send(`MSG {"data":"this has badword in it"}`)
+	c.send(proto.VerbMsg, proto.In{Data: "this has badword in it"})
 	c.expectErr("muted")
 
 	// And the refusal is per message, not per connection.
-	c.send(`MSG {"data":"this one is fine"}`)
+	c.send(proto.VerbMsg, proto.In{Data: "this one is fine"})
 	c.expectMsg("", "this one is fine")
 }
 
@@ -193,7 +193,7 @@ func TestFilterAppliesToPrivateMessages(t *testing.T) {
 	})
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(`PRIVMSG {"nick":"` + bob.nick + `","data":"badword"}`)
+	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "badword"})
 	alice.expectErr("muted")
 }
 
@@ -216,7 +216,7 @@ func TestRecorderSeesMessages(t *testing.T) {
 		t.Fatalf("dial bob: %v", err)
 	}
 
-	alice.send(`MSG {"data":"public"}`)
+	alice.send(proto.VerbMsg, proto.In{Data: "public"})
 	alice.expectMsg("alice", "public")
 	bob.expectMsg("alice", "public")
 
@@ -235,7 +235,7 @@ func TestRecorderSeesMessages(t *testing.T) {
 		t.Fatal("the public message was never recorded")
 	}
 
-	alice.send(`PRIVMSG {"nick":"bob","data":"secret"}`)
+	alice.send(proto.VerbPriv, proto.InPriv{Nick: "bob", Data: "secret"})
 	bob.expectPriv("secret")
 	alice.expectPriv("secret")
 
@@ -261,7 +261,7 @@ func TestRecorderFailureDoesNotAffectDelivery(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{Recorder: rec})
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(`MSG {"data":"still delivered"}`)
+	alice.send(proto.VerbMsg, proto.In{Data: "still delivered"})
 	alice.expectMsg("", "still delivered")
 	bob.expectMsg("", "still delivered")
 }
@@ -275,7 +275,7 @@ func TestNoHooksInstalled(t *testing.T) {
 	if !strings.HasPrefix(c.nick, "anon") {
 		t.Fatalf("nick = %q, want an assigned anonymous name", c.nick)
 	}
-	c.send(`MSG {"data":"no layers here"}`)
+	c.send(proto.VerbMsg, proto.In{Data: "no layers here"})
 	c.expectMsg("", "no layers here")
 }
 

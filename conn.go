@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -39,12 +38,21 @@ import (
 // order, since they arrive on two different streams. Each stream is ordered
 // within itself, which is what a client actually needs.
 type conn struct {
-	app  *app
-	ws   *websocket.Conn
-	sub  broadcast.Sub
-	priv chan []byte
-	id   hook.Identity
-	log  *slog.Logger
+	app   *app
+	ws    *websocket.Conn
+	sub   broadcast.Sub
+	priv  chan []byte
+	id    hook.Identity
+	codec proto.Codec
+	log   *slog.Logger
+}
+
+// msgType is the WebSocket message type this connection's codec speaks.
+func (c *conn) msgType() websocket.MessageType {
+	if c.codec.Binary() {
+		return websocket.MessageBinary
+	}
+	return websocket.MessageText
 }
 
 // nick is the connection's display name, as decided at connect time.
@@ -65,8 +73,12 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The wire format is negotiated, not configured: a browser wants JSON
+	// it can read in devtools, a bot moving traffic wants MessagePack, and
+	// the server does not have to care which.
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: a.cfg.AllowedOrigins,
+		Subprotocols:   proto.Names(),
 	})
 	if err != nil {
 		// Accept has already written the error response.
@@ -75,13 +87,24 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	ws.SetReadLimit(a.cfg.MaxFrameSize)
 
-	c := &conn{
-		app:  a,
-		ws:   ws,
-		priv: make(chan []byte, a.cfg.PrivBuffer),
-		id:   id,
+	// A client that asked for nothing gets the default. A client that asked
+	// for something we do not have never gets here: Accept leaves the
+	// subprotocol empty, which is the same as not asking.
+	codec, err := proto.ByName(ws.Subprotocol())
+	if err != nil {
+		a.log.Error("negotiated an unknown subprotocol", "subprotocol", ws.Subprotocol(), "err", err)
+		ws.Close(websocket.StatusProtocolError, "unsupported subprotocol")
+		return
 	}
-	c.log = a.log.With("nick", c.nick(), "remote", r.RemoteAddr)
+
+	c := &conn{
+		app:   a,
+		ws:    ws,
+		priv:  make(chan []byte, a.cfg.PrivBuffer),
+		id:    id,
+		codec: codec,
+	}
+	c.log = a.log.With("nick", c.nick(), "remote", r.RemoteAddr, "codec", codec.Name())
 
 	// Deliberately not r.Context(): the connection is hijacked, and its
 	// lifetime is now the server's shutdown, not the request's.
@@ -93,14 +116,14 @@ func (c *conn) serve(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
-	c.sub = c.app.bc.Subscribe()
+	c.sub = c.app.bcs[c.codec.Name()].Subscribe()
 	c.app.register(c)
 	c.log.Debug("connected")
 
 	// Only now is the connection real: subscribed, addressable, and able to
 	// receive. The handshake finished before any of that, so a client that
 	// talks first would race its own setup.
-	ready, err := proto.Format(proto.VerbReady, proto.Ready{Nick: c.nick()})
+	ready, err := c.codec.Encode(proto.VerbReady, proto.Ready{Nick: c.nick()})
 	if err != nil {
 		c.log.Error("cannot format READY", "err", err)
 		c.ws.CloseNow()
@@ -210,12 +233,12 @@ func (c *conn) readPump(ctx context.Context) error {
 			return err
 		}
 
-		if typ != websocket.MessageText {
-			c.reply(ctx, proto.ErrBinary)
+		if typ != c.msgType() {
+			c.reply(ctx, proto.ErrFraming)
 			continue
 		}
 
-		verb, payload, err := proto.Split(frame)
+		verb, payload, err := c.codec.Decode(frame)
 		if err != nil {
 			c.reply(ctx, proto.ErrProtocol)
 			continue
@@ -227,7 +250,7 @@ func (c *conn) readPump(ctx context.Context) error {
 		case proto.VerbPriv:
 			c.handlePriv(ctx, payload)
 		case proto.VerbPing:
-			c.send(ctx, []byte(proto.VerbPong))
+			c.sendVerb(ctx, proto.VerbPong, nil)
 		default:
 			c.reply(ctx, proto.ErrUnknown)
 		}
@@ -236,7 +259,7 @@ func (c *conn) readPump(ctx context.Context) error {
 
 func (c *conn) handleMsg(ctx context.Context, payload []byte) {
 	var in proto.In
-	if err := json.Unmarshal(payload, &in); err != nil {
+	if err := c.codec.Unmarshal(payload, &in); err != nil {
 		c.reply(ctx, proto.ErrProtocol)
 		return
 	}
@@ -256,31 +279,30 @@ func (c *conn) handleMsg(ctx context.Context, payload []byte) {
 
 	// The id and the timestamp are the server's to assign: a client's clock
 	// is not evidence, and ordering has to come from one place.
-	id := c.app.seq.Add(1)
 	at := time.Now()
-
-	frame, err := proto.Format(proto.VerbMsg, proto.Msg{
-		ID:        id,
-		Nick:      c.nick(),
-		Data:      in.Data,
-		Timestamp: at.UnixMilli(),
+	id, err := c.app.broadcast(proto.VerbMsg, func(id uint64) any {
+		return proto.Msg{
+			ID:        id,
+			Nick:      c.nick(),
+			Data:      in.Data,
+			Timestamp: at.UnixMilli(),
+		}
 	})
 	if err != nil {
-		c.log.Error("cannot format outgoing message", "err", err)
+		c.log.Error("cannot encode outgoing message", "err", err)
 		c.reply(ctx, proto.ErrProtocol)
 		return
 	}
 
-	// Deliver first, persist after. A store having a bad day must cost
+	// Delivered first, persisted after. A store having a bad day must cost
 	// history, never delivery.
-	c.app.bc.Broadcast(frame)
 	c.app.recordMessage(hook.Message{ID: id, From: c.id, Data: in.Data, At: at})
 }
 
 // handlePriv delivers a message to one named client.
 func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 	var in proto.InPriv
-	if err := json.Unmarshal(payload, &in); err != nil {
+	if err := c.codec.Unmarshal(payload, &in); err != nil {
 		c.reply(ctx, proto.ErrProtocol)
 		return
 	}
@@ -311,12 +333,17 @@ func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 	at := time.Now()
 	now := at.UnixMilli()
 
-	// The recipient's copy names the sender.
-	frame, err := proto.Format(proto.VerbPriv, proto.Priv{
+	// The recipient's copy names the sender, and is encoded with the
+	// RECIPIENT's codec: the two ends of a private message negotiated
+	// separately and need not agree. This is the one place a frame crosses
+	// from one connection to another, which is why it is the one place that
+	// has to think about it — broadcasts cannot, and that is a real
+	// constraint on channels, noted in CLAUDE.md.
+	frame, err := target.codec.Encode(proto.VerbPriv, proto.Priv{
 		ID: id, Nick: c.nick(), Data: in.Data, Timestamp: now,
 	})
 	if err != nil {
-		c.log.Error("cannot format private message", "err", err)
+		c.log.Error("cannot encode private message", "err", err)
 		c.reply(ctx, proto.ErrProtocol)
 		return
 	}
@@ -330,7 +357,7 @@ func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 
 	// The sender's echo names the recipient, so a client can render both
 	// halves of a conversation from the same frame type.
-	echo, err := proto.Format(proto.VerbPriv, proto.Priv{
+	echo, err := c.codec.Encode(proto.VerbPriv, proto.Priv{
 		ID: id, Nick: in.Nick, Data: in.Data, Timestamp: now, Sent: true,
 	})
 	if err != nil {
@@ -348,9 +375,14 @@ func (c *conn) handlePriv(ctx context.Context, payload []byte) {
 
 // reply sends an ERR to this client alone.
 func (c *conn) reply(ctx context.Context, description string) {
-	frame, err := proto.Format(proto.VerbErr, proto.Err{Description: description})
+	c.sendVerb(ctx, proto.VerbErr, proto.Err{Description: description})
+}
+
+// sendVerb encodes and sends a frame to this client alone.
+func (c *conn) sendVerb(ctx context.Context, verb string, payload any) {
+	frame, err := c.codec.Encode(verb, payload)
 	if err != nil {
-		c.log.Error("cannot format ERR", "description", description, "err", err)
+		c.log.Error("cannot encode frame", "verb", verb, "err", err)
 		return
 	}
 	c.send(ctx, frame)
@@ -369,7 +401,7 @@ func (c *conn) write(ctx context.Context, frame []byte) bool {
 	wctx, cancel := context.WithTimeout(ctx, c.app.cfg.WriteTimeout.Duration())
 	defer cancel()
 
-	if err := c.ws.Write(wctx, websocket.MessageText, frame); err != nil {
+	if err := c.ws.Write(wctx, c.msgType(), frame); err != nil {
 		c.log.Debug("write failed", "err", err)
 		c.ws.CloseNow() // unblocks the read pump
 		return false

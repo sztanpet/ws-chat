@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +31,7 @@ func TestBroadcast(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(`MSG {"data":"hello everyone"}`)
+	alice.send(proto.VerbMsg, proto.In{Data: "hello everyone"})
 
 	// The sender sees its own message too — it is a broadcast, not an echo,
 	// and a client should render one stream rather than reconcile two.
@@ -51,11 +54,11 @@ func TestMessageIDsAreMonotonic(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(`MSG {"data":"one"}`)
+	alice.send(proto.VerbMsg, proto.In{Data: "one"})
 	first := alice.expectMsg("", "one")
 	bob.expectMsg("", "one")
 
-	bob.send(`MSG {"data":"two"}`)
+	bob.send(proto.VerbMsg, proto.In{Data: "two"})
 	second := alice.expectMsg("", "two")
 
 	if second.ID <= first.ID {
@@ -69,7 +72,9 @@ func TestNickIsAssignedByServer(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(`MSG {"data":"hi","nick":"root"}`)
+	// A client that claims a nick in its payload is ignored: In has no such
+	// field, so this sends the wire form directly.
+	alice.sendRaw([]byte(`MSG {"data":"hi","nick":"root"}`), websocket.MessageText)
 	msg := alice.expectMsg("", "hi")
 	if msg.Nick != alice.nick {
 		t.Fatalf("nick = %q, want the assigned %q", msg.Nick, alice.nick)
@@ -83,7 +88,7 @@ func TestPing(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
 
-	c.send(proto.VerbPing)
+	c.send(proto.VerbPing, nil)
 	if verb, _ := c.recv(); verb != proto.VerbPong {
 		t.Fatalf("got %s, want %s", verb, proto.VerbPong)
 	}
@@ -108,7 +113,7 @@ func TestProtocolErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ta := newTestApp(t)
 			c := ta.dial(t)
-			c.send(tt.frame)
+			c.sendRaw([]byte(tt.frame), websocket.MessageText)
 			c.expectErr(tt.want)
 		})
 	}
@@ -118,11 +123,11 @@ func TestMessageTooLong(t *testing.T) {
 	ta := newTestApp(t, func(c *config.Config) { c.MaxMessage = 8 })
 	c := ta.dial(t)
 
-	c.send(`MSG {"data":"123456789"}`)
+	c.send(proto.VerbMsg, proto.In{Data: "123456789"})
 	c.expectErr(proto.ErrTooLong)
 
 	// The boundary itself is allowed.
-	c.send(`MSG {"data":"12345678"}`)
+	c.send(proto.VerbMsg, proto.In{Data: "12345678"})
 	c.expectMsg("", "12345678")
 }
 
@@ -132,30 +137,28 @@ func TestErrorsDoNotCloseTheConnection(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
 
-	c.send(`FLARP`)
+	c.sendRaw([]byte(`FLARP`), websocket.MessageText)
 	c.expectErr(proto.ErrUnknown)
 
-	c.send(`MSG {"data":"still here"}`)
+	c.send(proto.VerbMsg, proto.In{Data: "still here"})
 	c.expectMsg("", "still here")
 }
 
-func TestBinaryFrameRejected(t *testing.T) {
+// A frame arriving as the wrong WebSocket message type for the negotiated
+// codec is refused rather than guessed at.
+func TestWrongFramingRejected(t *testing.T) {
 	ta := newTestApp(t)
-	c := ta.dial(t)
+	c := ta.dial(t) // JSON, so text
 
-	ctx, cancel := contextWithTimeout()
-	defer cancel()
-	if err := c.ws.Write(ctx, websocket.MessageBinary, []byte("MSG {}")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	c.expectErr(proto.ErrBinary)
+	c.sendRaw([]byte("MSG {}"), websocket.MessageBinary)
+	c.expectErr(proto.ErrFraming)
 }
 
 func TestPrivateMessage(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob, carol := ta.dial(t), ta.dial(t), ta.dial(t)
 
-	alice.send(`PRIVMSG {"nick":"` + bob.nick + `","data":"just for you"}`)
+	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "just for you"})
 
 	// The recipient's copy names the sender and is not marked as sent.
 	got := bob.expectPriv("just for you")
@@ -181,7 +184,7 @@ func TestPrivateMessage(t *testing.T) {
 	// Nobody else sees it. Carol is made to prove it by receiving the next
 	// broadcast instead: if the private message had reached her it would be
 	// first in her stream.
-	alice.send(`MSG {"data":"public again"}`)
+	alice.send(proto.VerbMsg, proto.In{Data: "public again"})
 	carol.expectMsg("", "public again")
 }
 
@@ -190,25 +193,25 @@ func TestPrivateMessageErrors(t *testing.T) {
 
 	t.Run("no such nick", func(t *testing.T) {
 		c := ta.dial(t)
-		c.send(`PRIVMSG {"nick":"nobody","data":"hello?"}`)
+		c.send(proto.VerbPriv, proto.InPriv{Nick: "nobody", Data: "hello?"})
 		c.expectErr(proto.ErrNoSuch)
 	})
 
 	t.Run("to self", func(t *testing.T) {
 		c := ta.dial(t)
-		c.send(`PRIVMSG {"nick":"` + c.nick + `","data":"hello me"}`)
+		c.send(proto.VerbPriv, proto.InPriv{Nick: c.nick, Data: "hello me"})
 		c.expectErr(proto.ErrSelf)
 	})
 
 	t.Run("empty", func(t *testing.T) {
 		c := ta.dial(t)
-		c.send(`PRIVMSG {"nick":"someone","data":""}`)
+		c.send(proto.VerbPriv, proto.InPriv{Nick: "someone", Data: ""})
 		c.expectErr(proto.ErrEmpty)
 	})
 
 	t.Run("bad json", func(t *testing.T) {
 		c := ta.dial(t)
-		c.send(`PRIVMSG nonsense`)
+		c.sendRaw([]byte(`PRIVMSG nonsense`), websocket.MessageText)
 		c.expectErr(proto.ErrProtocol)
 	})
 }
@@ -252,17 +255,17 @@ func TestPrivateMessageToSilentRecipientDoesNotStallSender(t *testing.T) {
 	alice := ta.dial(t)
 	silent := ta.dial(t) // never reads again after this
 
-	pm := `PRIVMSG {"nick":"` + silent.nick + `","data":"anyone there"}`
+	pm := proto.InPriv{Nick: silent.nick, Data: "anyone there"}
 	deadline := time.Now().Add(20 * time.Second)
 	for range 50 {
-		alice.send(pm)
+		alice.send(proto.VerbPriv, pm)
 		verb, payload := alice.recv() // fails the test if it takes >5s
 
 		if verb == proto.VerbErr {
 			// Whatever the reason, the sender was answered rather than
 			// left to wait on somebody else's socket.
 			var e proto.Err
-			mustUnmarshal(t, payload, &e)
+			mustUnmarshal(t, alice, payload, &e)
 			switch e.Description {
 			case proto.ErrBacklog, proto.ErrNoSuch:
 			default:
@@ -283,12 +286,126 @@ func TestShutdownClosesConnections(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
 
-	c.send(`MSG {"data":"still up"}`)
+	c.send(proto.VerbMsg, proto.In{Data: "still up"})
 	c.expectMsg("", "still up")
 
 	ta.app.close()
 
 	if code := c.expectClosed(); code != websocket.StatusGoingAway {
 		t.Fatalf("closed with %v, want %v", code, websocket.StatusGoingAway)
+	}
+}
+
+// The whole suite above runs over JSON. These run the core of it over
+// every codec, which is the only way to know the interface actually
+// decouples anything rather than just existing.
+func TestEveryCodecDelivers(t *testing.T) {
+	for _, codec := range proto.Codecs() {
+		t.Run(codec.Name(), func(t *testing.T) {
+			ta := newTestApp(t)
+			alice := ta.dialCodec(t, codec)
+			bob := ta.dialCodec(t, codec)
+
+			alice.send(proto.VerbMsg, proto.In{Data: "hello over " + codec.Name()})
+			for _, c := range []*client{alice, bob} {
+				msg := c.expectMsg(alice.nick, "hello over "+codec.Name())
+				if msg.ID == 0 || msg.Timestamp == 0 {
+					t.Error("server assigned no id or timestamp")
+				}
+			}
+
+			alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "privately"})
+			if got := bob.expectPriv("privately"); got.Nick != alice.nick {
+				t.Errorf("recipient sees %q, want %q", got.Nick, alice.nick)
+			}
+			alice.expectPriv("privately")
+
+			alice.send(proto.VerbPing, nil)
+			if verb, _ := alice.recv(); verb != proto.VerbPong {
+				t.Errorf("got %s, want %s", verb, proto.VerbPong)
+			}
+
+			alice.send(proto.VerbMsg, proto.In{Data: ""})
+			alice.expectErr(proto.ErrEmpty)
+		})
+	}
+}
+
+// Clients that negotiated different wire formats share a room. The frame
+// is encoded once per codec rather than once per client, so this is the
+// test that would catch a message being fanned out in the sender's format.
+func TestCodecsMixInOneRoom(t *testing.T) {
+	ta := newTestApp(t)
+	jsonClient := ta.dialCodec(t, proto.JSON{})
+	packClient := ta.dialCodec(t, proto.MsgPack{})
+
+	jsonClient.send(proto.VerbMsg, proto.In{Data: "everyone hears this"})
+	first := jsonClient.expectMsg(jsonClient.nick, "everyone hears this")
+	second := packClient.expectMsg(jsonClient.nick, "everyone hears this")
+	if first.ID != second.ID {
+		t.Fatalf("the two copies have different ids: %d and %d", first.ID, second.ID)
+	}
+
+	// And back the other way.
+	packClient.send(proto.VerbMsg, proto.In{Data: "so do they"})
+	jsonClient.expectMsg(packClient.nick, "so do they")
+	packClient.expectMsg(packClient.nick, "so do they")
+
+	// A private message is encoded in the RECIPIENT's format, not the
+	// sender's.
+	jsonClient.send(proto.VerbPriv, proto.InPriv{Nick: packClient.nick, Data: "just you"})
+	if got := packClient.expectPriv("just you"); got.Nick != jsonClient.nick {
+		t.Fatalf("recipient sees %q, want %q", got.Nick, jsonClient.nick)
+	}
+	jsonClient.expectPriv("just you")
+}
+
+// A client that asks for nothing gets the default rather than a refusal.
+func TestNoSubprotocolGetsTheDefault(t *testing.T) {
+	ta := newTestApp(t)
+
+	ctx, cancel := contextWithTimeout()
+	defer cancel()
+
+	url := "ws" + strings.TrimPrefix(ta.srv.URL, "http") + "/ws"
+	ws, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer ws.CloseNow()
+
+	if got := ws.Subprotocol(); got != "" {
+		t.Fatalf("negotiated %q, want none", got)
+	}
+
+	c := &client{t: t, ws: ws, codec: proto.Default()}
+	if verb, _ := c.recv(); verb != proto.VerbReady {
+		t.Fatalf("first frame was %s, want %s", verb, proto.VerbReady)
+	}
+}
+
+// Message ids are handed out under the same lock that writes to every
+// codec's ring, so a client cannot see id 7 before id 6.
+func TestOrderIsConsistentAcrossCodecs(t *testing.T) {
+	ta := newTestApp(t)
+	jsonClient := ta.dialCodec(t, proto.JSON{})
+	packClient := ta.dialCodec(t, proto.MsgPack{})
+
+	const n = 20
+	for i := range n {
+		jsonClient.send(proto.VerbMsg, proto.In{Data: fmt.Sprintf("message %d", i)})
+	}
+
+	var jsonIDs, packIDs []uint64
+	for i := range n {
+		want := fmt.Sprintf("message %d", i)
+		jsonIDs = append(jsonIDs, jsonClient.expectMsg("", want).ID)
+		packIDs = append(packIDs, packClient.expectMsg("", want).ID)
+	}
+	if !slices.Equal(jsonIDs, packIDs) {
+		t.Fatalf("the two clients saw different id orders:\n%v\n%v", jsonIDs, packIDs)
+	}
+	if !slices.IsSorted(jsonIDs) {
+		t.Fatalf("ids arrived out of order: %v", jsonIDs)
 	}
 }

@@ -74,16 +74,33 @@ channel's member set for that reason.
 
 ### Wire protocol
 
-Text frames, one command per frame, in the form:
+One command per frame: a verb and a payload the framing layer carries but
+does not look inside. Unknown verbs get an `ERR` back and do not close the
+connection.
 
-```
-VERB {"json":"payload"}
-```
+**The format is negotiated, not configured.** `internal/proto` defines a
+`Codec` interface — `Encode`, `Decode`, `Unmarshal`, plus whether frames
+are binary — and a client picks one with a WebSocket subprotocol:
 
-Verb is uppercase, followed by a single space, followed by a JSON
-object. No trailing newline, no batching — one frame is one command. A
-frame with no payload is just the verb (`PING`). Unknown verbs get an
-`ERR` back and do not close the connection.
+- `chat.msgpack` — MessagePack, a two-element `[verb, payload]` array.
+  Offered first and the one to prefer: ~20% smaller frames on a typical
+  message and no number-to-string round trip.
+- `chat.json` — text, `VERB {"json":"payload"}`: an uppercase verb, one
+  space, a JSON object. A bare verb has no payload (`PING`). The default
+  for a client that negotiates nothing, because a client that did not ask
+  is one being written by hand against a console.
+
+Both codecs are held to the same test table in `codec_test.go`; if one
+needs its own test to pass they are not interchangeable. Struct fields
+carry both `json:` and `msgpack:` tags so the two agree on names.
+
+The consequence to keep in mind: **a ring holds encoded bytes**, so there
+is one broadcaster per codec and a message is encoded once per codec
+rather than once per subscriber — O(codecs), not O(members). A message id
+is assigned and written to every ring under one small lock, so clients on
+different codecs cannot disagree about what happened first. Private
+messages are encoded with the **recipient's** codec, since the two ends
+negotiate separately.
 
 Implemented today — client → server: `MSG`, `PRIVMSG`, `PING`. Server →
 client: `READY`, `MSG`, `PRIVMSG`, `PONG`, `ERR`.
@@ -104,6 +121,9 @@ that puts a `nick` in its payload is ignored.
 `ERR` payloads use a stable machine-readable code
 (`{"description":"needlogin"}`-style), never a prose string clients have
 to parse.
+
+A frame arriving as the wrong WebSocket message type for the negotiated
+codec is refused with `ERR framing` rather than guessed at.
 
 ### Extension points
 

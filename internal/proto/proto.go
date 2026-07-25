@@ -32,7 +32,7 @@ const (
 	ErrUnknown  = "unknown"       // verb the server does not implement
 	ErrEmpty    = "empty"         // message with no content
 	ErrTooLong  = "toolong"       // message body over the configured limit
-	ErrBinary   = "binary"        // binary frame; this protocol is text only
+	ErrFraming  = "framing"       // wrong WebSocket message type for the negotiated codec
 	ErrNoSuch   = "nosuchnick"    // private message to nobody
 	ErrBacklog  = "recipientbusy" // recipient is not draining its queue
 	ErrSelf     = "self"          // private message to yourself
@@ -50,16 +50,16 @@ const maxVerbLen = 16
 // message carries the channel-scoped id and the server's timestamp, so a
 // client never has to trust its own clock or invent ordering.
 type Msg struct {
-	ID        uint64 `json:"id"`
-	Nick      string `json:"nick"`
-	Data      string `json:"data"`
-	Timestamp int64  `json:"timestamp"` // unix milliseconds
+	ID        uint64 `json:"id" msgpack:"id"`
+	Nick      string `json:"nick" msgpack:"nick"`
+	Data      string `json:"data" msgpack:"data"`
+	Timestamp int64  `json:"timestamp" msgpack:"timestamp"` // unix milliseconds
 }
 
 // In is a chat message as a client sends it: the body and nothing else.
 // Everything the client might claim about itself is assigned by the server.
 type In struct {
-	Data string `json:"data"`
+	Data string `json:"data" msgpack:"data"`
 }
 
 // Priv is a private message as the server sends it. Both parties get one:
@@ -67,18 +67,18 @@ type In struct {
 // recipient and sets Sent, so a client can render its own outgoing messages
 // from the same frame it renders incoming ones.
 type Priv struct {
-	ID        uint64 `json:"id"`
-	Nick      string `json:"nick"`
-	Data      string `json:"data"`
-	Timestamp int64  `json:"timestamp"`
-	Sent      bool   `json:"sent,omitempty"`
+	ID        uint64 `json:"id" msgpack:"id"`
+	Nick      string `json:"nick" msgpack:"nick"`
+	Data      string `json:"data" msgpack:"data"`
+	Timestamp int64  `json:"timestamp" msgpack:"timestamp"`
+	Sent      bool   `json:"sent,omitempty" msgpack:"sent,omitempty"`
 }
 
 // InPriv is a private message as a client sends it: who it is for, and the
 // body.
 type InPriv struct {
-	Nick string `json:"nick"`
-	Data string `json:"data"`
+	Nick string `json:"nick" msgpack:"nick"`
+	Data string `json:"data" msgpack:"data"`
 }
 
 // Ready is the first frame the server sends. It tells the client the name
@@ -87,16 +87,17 @@ type InPriv struct {
 // WebSocket handshake completes before the server has finished wiring the
 // connection up.
 type Ready struct {
-	Nick string `json:"nick"`
+	Nick string `json:"nick" msgpack:"nick"`
 }
 
 // Err is a refusal. Description is one of the codes above.
 type Err struct {
-	Description string `json:"description"`
+	Description string `json:"description" msgpack:"description"`
 }
 
-// Split separates a frame into its verb and its raw JSON payload. The
-// payload is nil for a bare verb; it is not parsed here, only carried.
+// Split separates a text frame into its verb and its raw JSON payload. The
+// payload is nil for a bare verb; it is not parsed here, only carried. It
+// is the framing half of the JSON codec.
 func Split(frame []byte) (verb string, payload []byte, err error) {
 	if len(frame) == 0 {
 		return "", nil, fmt.Errorf("%w: empty", ErrMalformed)
@@ -138,7 +139,8 @@ func validVerb(v string) bool {
 	return true
 }
 
-// Format builds a frame. A nil payload produces the bare verb.
+// Format builds a text frame. A nil payload produces the bare verb. It is
+// the framing half of the JSON codec.
 func Format(verb string, payload any) ([]byte, error) {
 	if !validVerb(verb) {
 		return nil, fmt.Errorf("%w: bad verb %q", ErrMalformed, verb)

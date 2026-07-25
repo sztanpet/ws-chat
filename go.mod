@@ -7,4 +7,7 @@ toolchain go1.26.4
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/tailscale/hujson v0.0.0-20260722022634-78b5b162ee49
+	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
+
+require github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect

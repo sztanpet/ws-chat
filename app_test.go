@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"strings"
@@ -58,27 +57,43 @@ func newTestAppWith(t *testing.T, hooks hook.Hooks, tweak ...func(*config.Config
 	return &testApp{app: a, srv: srv, t: t}
 }
 
-// client is a connected WebSocket with the assertions the tests need.
+// client is a connected WebSocket with the assertions the tests need. It
+// speaks whichever codec it negotiated, so the same assertions work over
+// either wire format.
 type client struct {
-	t    *testing.T
-	ws   *websocket.Conn
-	nick string // as assigned by the server, from the READY frame
+	t     *testing.T
+	ws    *websocket.Conn
+	codec proto.Codec
+	nick  string // as assigned by the server, from the READY frame
 }
 
+// dial connects with the default (JSON) codec.
 func (ta *testApp) dial(t *testing.T) *client {
+	t.Helper()
+	return ta.dialCodec(t, proto.Default())
+}
+
+// dialCodec connects asking for a specific wire format.
+func (ta *testApp) dialCodec(t *testing.T, codec proto.Codec) *client {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	url := "ws" + strings.TrimPrefix(ta.srv.URL, "http") + "/ws"
-	ws, _, err := websocket.Dial(ctx, url, nil)
+	ws, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		Subprotocols: []string{codec.Name()},
+	})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { ws.CloseNow() })
 
-	c := &client{t: t, ws: ws}
+	if got := ws.Subprotocol(); got != codec.Name() {
+		t.Fatalf("negotiated %q, want %q", got, codec.Name())
+	}
+
+	c := &client{t: t, ws: ws, codec: codec}
 
 	// Waiting for READY is not politeness, it is what makes the test
 	// deterministic: the handshake returns before the server has subscribed
@@ -89,7 +104,7 @@ func (ta *testApp) dial(t *testing.T) *client {
 		t.Fatalf("first frame was %s, want %s", verb, proto.VerbReady)
 	}
 	var ready proto.Ready
-	if err := json.Unmarshal(payload, &ready); err != nil {
+	if err := c.codec.Unmarshal(payload, &ready); err != nil {
 		t.Fatalf("bad READY payload %q: %v", payload, err)
 	}
 	if ready.Nick == "" {
@@ -99,11 +114,30 @@ func (ta *testApp) dial(t *testing.T) *client {
 	return c
 }
 
-func (c *client) send(frame string) {
+// msgType is the WebSocket message type this client's codec uses.
+func (c *client) msgType() websocket.MessageType {
+	if c.codec.Binary() {
+		return websocket.MessageBinary
+	}
+	return websocket.MessageText
+}
+
+// send encodes and sends a command.
+func (c *client) send(verb string, payload any) {
+	c.t.Helper()
+	frame, err := c.codec.Encode(verb, payload)
+	if err != nil {
+		c.t.Fatalf("encode %s: %v", verb, err)
+	}
+	c.sendRaw(frame, c.msgType())
+}
+
+// sendRaw sends bytes as-is, for the tests that are about malformed input.
+func (c *client) sendRaw(frame []byte, typ websocket.MessageType) {
 	c.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := c.ws.Write(ctx, websocket.MessageText, []byte(frame)); err != nil {
+	if err := c.ws.Write(ctx, typ, frame); err != nil {
 		c.t.Fatalf("write %q: %v", frame, err)
 	}
 }
@@ -118,10 +152,10 @@ func (c *client) recv() (verb string, payload []byte) {
 	if err != nil {
 		c.t.Fatalf("read: %v", err)
 	}
-	if typ != websocket.MessageText {
-		c.t.Fatalf("got a %v frame, want text", typ)
+	if typ != c.msgType() {
+		c.t.Fatalf("got a %v frame, want %v", typ, c.msgType())
 	}
-	verb, payload, err = proto.Split(frame)
+	verb, payload, err = c.codec.Decode(frame)
 	if err != nil {
 		c.t.Fatalf("server sent an unparseable frame %q: %v", frame, err)
 	}
@@ -136,7 +170,7 @@ func (c *client) expectMsg(nick, data string) proto.Msg {
 		c.t.Fatalf("got %s, want %s", verb, proto.VerbMsg)
 	}
 	var msg proto.Msg
-	if err := json.Unmarshal(payload, &msg); err != nil {
+	if err := c.codec.Unmarshal(payload, &msg); err != nil {
 		c.t.Fatalf("bad MSG payload %q: %v", payload, err)
 	}
 	if msg.Data != data {
@@ -156,7 +190,7 @@ func (c *client) expectPriv(data string) proto.Priv {
 		c.t.Fatalf("got %s %s, want %s", verb, payload, proto.VerbPriv)
 	}
 	var msg proto.Priv
-	if err := json.Unmarshal(payload, &msg); err != nil {
+	if err := c.codec.Unmarshal(payload, &msg); err != nil {
 		c.t.Fatalf("bad PRIVMSG payload %q: %v", payload, err)
 	}
 	if msg.Data != data {
@@ -173,7 +207,7 @@ func (c *client) expectErr(description string) {
 		c.t.Fatalf("got %s %s, want %s %s", verb, payload, proto.VerbErr, description)
 	}
 	var e proto.Err
-	if err := json.Unmarshal(payload, &e); err != nil {
+	if err := c.codec.Unmarshal(payload, &e); err != nil {
 		c.t.Fatalf("bad ERR payload %q: %v", payload, err)
 	}
 	if e.Description != description {
@@ -186,9 +220,9 @@ func contextWithTimeout() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
 }
 
-func mustUnmarshal(t *testing.T, data []byte, v any) {
+func mustUnmarshal(t *testing.T, c *client, data []byte, v any) {
 	t.Helper()
-	if err := json.Unmarshal(data, v); err != nil {
+	if err := c.codec.Unmarshal(data, v); err != nil {
 		t.Fatalf("bad payload %q: %v", data, err)
 	}
 }

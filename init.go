@@ -12,6 +12,7 @@ import (
 	"github.com/sztanpet/ws-chat/internal/broadcast"
 	"github.com/sztanpet/ws-chat/internal/config"
 	"github.com/sztanpet/ws-chat/internal/hook"
+	"github.com/sztanpet/ws-chat/internal/proto"
 )
 
 // app is the composition root. Everything the handlers need hangs off it,
@@ -30,11 +31,23 @@ type app struct {
 	recordsDone chan struct{}
 	dropped     atomic.Uint64
 
-	// bc is the fan-out. There is exactly one for now — a single implicit
-	// channel that every connection joins. Channel support replaces this
-	// with a lookup from channel name to its own broadcaster; nothing else
-	// in the connection handling should have to change.
-	bc broadcast.Broadcaster
+	// bcs is the fan-out: one broadcaster per wire format, keyed by codec
+	// name. A ring holds encoded bytes and every subscriber gets the same
+	// ones, so clients that negotiated different codecs cannot share one —
+	// a message is encoded once per codec instead of once per subscriber,
+	// which keeps the cost O(codecs) rather than O(members).
+	//
+	// There is one set of these for now, a single implicit channel every
+	// connection joins. Channels replace it with a lookup from channel name
+	// to its own set.
+	bcs map[string]broadcast.Broadcaster
+
+	// sendMu is held while a message is assigned its id and written to
+	// every codec's ring. Without it two senders could reach the rings in
+	// different orders and clients on different codecs would disagree about
+	// what happened first. The critical section is two ring writes, about
+	// forty nanoseconds; consistent ordering is worth that.
+	sendMu sync.Mutex
 
 	mux *http.ServeMux
 	srv *http.Server
@@ -79,13 +92,17 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 		cfg:   cfg,
 		hooks: hooks,
 		log:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})),
-		bc:    broadcast.NewRing(cfg.Capacity),
+		bcs:   make(map[string]broadcast.Broadcaster, len(proto.Codecs())),
 		mux:   http.NewServeMux(),
 		conns: make(map[string]*conn),
 
 		records:     make(chan func(context.Context) error, recordQueue),
 		recordsDone: make(chan struct{}),
 	}
+	for _, codec := range proto.Codecs() {
+		a.bcs[codec.Name()] = broadcast.NewRing(cfg.Capacity)
+	}
+
 	a.ctx, a.stopConn = context.WithCancel(context.Background())
 	if hooks.Recorder != nil {
 		go a.recordWorker(a.ctx)
@@ -134,6 +151,33 @@ func (a *app) lookup(nick string) (*conn, bool) {
 	defer a.connsMu.RUnlock()
 	c, ok := a.conns[nick]
 	return c, ok
+}
+
+// broadcast encodes the payload once per codec and hands each ring its own
+// copy, under the lock that keeps every client's view of the order the
+// same.
+func (a *app) broadcast(verb string, build func(id uint64) any) (uint64, error) {
+	frames := make(map[string][]byte, len(a.bcs))
+
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+
+	id := a.seq.Add(1)
+	payload := build(id)
+
+	// Encode everything before delivering anything: a codec that fails must
+	// not leave half the room having seen the message.
+	for _, codec := range proto.Codecs() {
+		frame, err := codec.Encode(verb, payload)
+		if err != nil {
+			return 0, err
+		}
+		frames[codec.Name()] = frame
+	}
+	for name, frame := range frames {
+		a.bcs[name].Broadcast(frame)
+	}
+	return id, nil
 }
 
 func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
