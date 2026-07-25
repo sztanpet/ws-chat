@@ -1,34 +1,43 @@
 {
 	// Copy this file to config.hujson next to the binary and uncomment
-	// what you need. Everything here is the built-in default; an empty
-	// config.hujson is a valid config.
+	// what you need. Every value here is the built-in default, so an
+	// absent or empty config.hujson is a valid config.
+	//
+	// config_test.go loads this file and checks it against the defaults in
+	// code, so the two cannot drift apart.
 
-	// Address the HTTP server listens on. Ignored when the process is
-	// started through systemd socket activation.
+	// Address the HTTP server listens on.
 	// "Addr": ":8080",
-
-	// Path to the data directory holding the SQLite files, relative to
-	// the binary.
-	// "DataDir": "data",
 
 	// Origins allowed to open a WebSocket. Empty means same-origin only;
 	// "*" disables the check entirely (do not do that in production).
 	// "AllowedOrigins": [],
 
-	// Per-connection outbound frame buffer. A client that falls this far
-	// behind is disconnected rather than allowed to stall fan-out.
-	// "WriteBuffer": 256,
+	// How many messages the shared fan-out buffer holds. It doubles as the
+	// lag threshold: a client that falls this far behind is disconnected
+	// rather than waited on.
+	// "Capacity": 256,
 
-	// Per-connection rate limit: burst frames, and the refill interval.
-	// "RateBurst": 10,
-	// "RateInterval": "1s",
+	// How many frames a connection's write pump takes per wakeup. Larger
+	// means fewer wakeups for a client that has fallen behind.
+	// "WriteBatch": 16,
 
-	// How many messages per channel are kept in memory and replayed to a
-	// client on JOIN.
-	// "Scrollback": 150,
+	// The largest frame the server will read from a client, in bytes.
+	// "MaxFrameSize": 32768,
 
-	// Idle timeout: a connection that sends nothing (not even a PING)
-	// for this long is closed.
+	// The longest chat message body accepted, in bytes.
+	// "MaxMessage": 512,
+
+	// How many private messages may be queued for one client before
+	// further ones are refused with ERR recipientbusy.
+	// "PrivBuffer": 32,
+
+	// Bounds a single socket write. Without it a client that stops reading
+	// wedges whatever goroutine is writing to it.
+	// "WriteTimeout": "10s",
+
+	// Closes a connection that has sent nothing at all — not even a PING —
+	// for this long. Clients are expected to ping.
 	// "IdleTimeout": "90s",
 
 	// Log level: debug, info, warn, error.
