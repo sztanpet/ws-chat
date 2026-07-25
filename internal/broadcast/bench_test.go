@@ -224,8 +224,11 @@ func fanoutBuffer(subs int) int {
 // implementation whose timed op is a hundred times cheaper gets a b.N a
 // hundred times larger and the drain stops finishing at all.
 func needsDrain(bc Broadcaster) bool {
-	_, shared := bc.(*Ring)
-	return !shared
+	switch bc.(type) {
+	case *Ring, *CondRing:
+		return false
+	}
+	return true
 }
 
 // drainN takes exactly count messages off a subscription.
