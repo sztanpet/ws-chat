@@ -46,6 +46,12 @@ _(none yet)_
   is the component most likely to be rewritten, so alternatives are added
   to one table and are measured by the existing tests and benchmarks
   without touching a caller.
+- **Ring will not throttle senders; MapChan accidentally did.** MapChan's
+  O(N) send path was backpressure by side effect. With 1000 concurrent
+  senders against 10000 subscribers, MapChan still delivers 99.9% while
+  Ring delivers nothing — the senders outrun the receivers and the drops
+  cascade. `internal/ratelimit` is what has to bound the send rate now;
+  it is load-bearing, not a nicety. Measured in `BenchmarkFanoutChatty`.
 - **`sync.Cond` was measured against the ring's notify channel and lost.**
   It removes the per-broadcast allocation and delivery is a wash, but it
   cannot wake one waiter, so a part wakes the whole room — 13x on a

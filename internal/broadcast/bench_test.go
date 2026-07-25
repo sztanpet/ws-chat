@@ -3,6 +3,7 @@ package broadcast
 import (
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -184,6 +185,39 @@ func warm(bc Broadcaster) {
 	time.Sleep(20 * time.Millisecond)
 }
 
+// pacingPatience is how many yields a sender will spend waiting for
+// receivers that are making no progress at all before it gives up and
+// carries on.
+const pacingPatience = 100_000
+
+// pace holds a sender back until the receivers are within lead messages per
+// subscriber of what has been sent.
+//
+// The bail-out is not optional. A subscriber dropped for lagging stops
+// receiving until its drainer reconnects, so the messages it missed are
+// never delivered to anybody — and a sender waiting for the delivered count
+// to catch up to what it sent would wait for that forever. The first
+// version of the chatty benchmark did exactly that and hung. Giving up
+// shows in delivered/sent, which is the number that was going to be read
+// anyway.
+func pace(r *rig, base, sent int64, subs, lead int) {
+	limit := int64(subs) * int64(lead)
+	last := r.total.Load()
+	stalled := 0
+
+	for sent*int64(subs)-(r.total.Load()-base) > limit {
+		runtime.Gosched()
+
+		if now := r.total.Load(); now != last {
+			last, stalled = now, 0
+			continue
+		}
+		if stalled++; stalled > pacingPatience {
+			return // the receivers are not coming back
+		}
+	}
+}
+
 // reportSend is for the family with no receivers: cost per message handed
 // to the broadcaster.
 func reportSend(b *testing.B, subs int) {
@@ -352,11 +386,7 @@ func BenchmarkFanoutPaced(b *testing.B) {
 				b.ResetTimer()
 				for i := range b.N {
 					r.bc.Broadcast(benchMsg)
-
-					sent := int64(i+1) * int64(subs)
-					for sent-(r.total.Load()-base) > int64(subs)*lead {
-						runtime.Gosched()
-					}
+					pace(r, base, int64(i+1), subs, lead)
 				}
 				b.StopTimer()
 
@@ -467,6 +497,95 @@ func BenchmarkChurnUnderLoad(b *testing.B) {
 				close(quit)
 				wg.Wait()
 				r.stop()
+			})
+		}
+	}
+}
+
+// BenchmarkFanoutChatty is the shape a real room has: everybody is
+// listening and a small fraction of them are talking. Ten percent of the
+// subscribers are chatty, each with a sender goroutine of its own alongside
+// its drainer — which is how the server is built, a read pump and a write
+// pump per connection.
+//
+// The senders are paced collectively, for the same reason BenchmarkFanoutLive
+// is not the comparison to use: without it an O(1) send path laps its own
+// receivers and delivered/sent collapses. Here a hundred senders would lap
+// them a hundred times faster.
+//
+// One thing this benchmark cannot show, and it is worth saying rather than
+// implying otherwise. WHICH subscribers are chosen is random, but for a
+// broadcaster it cannot matter: a broadcast does not travel through the
+// sender's own subscription, so a sender is just another member plus a
+// goroutine. The random subset is therefore a count and a concurrency
+// level, not a selection — what changes the numbers is how many goroutines
+// are sending at once while the rest only receive.
+func BenchmarkFanoutChatty(b *testing.B) {
+	// How far ahead of the receivers the senders may collectively get, per
+	// subscriber. Well under benchBuffer so pacing, not dropping, is what
+	// bounds them.
+	const lead = 64
+
+	for _, impl := range impls {
+		// Ten thousand is left out, and the reason is worth knowing: ten
+		// percent of it is a THOUSAND concurrent senders, which
+		// oversubscribes a four-core box long before the broadcaster is the
+		// bottleneck. Measured there, Ring delivers nothing at all — see
+		// state/broadcast.md. Raise this on hardware that can carry it and
+		// watch delivered/sent to know whether it could.
+		for _, subs := range []int{100, 1_000} {
+			b.Run(fmt.Sprintf("%s/subs=%d", impl.name, subs), func(b *testing.B) {
+				senders := max(1, subs/10)
+
+				r := newRigPaced(impl.new, subs, benchBuffer, true)
+				warm(r.bc)
+
+				// The talkative tenth, drawn at random rather than off the
+				// front of the list. It changes nothing here (see above),
+				// and it would stop an implementation that ordered or
+				// bucketed its members from being flattered by a benchmark
+				// that always picked the same ones.
+				chatty := rand.Perm(subs)[:senders]
+
+				// A fixed share each, so nothing has to coordinate on a
+				// counter in the middle of the measurement.
+				share := b.N / senders
+				extra := b.N % senders
+
+				drops0, delivered0 := r.bc.Drops(), r.delivered()
+				base := r.total.Load()
+				var sent atomic.Int64
+
+				var wg sync.WaitGroup
+				b.ReportAllocs()
+				b.ResetTimer()
+
+				for i := range chatty {
+					mine := share
+					if i < extra {
+						mine++
+					}
+					wg.Add(1)
+					go func(mine int) {
+						defer wg.Done()
+						for range mine {
+							r.bc.Broadcast(benchMsg)
+
+							// One atomic per message across all senders. At
+							// these subscriber counts a broadcast costs
+							// microseconds, so a contended add is noise —
+							// which is the only reason it is allowed to be
+							// shared.
+							pace(r, base, sent.Add(1), subs, lead)
+						}
+					}(mine)
+				}
+				wg.Wait()
+				b.StopTimer()
+
+				drops, delivered := r.bc.Drops()-drops0, r.delivered()-delivered0
+				r.stop()
+				reportDelivery(b, subs, drops, delivered)
 			})
 		}
 	}

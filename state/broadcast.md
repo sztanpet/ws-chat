@@ -122,6 +122,47 @@ allocating: waking generation N and parking for generation N+1 use two
 both the waker and the re-parking sleeper contend on. Would need a
 profile to confirm.
 
+## The chatty-room benchmark
+
+`BenchmarkFanoutChatty` is the shape a real room has: everybody listening,
+ten percent of them talking, each talker with a sender goroutine of its
+own alongside its drainer — the server's read pump and write pump per
+connection. Senders are paced collectively.
+
+Medians of five runs, all at ~99% delivery:
+
+```
+subs   mapchan      ring        condring
+100    34.9 ns/msg  35.2 ns/msg 31.6 ns/msg
+1000   39.2 ns/msg  16.7 ns/msg 17.8 ns/msg
+```
+
+At a hundred subscribers the three are indistinguishable — ten concurrent
+senders over ten thousand deliveries is not enough work for the data
+structure to matter. At a thousand, `Ring` and `CondRing` are 2.3x ahead
+of `MapChan` and level with each other; the allocation `Ring` pays per
+broadcast starts to show against `CondRing` under a hundred concurrent
+senders, but not enough to overturn the churn result above.
+
+**Ten thousand is not measurable on this box, and how it fails is the
+finding.** Ten percent of it is a thousand concurrent senders against ten
+thousand drainers on four cores. `MapChan` still delivers 99.9% at 72
+ns/msg. `Ring` delivers **nothing at all** — 0.0 delivered/sent and 25
+subscribers dropped per broadcast.
+
+That is not `Ring` being worse. It is `MapChan`'s O(N) send path acting as
+accidental backpressure: a broadcast to ten thousand subscribers costs the
+sender ~700us of its own CPU, which throttles a thousand senders whether
+they like it or not. `Ring` sends in 8ns, so the senders outrun the
+receivers, stragglers get lapped, and the drop cascades until nobody is
+receiving anything.
+
+**The consequence for the server: `Ring` will not throttle senders for
+you.** MapChan's self-limiting was never a design, it was a side effect of
+being slow, and switching to Ring removed it. Something else has to bound
+the send rate — which is what `internal/ratelimit` is for, and this is the
+measurement that says the rate limiter is load-bearing rather than a nicety.
+
 ## Harness gotchas (hard-won, do not undo)
 
 1. **Count deliveries, not Broadcast calls.** A broadcaster that drops on
@@ -149,7 +190,14 @@ profile to confirm.
    of it said `CondRing` was 2.2x slower on delivery; eight runs and a
    median put the two within 5%. Use `-count=8` and take the median for
    anything that decides something.
-7. **`BenchmarkFanout`'s untimed drain is O(b.N x subs)**, so an
+7. **A paced sender must be able to give up waiting.** A subscriber
+   dropped for lagging stops receiving until it reconnects, so messages it
+   missed are never delivered to anybody, and a sender waiting for the
+   delivered count to catch up waits forever. The first chatty benchmark
+   hung on exactly that. `pace` bails out after 100k yields with no
+   progress at all, and the abandonment shows up as a low delivered/sent
+   rather than as a hang.
+8. **`BenchmarkFanout`'s untimed drain is O(b.N x subs)**, so an
    implementation with a much cheaper timed op gets a much larger `b.N` and
    the drain stops finishing. `needsDrain` skips it for shared-storage
    implementations, which genuinely do not need it. New implementations may
