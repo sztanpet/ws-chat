@@ -6,15 +6,18 @@ only when you are touching that track.
 
 ## Latest
 
-`internal/broadcast`: the fan-out primitive, with `MapChan` (map behind an
-RWMutex, buffered channel per subscriber) as the reference implementation
-and a benchmark harness built to compare alternatives against it. Zero
-allocations on the broadcast path; the headline finding is that ~two
-thirds of a broadcast's cost is waking receiver goroutines, not walking
-the member set. Full detail, baseline numbers and the harness traps are in
-`state/broadcast.md`. Nothing consumes the package yet — the next
-milestone is still the walking skeleton (config + HTTP server + `/ws`
-upgrade + read/write pumps + an `httptest`-based client test).
+`internal/broadcast`: the fan-out primitive, now with two implementations
+behind one interface. `MapChan` (map behind an RWMutex, buffered channel
+per subscriber) is the reference; `Ring` (one shared ring buffer, each
+subscriber reading at its own position) is the one to build on. Ring's
+Broadcast is O(1) in the subscriber count — 8ns flat against MapChan's
+48ns to 706us — and at an honest ~100% delivery it costs 17.7 ns/msg at a
+thousand subscribers against 98.7, roughly flat where MapChan's
+quadruples. Receiving became batch-oriented to make that possible. Full
+detail, baselines and the harness traps are in `state/broadcast.md`.
+Nothing consumes the package yet — the next milestone is still the walking
+skeleton (config + HTTP server + `/ws` upgrade + read/write pumps + an
+`httptest`-based client test).
 
 ## State file index
 
@@ -44,9 +47,16 @@ _(none yet)_
   is the component most likely to be rewritten, so alternatives are added
   to one table and are measured by the existing tests and benchmarks
   without touching a caller.
-- **Fan-out benchmarks report `drops/op` alongside `ns/op`.** A drop-on-full
-  broadcaster can post a fantastic time by delivering to nobody; without
-  that metric an invalid run is indistinguishable from a fast one.
+- **Fan-out benchmarks count deliveries, not calls.** A drop-on-full
+  broadcaster looks fastest when it fails fastest, so every fan-out
+  benchmark reports `delivered/sent` and `drops/op` next to `ns/op`.
+  Comparisons are made with a paced sender: an implementation whose send
+  path is O(1) has nothing pacing it against its receivers and will lap
+  them instead of feeding them.
+- **The write pump takes batches, not single messages.** `Sub.Recv` fills a
+  slice, so one wakeup drains everything pending and can coalesce it into a
+  single socket write. This is what makes shared-storage fan-out possible
+  at all.
 
 ## Removed
 
