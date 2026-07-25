@@ -47,11 +47,16 @@ _(none yet)_
   to one table and are measured by the existing tests and benchmarks
   without touching a caller.
 - **Ring will not throttle senders; MapChan accidentally did.** MapChan's
-  O(N) send path was backpressure by side effect. With 1000 concurrent
-  senders against 10000 subscribers, MapChan still delivers 99.9% while
-  Ring delivers nothing — the senders outrun the receivers and the drops
-  cascade. `internal/ratelimit` is what has to bound the send rate now;
-  it is load-bearing, not a nicety. Measured in `BenchmarkFanoutChatty`.
+  O(N) send path was backpressure by side effect, so Ring is the one that
+  needs enough buffer and an actual rate limiter. `internal/ratelimit` is
+  load-bearing, not a nicety.
+- **Ring capacity has to be sized for the lag SPREAD, not the average.** At
+  10k subscribers with 1000 senders, 256 slots collapses to 0.07% delivery
+  and 4096 gives 99.8% at 7.7 ns/msg — nine times faster than MapChan.
+  Affordable only because the storage is shared: 4096 slots is 64KB total,
+  where the same slack per subscriber would be 655MB. The server default
+  Capacity is 4096 for this reason. Measured in
+  `BenchmarkFanoutChattyCapacity`.
 - **`sync.Cond` was measured against the ring's notify channel and lost.**
   It removes the per-broadcast allocation and delivery is a wash, but it
   cannot wake one waiter, so a part wakes the whole room — 13x on a

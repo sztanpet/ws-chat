@@ -174,15 +174,36 @@ func drainer(bc Broadcaster, s Sub, c *counter, total *atomic.Int64, wg *sync.Wa
 	}
 }
 
+// warmPatience bounds the wait for the warm-up to be consumed. With a small
+// buffer some of it is dropped instead and never will be.
+const warmPatience = 5 * time.Second
+
 // warm runs the fan-out untimed until the drainers are scheduled and their
 // queues are empty. A cold run's first few thousand broadcasts outrun
 // receiver goroutines that have not been given a P yet, and the timed
 // region should not start in the middle of that reconnect storm.
-func warm(bc Broadcaster) {
-	for range 4 * benchBuffer {
-		bc.Broadcast(benchMsg)
+//
+// It WAITS for the warm-up to be consumed rather than sleeping a fixed
+// interval, and that is not a nicety. A fixed sleep is enough time only if
+// the buffer is small enough that the leftovers get dropped. Give the same
+// run a large buffer and nothing is dropped, so a thousand warm-up
+// broadcasts to ten thousand subscribers — ten million deliveries — are
+// still sitting in the ring when the timed region starts, and land inside
+// it. The measurement then counts deliveries it never asked for, which
+// showed up as delivered/sent of 1.7: a ratio above 1.0 is not a rounding
+// error, it is the harness measuring its own setup.
+func warm(r *rig) {
+	const messages = 4 * benchBuffer
+
+	for range messages {
+		r.bc.Broadcast(benchMsg)
 	}
-	time.Sleep(20 * time.Millisecond)
+
+	want := int64(messages) * int64(len(r.counters))
+	deadline := time.Now().Add(warmPatience)
+	for r.delivered() < want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // pacingPatience is how many yields a sender will spend waiting for
@@ -257,12 +278,18 @@ func fanoutBuffer(subs int) int {
 // This is not a nicety. The untimed drain is O(b.N x subs), so an
 // implementation whose timed op is a hundred times cheaper gets a b.N a
 // hundred times larger and the drain stops finishing at all.
-func needsDrain(bc Broadcaster) bool {
+func needsDrain(bc Broadcaster) bool { return !sharedStorage(bc) }
+
+// sharedStorage reports whether an implementation keeps one buffer for the
+// whole broadcaster rather than one per subscriber. It decides two things:
+// whether an unread subscriber has to be drained, and whether capacity is
+// affordable — a per-subscriber buffer costs N times as much of it.
+func sharedStorage(bc Broadcaster) bool {
 	switch bc.(type) {
 	case *Ring, *CondRing:
-		return false
+		return true
 	}
-	return true
+	return false
 }
 
 // drainN takes exactly count messages off a subscription.
@@ -336,7 +363,7 @@ func BenchmarkFanoutLive(b *testing.B) {
 		for _, subs := range benchLiveSubCounts {
 			b.Run(fmt.Sprintf("%s/subs=%d", impl.name, subs), func(b *testing.B) {
 				r := newRig(impl.new, subs, benchBuffer)
-				warm(r.bc)
+				warm(r)
 
 				drops0, delivered0 := r.bc.Drops(), r.delivered()
 				b.ReportAllocs()
@@ -378,7 +405,7 @@ func BenchmarkFanoutPaced(b *testing.B) {
 		for _, subs := range benchLiveSubCounts {
 			b.Run(fmt.Sprintf("%s/subs=%d", impl.name, subs), func(b *testing.B) {
 				r := newRigPaced(impl.new, subs, benchBuffer, true)
-				warm(r.bc)
+				warm(r)
 
 				drops0, delivered0 := r.bc.Drops(), r.delivered()
 				base := r.total.Load()
@@ -414,7 +441,7 @@ func BenchmarkFanoutSaturated(b *testing.B) {
 		for _, subs := range []int{100, 1_000} {
 			b.Run(fmt.Sprintf("%s/subs=%d", impl.name, subs), func(b *testing.B) {
 				r := newRig(impl.new, subs, benchBuffer)
-				warm(r.bc)
+				warm(r)
 
 				drops0, delivered0 := r.bc.Drops(), r.delivered()
 				b.ReportAllocs()
@@ -468,7 +495,7 @@ func BenchmarkChurnUnderLoad(b *testing.B) {
 			b.Run(fmt.Sprintf("%s/senders=%d", impl.name, senders), func(b *testing.B) {
 				const subs = 1_000
 				r := newRig(impl.new, subs, benchBuffer)
-				warm(r.bc)
+				warm(r)
 
 				var wg sync.WaitGroup
 				quit := make(chan struct{})
@@ -521,72 +548,109 @@ func BenchmarkChurnUnderLoad(b *testing.B) {
 // level, not a selection — what changes the numbers is how many goroutines
 // are sending at once while the rest only receive.
 func BenchmarkFanoutChatty(b *testing.B) {
-	// How far ahead of the receivers the senders may collectively get, per
-	// subscriber. Well under benchBuffer so pacing, not dropping, is what
-	// bounds them.
-	const lead = 64
-
 	for _, impl := range impls {
-		// Ten thousand is left out, and the reason is worth knowing: ten
-		// percent of it is a THOUSAND concurrent senders, which
-		// oversubscribes a four-core box long before the broadcaster is the
-		// bottleneck. Measured there, Ring delivers nothing at all — see
-		// state/broadcast.md. Raise this on hardware that can carry it and
-		// watch delivered/sent to know whether it could.
+		// Ten thousand is left to BenchmarkFanoutChattyCapacity, which
+		// varies the one thing that turns out to decide whether it works
+		// at all.
 		for _, subs := range []int{100, 1_000} {
 			b.Run(fmt.Sprintf("%s/subs=%d", impl.name, subs), func(b *testing.B) {
-				senders := max(1, subs/10)
-
-				r := newRigPaced(impl.new, subs, benchBuffer, true)
-				warm(r.bc)
-
-				// The talkative tenth, drawn at random rather than off the
-				// front of the list. It changes nothing here (see above),
-				// and it would stop an implementation that ordered or
-				// bucketed its members from being flattered by a benchmark
-				// that always picked the same ones.
-				chatty := rand.Perm(subs)[:senders]
-
-				// A fixed share each, so nothing has to coordinate on a
-				// counter in the middle of the measurement.
-				share := b.N / senders
-				extra := b.N % senders
-
-				drops0, delivered0 := r.bc.Drops(), r.delivered()
-				base := r.total.Load()
-				var sent atomic.Int64
-
-				var wg sync.WaitGroup
-				b.ReportAllocs()
-				b.ResetTimer()
-
-				for i := range chatty {
-					mine := share
-					if i < extra {
-						mine++
-					}
-					wg.Add(1)
-					go func(mine int) {
-						defer wg.Done()
-						for range mine {
-							r.bc.Broadcast(benchMsg)
-
-							// One atomic per message across all senders. At
-							// these subscriber counts a broadcast costs
-							// microseconds, so a contended add is noise —
-							// which is the only reason it is allowed to be
-							// shared.
-							pace(r, base, sent.Add(1), subs, lead)
-						}
-					}(mine)
-				}
-				wg.Wait()
-				b.StopTimer()
-
-				drops, delivered := r.bc.Drops()-drops0, r.delivered()-delivered0
-				r.stop()
-				reportDelivery(b, subs, drops, delivered)
+				runChatty(b, impl.new, subs, benchBuffer)
 			})
 		}
 	}
+}
+
+// BenchmarkFanoutChattyCapacity asks what the collapse at ten thousand
+// subscribers actually is: a wall, or a buffer too small for the variance.
+//
+// The senders are paced on AGGREGATE delivery, which bounds the average lag
+// and says nothing about the spread. One straggler can be thousands of
+// messages behind while the mean sits at sixty-four, and with a 256-slot
+// buffer that straggler is lapped, dropped, and has to reconnect — which
+// makes it lag further. More slack should absorb the spread.
+//
+// Only the shared-storage implementations are measured. Capacity costs a
+// per-subscriber implementation N times as much memory: 65536 slots across
+// ten thousand MapChan subscribers is ten gigabytes of channel buffer,
+// where one shared ring of the same depth is one megabyte. That asymmetry
+// is the point as much as the timings are.
+func BenchmarkFanoutChattyCapacity(b *testing.B) {
+	const subs = 10_000
+
+	for _, impl := range impls {
+		sizes := []int{256, 4096, 65536}
+		if !sharedStorage(impl.new(1)) {
+			// A per-subscriber buffer cannot be given this much slack: at
+			// ten thousand subscribers, 4096 slots each is 655MB of channel
+			// buffer and 65536 is ten gigabytes. It is measured at the
+			// smallest size for comparison and cannot be measured at the
+			// others at all, which is itself the finding.
+			sizes = sizes[:1]
+		}
+		for _, size := range sizes {
+			b.Run(fmt.Sprintf("%s/cap=%d", impl.name, size), func(b *testing.B) {
+				runChatty(b, impl.new, subs, size)
+			})
+		}
+	}
+}
+
+// runChatty is a room where everybody listens and a tenth of them talk.
+func runChatty(b *testing.B, mk func(int) Broadcaster, subs, size int) {
+	// How far ahead of the receivers the senders may collectively get, per
+	// subscriber. Well under the smallest capacity measured, so pacing
+	// rather than dropping is what bounds them.
+	const lead = 64
+
+	senders := max(1, subs/10)
+
+	r := newRigPaced(mk, subs, size, true)
+	warm(r)
+
+	// The talkative tenth, drawn at random rather than off the front of the
+	// list. It changes nothing here — a broadcast does not travel through
+	// the sender's own subscription, so a sender is just another member
+	// plus a goroutine — but it would stop an implementation that ordered
+	// or bucketed its members from being flattered by a benchmark that
+	// always picked the same ones.
+	chatty := rand.Perm(subs)[:senders]
+
+	// A fixed share each, so nothing has to coordinate on a counter in the
+	// middle of the measurement.
+	share := b.N / senders
+	extra := b.N % senders
+
+	drops0, delivered0 := r.bc.Drops(), r.delivered()
+	base := r.total.Load()
+	var sent atomic.Int64
+
+	var wg sync.WaitGroup
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := range chatty {
+		mine := share
+		if i < extra {
+			mine++
+		}
+		wg.Add(1)
+		go func(mine int) {
+			defer wg.Done()
+			for range mine {
+				r.bc.Broadcast(benchMsg)
+
+				// One atomic per message across all senders. At these
+				// subscriber counts a broadcast costs microseconds, so a
+				// contended add is noise — which is the only reason it is
+				// allowed to be shared.
+				pace(r, base, sent.Add(1), subs, lead)
+			}
+		}(mine)
+	}
+	wg.Wait()
+	b.StopTimer()
+
+	drops, delivered := r.bc.Drops()-drops0, r.delivered()-delivered0
+	r.stop()
+	reportDelivery(b, subs, drops, delivered)
 }

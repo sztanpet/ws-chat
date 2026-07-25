@@ -16,7 +16,12 @@
 	// How many messages the shared fan-out buffer holds. It doubles as the
 	// lag threshold: a client that falls this far behind is disconnected
 	// rather than waited on.
-	// "Capacity": 256,
+	//
+	// Size it for the lag spread, not the average: one straggler thousands
+	// of messages behind is what decides whether anything is dropped. The
+	// buffer is shared, so this is 16 bytes a slot for the whole server,
+	// not per client — 4096 slots is 64KB however many people are here.
+	// "Capacity": 4096,
 
 	// How many frames a connection's write pump takes per wakeup. Larger
 	// means fewer wakeups for a client that has fallen behind.

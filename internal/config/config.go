@@ -49,6 +49,17 @@ type Config struct {
 	// Capacity is how many messages the shared fan-out buffer holds. It
 	// doubles as the lag threshold: a client that falls this far behind is
 	// disconnected rather than waited on.
+	//
+	// It has to be sized for the lag SPREAD, not the average. In a busy
+	// room the mean client is a handful of messages behind while one
+	// straggler is thousands, and it is the straggler that decides whether
+	// anything gets dropped. Measured at ten thousand subscribers with a
+	// tenth of them talking, 256 collapses to almost no delivery at all and
+	// 4096 delivers 99.8% — see state/broadcast.md.
+	//
+	// The buffer is shared, so this costs 16 bytes a slot for the whole
+	// server rather than per client: 4096 is 64KB however many people are
+	// connected.
 	Capacity int
 
 	// WriteBatch is how many frames a connection's write pump takes per

@@ -144,24 +144,47 @@ of `MapChan` and level with each other; the allocation `Ring` pays per
 broadcast starts to show against `CondRing` under a hundred concurrent
 senders, but not enough to overturn the churn result above.
 
-**Ten thousand is not measurable on this box, and how it fails is the
-finding.** Ten percent of it is a thousand concurrent senders against ten
-thousand drainers on four cores. `MapChan` still delivers 99.9% at 72
-ns/msg. `Ring` delivers **nothing at all** — 0.0 delivered/sent and 25
-subscribers dropped per broadcast.
+**Ten thousand subscribers with a thousand senders was first measured as a
+wall, and it is not one. It is a buffer too small for the lag spread.**
+Medians of five runs at ten thousand subscribers:
 
-That is not `Ring` being worse. It is `MapChan`'s O(N) send path acting as
-accidental backpressure: a broadcast to ten thousand subscribers costs the
-sender ~700us of its own CPU, which throttles a thousand senders whether
-they like it or not. `Ring` sends in 8ns, so the senders outrun the
-receivers, stragglers get lapped, and the drop cascades until nobody is
-receiving anything.
+```
+impl       cap      ns/op    ns/msg   delivered
+mapchan    256     694 us      69.5      0.9993
+ring       256    9248 us     158.2      0.0007   <- collapse
+ring      4096      76 us       7.7      0.9982
+ring     65536     104 us      10.5      0.9984
+condring  4096     400 us      40.2      0.9968
+```
 
-**The consequence for the server: `Ring` will not throttle senders for
-you.** MapChan's self-limiting was never a design, it was a side effect of
-being slow, and switching to Ring removed it. Something else has to bound
-the send rate — which is what `internal/ratelimit` is for, and this is the
-measurement that says the rate limiter is load-bearing rather than a nicety.
+Sixteen times the capacity turns total collapse into 99.8% delivery and
+makes `Ring` **nine times faster than `MapChan`** at the same subscriber
+count. The senders are paced on AGGREGATE delivery, which bounds the
+average lag and says nothing about the spread: one straggler can be
+thousands of messages behind while the mean sits at sixty-four, and a
+256-slot buffer laps it. More slack absorbs the spread.
+
+**The capacity that fixes it is affordable only because the storage is
+shared.** 4096 slots is 64KB for the whole `Ring`, whatever the subscriber
+count. The same slack per subscriber is 655MB for `MapChan` at ten
+thousand, and 65536 slots would be ten gigabytes — which is why the sweep
+cannot measure `MapChan` above 256 at all. Shared storage does not just
+make fan-out cheaper; it makes generous lag tolerance free, and lag
+tolerance is what stops the drop cascade.
+
+**What survives from the original reading:** `Ring` does not throttle its
+senders and `MapChan` accidentally does — an O(N) send path costing the
+sender 700us of its own CPU limits a thousand senders whether they like it
+or not. That is why `Ring` is the one that needs enough slack, and why
+`internal/ratelimit` is load-bearing rather than a nicety. **What does
+not:** the claim that ten thousand was beyond the implementation. It was
+beyond a 256-slot buffer.
+
+`CondRing` barely benefits (736us to 400us) and does not collapse at 256
+in the first place, for the same reason: waking every sleeper on every
+broadcast is work the sender does, which paces it. `Ring` skips the wakeup
+when nobody is asleep, which is exactly why it is faster once it has room —
+and why it has further to fall when it does not.
 
 ## Harness gotchas (hard-won, do not undo)
 
@@ -184,20 +207,28 @@ measurement that says the rate limiter is load-bearing rather than a nicety.
 5. **Concurrent senders cannot be drop-free with GOMAXPROCS=4** — every P
    busy sending leaves no core to receive on. That case is
    `FanoutSaturated` and is explicitly an overload benchmark.
-6. **`BenchmarkFanoutPaced` is noisy — never read a single run.** It
+6. **A ratio above 1.0 in delivered/sent is the harness measuring its own
+   setup.** `warm` used to sleep a fixed 20ms, which is long enough only
+   when the buffer is small enough that the leftovers get DROPPED. With a
+   large buffer nothing is dropped, so a thousand warm-up broadcasts to ten
+   thousand subscribers — ten million deliveries — were still queued when
+   the timed region began and landed inside it, giving delivered/sent of
+   1.7. `warm` now waits for the warm-up to be consumed, bounded by
+   `warmPatience`.
+7. **`BenchmarkFanoutPaced` is noisy — never read a single run.** It
    varies by up to 3x run to run, and the first run of a series is
    routinely a 10x outlier (goroutine setup, GC, `b.N` ramping). One run
    of it said `CondRing` was 2.2x slower on delivery; eight runs and a
    median put the two within 5%. Use `-count=8` and take the median for
    anything that decides something.
-7. **A paced sender must be able to give up waiting.** A subscriber
+8. **A paced sender must be able to give up waiting.** A subscriber
    dropped for lagging stops receiving until it reconnects, so messages it
    missed are never delivered to anybody, and a sender waiting for the
    delivered count to catch up waits forever. The first chatty benchmark
    hung on exactly that. `pace` bails out after 100k yields with no
    progress at all, and the abandonment shows up as a low delivered/sent
    rather than as a hang.
-8. **`BenchmarkFanout`'s untimed drain is O(b.N x subs)**, so an
+9. **`BenchmarkFanout`'s untimed drain is O(b.N x subs)**, so an
    implementation with a much cheaper timed op gets a much larger `b.N` and
    the drain stops finishing. `needsDrain` skips it for shared-storage
    implementations, which genuinely do not need it. New implementations may
@@ -212,6 +243,6 @@ measurement that says the rate limiter is load-bearing rather than a nicety.
   allocation per broadcast, not per subscriber.
 - Untried alternatives, now probably not worth it given Ring's numbers:
   slice-based member set, sharded map, single owner goroutine.
-- Not yet measured: memory per idle subscriber at 10k+, and what the shared
-  capacity should be for a real channel (it bounds both scrollback and how
-  far a client may lag).
+- Capacity for a real channel is now measured, not guessed: 256 is too
+  small for a large busy room and 4096 costs 64KB. The server default moved
+  accordingly.
