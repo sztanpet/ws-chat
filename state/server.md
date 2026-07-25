@@ -117,6 +117,18 @@ extension points, and a single-channel WebSocket chat server.
 - **Bans are checked before the upgrade**, so a banned client gets an HTTP
   403 rather than a socket that opens and shuts.
 
+- **Profiling and metrics are on their own listener**, loopback by
+  default. pprof has no auth and never will; `/debug/pprof/heap` is a
+  memory dump and `/debug/pprof/profile` is a thirty-second core pin
+  available to anyone who can reach it.
+- **Metrics are not a hook.** Policy is a hook; the server describing
+  itself is not. Scrape it.
+- **Anything already counted is a `GaugeFunc` over the real thing**, not a
+  maintained mirror — one number that can be wrong beats two that can
+  disagree.
+- **Refusals are counted inside `conn.reply`**, the one place an ERR is
+  sent, so the metric cannot drift from what clients were told.
+
 ## Gotchas
 
 1. **`net/http`'s `Shutdown` ignores hijacked connections**, and every

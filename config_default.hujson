@@ -54,6 +54,14 @@
 	// for this long. Clients are expected to ping.
 	// "IdleTimeout": "90s",
 
+	// Where profiling and metrics are served: /metrics and /debug/pprof/.
+	// Empty disables them and binds nothing.
+	//
+	// Loopback by default, and think before changing it. pprof has no
+	// authentication: /debug/pprof/heap hands out everything in memory and
+	// /debug/pprof/profile lets anyone pin a core for thirty seconds.
+	// "DebugAddr": "127.0.0.1:6060",
+
 	// Log level: debug, info, warn, error.
 	// "LogLevel": "info",
 }

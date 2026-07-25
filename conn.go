@@ -74,9 +74,11 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 	id, err := a.identify(r.Context(), r)
 	switch {
 	case errors.Is(err, hook.ErrUnauthorized):
+		a.metrics.connectionsFailed.With("unauthorized").Inc()
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	case err != nil:
+		a.metrics.connectionsFailed.With("authfailed").Inc()
 		a.log.Error("authentication failed", "err", err, "remote", r.RemoteAddr)
 		http.Error(w, "authentication unavailable", http.StatusInternalServerError)
 		return
@@ -88,6 +90,7 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Barred before the handshake: a banned client gets an HTTP status it
 	// can read rather than a socket that opens and shuts.
 	if a.banned(id) {
+		a.metrics.connectionsFailed.With("banned").Inc()
 		refuseBanned(w)
 		return
 	}
@@ -98,6 +101,7 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		// Accept has already written the error response.
+		a.metrics.connectionsFailed.With("upgrade").Inc()
 		a.log.Debug("websocket upgrade rejected", "err", err, "remote", r.RemoteAddr)
 		return
 	}
@@ -108,10 +112,13 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 	// subprotocol empty, which is the same as not asking.
 	codec, err := proto.ByName(ws.Subprotocol())
 	if err != nil {
+		a.metrics.connectionsFailed.With("subprotocol").Inc()
 		a.log.Error("negotiated an unknown subprotocol", "subprotocol", ws.Subprotocol(), "err", err)
 		ws.Close(websocket.StatusProtocolError, "unsupported subprotocol")
 		return
 	}
+	a.metrics.connectionsTotal.Inc()
+	a.metrics.codecs.With(codec.Name()).Inc()
 
 	c := &conn{
 		app:   a,
@@ -253,6 +260,7 @@ func (c *conn) writePump(ctx context.Context) {
 			// The client could not keep up. Say so on the way out rather
 			// than dropping the socket silently: a client that reconnects
 			// blind cannot tell this from a network failure.
+			c.app.metrics.laggedTotal.Inc()
 			c.log.Info("dropped: too slow")
 			c.close(websocket.StatusPolicyViolation, "too slow")
 			return
@@ -288,6 +296,7 @@ func (c *conn) readPump(ctx context.Context) error {
 			c.reply(ctx, proto.ErrProtocol)
 			continue
 		}
+		c.app.metrics.commandsTotal.With(cmd.Verb).Inc()
 
 		switch cmd.Verb {
 		case proto.VerbMsg:
@@ -351,6 +360,7 @@ func (c *conn) handleMsg(ctx context.Context, cmd proto.Command) {
 
 	// Delivered first, persisted after. A store having a bad day must cost
 	// history, never delivery.
+	c.app.metrics.messagesTotal.Inc()
 	c.app.recordMessage(hook.Message{ID: id, From: c.id, Data: cmd.Data, At: at})
 }
 
@@ -434,13 +444,18 @@ func (c *conn) handlePriv(ctx context.Context, cmd proto.Command) {
 
 	// Recorded after delivery, like everything else. Both identities are
 	// passed on: a store wants stable ids, not display names.
+	c.app.metrics.privateTotal.Inc()
 	c.app.recordPrivate(hook.Private{
 		ID: id, From: c.id, To: target.id, Data: cmd.Data, At: at,
 	})
 }
 
 // reply sends an ERR to this client alone.
+// reply sends an ERR to this client alone, and counts it. Counting here
+// rather than at each call site is what stops the metric drifting from what
+// clients are actually told.
 func (c *conn) reply(ctx context.Context, description string) {
+	c.app.refused(description)
 	c.sendFrame(ctx, proto.NewErr(description))
 }
 

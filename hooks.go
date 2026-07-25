@@ -273,6 +273,7 @@ const recordDrainGrace = 5 * time.Second
 
 func (a *app) runRecord(ctx context.Context, job func(context.Context) error) {
 	if err := job(ctx); err != nil {
+		a.metrics.recordsFailed.Inc()
 		// A failed write is the store's problem to shout about; the
 		// message has already been delivered and there is nothing useful
 		// to tell the sender at this point.

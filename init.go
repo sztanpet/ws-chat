@@ -15,6 +15,7 @@ import (
 	"github.com/sztanpet/ws-chat/internal/filter"
 	"github.com/sztanpet/ws-chat/internal/history"
 	"github.com/sztanpet/ws-chat/internal/hook"
+	"github.com/sztanpet/ws-chat/internal/metrics"
 	"github.com/sztanpet/ws-chat/internal/moderation"
 	"github.com/sztanpet/ws-chat/internal/proto"
 	"github.com/sztanpet/ws-chat/internal/ratelimit"
@@ -77,8 +78,16 @@ type app struct {
 	// forty nanoseconds; consistent ordering is worth that.
 	sendMu sync.Mutex
 
-	mux *http.ServeMux
-	srv *http.Server
+	mux       *http.ServeMux
+	srv       *http.Server
+	debug     *http.Server
+	debugAddr string // the address it actually bound, for tests and logs
+
+	// registry and metrics are the server describing itself. Not a hook:
+	// how many connections are held is not policy, and anything that wants
+	// the numbers elsewhere can scrape them.
+	registry *metrics.Registry
+	metrics  *appMetrics
 
 	// ctx is the lifetime of every connection. Cancelling it is what stops
 	// the read pumps: net/http's Shutdown does not wait for — or even know
@@ -148,6 +157,10 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 		filter.Zalgo{Max: cfg.MaxDiacritics},
 		hooks.Filter,
 	)
+
+	a.registry = metrics.New("wschat_")
+	a.metrics = newMetrics(a.registry)
+	a.registerStateMetrics(a.registry)
 
 	a.ctx, a.stopConn = context.WithCancel(context.Background())
 	go a.janitor(a.ctx)

@@ -357,6 +357,44 @@ stall must degrade scrollback, not delivery.
   the socket without a close frame, because a cancelled read leaves the
   stream at an unknown offset, so the goodbye has to go out first.
 
+### Profiling and metrics
+
+Both live on their own listener (`debug.go`), configured by `DebugAddr`
+and **bound to the loopback by default**. Empty disables it and binds
+nothing.
+
+`pprof` is mounted deliberately rather than by the import side effect that
+puts it on `DefaultServeMux`. It has no authentication and is not going to
+grow any: `/debug/pprof/heap` hands out a dump of everything in memory,
+and anyone who can reach `/debug/pprof/profile` can pin a core for thirty
+seconds as often as they like. Move the bind address only to an interface
+that only a scraper can reach.
+
+`/metrics` is the Prometheus text format, written by `internal/metrics` —
+a hand-rolled registry rather than the client library, because what the
+server needs is a few atomic counters and a way to print them. The
+exposition format is the part that matters, and it is a dozen lines to
+emit.
+
+Metrics are **deliberately not a hook**. The hooks are for policy the
+server should have no opinion about; how many connections it is holding is
+the server describing itself, and anything that wants those numbers
+elsewhere can scrape them.
+
+Two conventions worth keeping:
+
+- **Anything already counted elsewhere is a `GaugeFunc` reading the real
+  thing**, never a mirror maintained alongside it. Connections are the
+  length of the directory, drops are what the broadcasters already count.
+  A second copy is a second thing that can be wrong.
+- **Refusals are counted where they are sent** (`conn.reply`), so
+  `refusals_total{code=...}` cannot drift from what clients were actually
+  told.
+
+`CounterVec` labels must come from a closed set — ERR codes, verbs, codec
+names. Never a nick or anything else a client controls: that turns a
+metric into a memory leak with a network interface.
+
 ### Makefile
 
 All tooling lives in the `Makefile` (`make help` lists targets):

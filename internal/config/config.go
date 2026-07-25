@@ -95,6 +95,17 @@ type Config struct {
 	// even a PING — for this long. Clients are expected to ping.
 	IdleTimeout Duration
 
+	// DebugAddr is where profiling and metrics are served. Empty disables
+	// them and binds nothing.
+	//
+	// It defaults to the loopback because pprof has no authentication and
+	// is not going to grow any: /debug/pprof/heap hands out a dump of
+	// everything in memory, and anyone who can reach /debug/pprof/profile
+	// can pin a core for thirty seconds as often as they like. Move it to
+	// an interface a scraper can reach only if that interface is not
+	// reachable by anybody else.
+	DebugAddr string
+
 	// LogLevel is one of debug, info, warn, error.
 	LogLevel string
 }

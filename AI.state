@@ -83,6 +83,10 @@ _(none yet)_
   chooses the scope: empty is per connection, non-empty shares one
   refcounted bucket across an account — and such a bucket outlives its
   connections, or reconnecting would refill it.
+- **Observability is built in, not hooked.** `internal/metrics` is a
+  hand-rolled Prometheus-text registry; pprof and `/metrics` share a
+  loopback-bound listener (`DebugAddr`). Policy is a hook; the server
+  describing itself is not.
 - **Everything that is not moving bytes between sockets is a hook.**
   `internal/hook` defines auth, chatter data, message filtering and
   persistence as interfaces; the core imports the interfaces and never an

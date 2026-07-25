@@ -87,6 +87,7 @@ func (c *conn) handleMod(ctx context.Context, cmd proto.Command) {
 		return
 	}
 
+	c.app.metrics.moderationTotal.With(action).Inc()
 	c.app.recordModeration(hook.Moderation{
 		ID:     id,
 		Action: action,

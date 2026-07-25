@@ -20,6 +20,10 @@ func (a *app) run(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if err := a.serveDebug(ctx); err != nil {
+		return err
+	}
+
 	serving := make(chan error, 1)
 	go func() {
 		a.log.Info("listening", "addr", a.cfg.Addr)
@@ -78,4 +82,6 @@ func (a *app) close() {
 	// The persistence worker gets the same cancellation and makes a best
 	// effort to finish what is already queued.
 	<-a.recordsDone
+
+	a.closeDebug()
 }
