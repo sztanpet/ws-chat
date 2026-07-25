@@ -1,7 +1,7 @@
 package broadcast
 
 import (
-	"fmt"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -9,90 +9,103 @@ import (
 
 // impls is the table every test and benchmark runs over. Adding an
 // alternative implementation means adding one line here, nothing else.
+//
+// The size argument means "how much slack a subscriber gets before it is
+// dropped for lagging" — a per-subscriber buffer for MapChan, the shared
+// ring capacity for Ring. It is not the same mechanism, but it is the same
+// promise, which is what makes them comparable.
 var impls = []struct {
 	name string
-	new  func() Broadcaster
+	new  func(size int) Broadcaster
 }{
-	{"mapchan", func() Broadcaster { return NewMapChan() }},
+	{"mapchan", func(size int) Broadcaster { return NewMapChan(size) }},
 }
+
+const testSize = 8
 
 func eachImpl(t *testing.T, fn func(t *testing.T, b Broadcaster)) {
 	t.Helper()
 	for _, impl := range impls {
 		t.Run(impl.name, func(t *testing.T) {
-			b := impl.new()
+			b := impl.new(testSize)
 			defer b.Close()
 			fn(t, b)
 		})
 	}
 }
 
-// recv reads one message, failing the test rather than hanging forever if
-// nothing arrives.
-func recv(t *testing.T, s *Sub) []byte {
+// recvWithin runs Recv with a deadline, so a broken implementation fails
+// the test instead of hanging until the package timeout.
+func recvWithin(t *testing.T, s Sub, dst [][]byte, d time.Duration) (int, error) {
 	t.Helper()
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := s.Recv(dst)
+		done <- result{n, err}
+	}()
 	select {
-	case msg, ok := <-s.C():
-		if !ok {
-			t.Fatal("subscription closed, wanted a message")
-		}
-		return msg
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for a message")
-		return nil
+	case r := <-done:
+		return r.n, r.err
+	case <-time.After(d):
+		t.Fatal("Recv timed out")
+		return 0, nil
 	}
 }
 
-// waitOrFail waits for wg, failing instead of hanging the whole test binary
-// until the package timeout if something deadlocked.
-func waitOrFail(t *testing.T, wg *sync.WaitGroup, what string) {
+// recvOne reads a single message, requiring one to arrive.
+func recvOne(t *testing.T, s Sub) []byte {
 	t.Helper()
-	done := make(chan struct{})
-	go func() { defer close(done); wg.Wait() }()
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		t.Fatalf("timed out waiting for the %s to finish", what)
+	dst := make([][]byte, 1)
+	n, err := recvWithin(t, s, dst, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Recv: %v, wanted a message", err)
 	}
+	if n != 1 {
+		t.Fatalf("Recv returned %d messages, want 1", n)
+	}
+	return dst[0]
 }
 
-// expectClosed asserts the subscription ended, and why.
-func expectClosed(t *testing.T, s *Sub, wantDropped bool) {
+// expectEnd drains until the subscription ends and asserts how it ended.
+func expectEnd(t *testing.T, s Sub, want error) {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
-	for {
-		select {
-		case _, ok := <-s.C():
-			if ok {
-				continue // drain whatever was already buffered
-			}
-			if got := s.Dropped(); got != wantDropped {
-				t.Fatalf("Dropped() = %v, want %v", got, wantDropped)
-			}
-			return
-		case <-deadline:
-			t.Fatal("timed out waiting for the subscription to close")
+	dst := make([][]byte, 4)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, err := recvWithin(t, s, dst, 2*time.Second)
+		if err == nil {
+			continue // messages already in flight; keep draining
 		}
+		if !errors.Is(err, want) {
+			t.Fatalf("subscription ended with %v, want %v", err, want)
+		}
+		return
 	}
+	t.Fatal("timed out waiting for the subscription to end")
 }
 
 func TestBroadcastDelivers(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
-		subs := []*Sub{b.Subscribe(8), b.Subscribe(8), b.Subscribe(8)}
+		subs := []Sub{b.Subscribe(), b.Subscribe(), b.Subscribe()}
 		if got := b.Len(); got != 3 {
 			t.Fatalf("Len() = %d, want 3", got)
 		}
 
 		for i := range 5 {
-			if dropped := b.Broadcast([]byte{byte(i)}); dropped != 0 {
-				t.Fatalf("message %d dropped %d subscribers", i, dropped)
-			}
+			b.Broadcast([]byte{byte(i)})
+		}
+		if got := b.Drops(); got != 0 {
+			t.Fatalf("Drops() = %d, want 0", got)
 		}
 
 		// Every subscriber sees every message, in order.
 		for i, s := range subs {
 			for want := range 5 {
-				if got := recv(t, s)[0]; got != byte(want) {
+				if got := recvOne(t, s)[0]; got != byte(want) {
 					t.Fatalf("sub %d: got %d, want %d", i, got, want)
 				}
 			}
@@ -100,118 +113,220 @@ func TestBroadcastDelivers(t *testing.T) {
 	})
 }
 
+// Recv returns everything that piled up since the last call, which is the
+// property the whole batch API exists for.
+func TestRecvBatches(t *testing.T) {
+	eachImpl(t, func(t *testing.T, b Broadcaster) {
+		s := b.Subscribe()
+		for i := range 4 {
+			b.Broadcast([]byte{byte(i)})
+		}
+
+		dst := make([][]byte, 8)
+		n, err := recvWithin(t, s, dst, 2*time.Second)
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		if n != 4 {
+			t.Fatalf("Recv returned %d messages, want all 4 in one call", n)
+		}
+		for i := range 4 {
+			if dst[i][0] != byte(i) {
+				t.Fatalf("message %d = %d, want %d", i, dst[i][0], i)
+			}
+		}
+	})
+}
+
+// A batch is capped by the destination slice, and the remainder stays
+// queued for the next call.
+func TestRecvRespectsDstLen(t *testing.T) {
+	eachImpl(t, func(t *testing.T, b Broadcaster) {
+		s := b.Subscribe()
+		for i := range 4 {
+			b.Broadcast([]byte{byte(i)})
+		}
+
+		dst := make([][]byte, 2)
+		n, err := recvWithin(t, s, dst, 2*time.Second)
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		if n != 2 {
+			t.Fatalf("Recv returned %d messages, want 2", n)
+		}
+		if dst[0][0] != 0 || dst[1][0] != 1 {
+			t.Fatalf("got messages %d,%d want 0,1", dst[0][0], dst[1][0])
+		}
+
+		if got := recvOne(t, s)[0]; got != 2 {
+			t.Fatalf("next message = %d, want 2", got)
+		}
+	})
+}
+
+func TestRecvEmptyDst(t *testing.T) {
+	eachImpl(t, func(t *testing.T, b Broadcaster) {
+		s := b.Subscribe()
+		n, err := s.Recv(nil)
+		if n != 0 || err != nil {
+			t.Fatalf("Recv(nil) = %d, %v; want 0, nil", n, err)
+		}
+	})
+}
+
 func TestBroadcastToNobody(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
-		if dropped := b.Broadcast([]byte("into the void")); dropped != 0 {
-			t.Fatalf("dropped = %d, want 0", dropped)
+		b.Broadcast([]byte("into the void"))
+		if got := b.Drops(); got != 0 {
+			t.Fatalf("Drops() = %d, want 0", got)
 		}
 	})
 }
 
-// The whole point of the package: one subscriber that stops reading must
-// not affect anyone else, and must not block the sender.
-func TestSlowSubscriberIsDroppedNotWaitedOn(t *testing.T) {
+// Half the point of the package: a subscriber that stops reading must not
+// stall the sender.
+func TestBroadcastNeverBlocks(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
-		slow := b.Subscribe(1) // never drained
-		fast := b.Subscribe(64)
+		lagging := b.Subscribe() // never read
 
-		if dropped := b.Broadcast([]byte("one")); dropped != 0 {
-			t.Fatalf("first broadcast dropped %d, want 0 (buffer had room)", dropped)
-		}
-
-		// slow's buffer is now full; the next send finds it full and drops it.
-		done := make(chan int, 1)
-		go func() { done <- b.Broadcast([]byte("two")) }()
-		select {
-		case dropped := <-done:
-			if dropped != 1 {
-				t.Fatalf("dropped = %d, want 1", dropped)
+		// Overrun whatever slack the implementation gives a subscriber,
+		// several times over.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := range testSize * 4 {
+				b.Broadcast([]byte{byte(i)})
 			}
+		}()
+		select {
+		case <-done:
 		case <-time.After(2 * time.Second):
-			t.Fatal("Broadcast blocked on a full subscriber")
+			t.Fatal("Broadcast blocked on a subscriber that stopped reading")
 		}
 
-		expectClosed(t, slow, true)
-
-		if got := b.Len(); got != 1 {
-			t.Fatalf("Len() = %d, want 1 (only the fast subscriber left)", got)
+		expectEnd(t, lagging, ErrLagged)
+		if got := b.Drops(); got != 1 {
+			t.Fatalf("Drops() = %d, want 1", got)
 		}
-		if got := string(recv(t, fast)); got != "one" {
-			t.Fatalf("fast sub got %q, want %q", got, "one")
-		}
-		if got := string(recv(t, fast)); got != "two" {
-			t.Fatalf("fast sub got %q, want %q", got, "two")
+		if got := b.Len(); got != 0 {
+			t.Fatalf("Len() = %d, want 0", got)
 		}
 	})
 }
 
-func TestUnsubscribe(t *testing.T) {
+// The other half: dropping the subscriber that fell behind must not cost
+// the ones that did not.
+//
+// The healthy subscriber reads once per broadcast, which can never block
+// because a message was just sent, and never lets it fall more than one
+// message behind. That keeps the test deterministic — no sleeps, no
+// reliance on a drainer goroutine being scheduled promptly.
+func TestLaggingSubscriberDoesNotAffectOthers(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
-		s := b.Subscribe(8)
-		stay := b.Subscribe(8)
+		lagging := b.Subscribe() // never read
+		healthy := b.Subscribe()
 
-		b.Unsubscribe(s)
+		const sent = testSize * 4
+		dst := make([][]byte, sent)
+		got := 0
+		for i := range sent {
+			b.Broadcast([]byte{byte(i)})
+
+			n, err := healthy.Recv(dst)
+			if err != nil {
+				t.Fatalf("healthy subscriber ended with %v after %d messages", err, got)
+			}
+			for j := range n {
+				if want := byte(got + j); dst[j][0] != want {
+					t.Fatalf("message %d = %d, want %d", got+j, dst[j][0], want)
+				}
+			}
+			got += n
+		}
+		if got != sent {
+			t.Fatalf("healthy subscriber got %d messages, want %d", got, sent)
+		}
+
+		// The lagging one is gone, and only it.
+		expectEnd(t, lagging, ErrLagged)
+		if got := b.Drops(); got != 1 {
+			t.Fatalf("Drops() = %d, want 1", got)
+		}
+		if got := b.Len(); got != 1 {
+			t.Fatalf("Len() = %d, want 1 (only the healthy subscriber left)", got)
+		}
+	})
+}
+
+func TestSubClose(t *testing.T) {
+	eachImpl(t, func(t *testing.T, b Broadcaster) {
+		s := b.Subscribe()
+		stay := b.Subscribe()
+
+		s.Close()
 		if got := b.Len(); got != 1 {
 			t.Fatalf("Len() = %d, want 1", got)
 		}
-		expectClosed(t, s, false)
+		expectEnd(t, s, ErrClosed)
 
-		if dropped := b.Broadcast([]byte("after")); dropped != 0 {
-			t.Fatalf("dropped = %d, want 0", dropped)
-		}
-		if got := string(recv(t, stay)); got != "after" {
+		b.Broadcast([]byte("after"))
+		if got := string(recvOne(t, stay)); got != "after" {
 			t.Fatalf("got %q, want %q", got, "after")
 		}
-	})
-}
-
-func TestUnsubscribeIsIdempotent(t *testing.T) {
-	eachImpl(t, func(t *testing.T, b Broadcaster) {
-		s := b.Subscribe(8)
-		b.Unsubscribe(s)
-		b.Unsubscribe(s) // must not panic on the already-closed channel
-		expectClosed(t, s, false)
-	})
-}
-
-// A dropped subscriber that the consumer then unsubscribes is the normal
-// shutdown order in the server: the write pump notices its channel closed
-// and cleans up. It must not double-close.
-func TestUnsubscribeAfterDrop(t *testing.T) {
-	eachImpl(t, func(t *testing.T, b Broadcaster) {
-		s := b.Subscribe(1)
-		b.Broadcast([]byte("fills the buffer"))
-		if dropped := b.Broadcast([]byte("drops it")); dropped != 1 {
-			t.Fatalf("dropped = %d, want 1", dropped)
+		if got := b.Drops(); got != 0 {
+			t.Fatalf("Drops() = %d, want 0", got)
 		}
-		b.Unsubscribe(s)
-		expectClosed(t, s, true) // still reports the real reason
 	})
 }
 
-func TestClose(t *testing.T) {
+func TestSubCloseIsIdempotent(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
-		subs := []*Sub{b.Subscribe(8), b.Subscribe(8)}
+		s := b.Subscribe()
+		s.Close()
+		s.Close() // must not panic on the already-ended subscription
+		expectEnd(t, s, ErrClosed)
+	})
+}
+
+// A lagging subscriber that the consumer then closes is the normal shutdown
+// order in the server: the write pump sees ErrLagged and cleans up. It must
+// not double-close, and it must keep reporting the real reason.
+func TestCloseAfterLagged(t *testing.T) {
+	eachImpl(t, func(t *testing.T, b Broadcaster) {
+		s := b.Subscribe()
+		for i := range testSize * 4 {
+			b.Broadcast([]byte{byte(i)})
+		}
+		expectEnd(t, s, ErrLagged)
+		s.Close()
+		if _, err := recvWithin(t, s, make([][]byte, 1), 2*time.Second); !errors.Is(err, ErrLagged) {
+			t.Fatalf("Recv after Close = %v, want ErrLagged", err)
+		}
+	})
+}
+
+func TestBroadcasterClose(t *testing.T) {
+	eachImpl(t, func(t *testing.T, b Broadcaster) {
+		subs := []Sub{b.Subscribe(), b.Subscribe()}
 		b.Close()
 		b.Close() // idempotent
 
 		if got := b.Len(); got != 0 {
 			t.Fatalf("Len() = %d, want 0", got)
 		}
-		for i, s := range subs {
-			t.Run(fmt.Sprint(i), func(t *testing.T) { expectClosed(t, s, false) })
+		for _, s := range subs {
+			expectEnd(t, s, ErrClosed)
 		}
 
 		// Subscribing to a closed broadcaster yields a finished Sub, not a
 		// live one that would never receive anything.
-		after := b.Subscribe(8)
-		expectClosed(t, after, false)
+		after := b.Subscribe()
+		expectEnd(t, after, ErrClosed)
 		if got := b.Len(); got != 0 {
 			t.Fatalf("Len() after late Subscribe = %d, want 0", got)
 		}
-		if dropped := b.Broadcast([]byte("nobody home")); dropped != 0 {
-			t.Fatalf("dropped = %d, want 0", dropped)
-		}
+		b.Broadcast([]byte("nobody home"))
 	})
 }
 
@@ -231,13 +346,17 @@ func TestConcurrentChurn(t *testing.T) {
 
 		// Long-lived subscribers with drainers, so the fan-out actually
 		// delivers instead of instantly dropping everyone. They exit when
-		// Close closes their channels.
+		// Close ends their subscriptions.
 		for range subscribed {
-			s := b.Subscribe(64)
+			s := b.Subscribe()
 			drainWG.Add(1)
 			go func() {
 				defer drainWG.Done()
-				for range s.C() {
+				dst := make([][]byte, 16)
+				for {
+					if _, err := s.Recv(dst); err != nil {
+						return
+					}
 				}
 			}()
 		}
@@ -253,8 +372,8 @@ func TestConcurrentChurn(t *testing.T) {
 			}()
 		}
 
-		// Subscribe/unsubscribe churn against the same map the senders are
-		// walking. These subscribers are never drained, so some get dropped
+		// Subscribe/close churn against the same state the senders are
+		// walking. These subscribers are never read, so some get dropped
 		// mid-broadcast, which is exactly the race worth hunting.
 		for range churners {
 			churnWG.Add(1)
@@ -266,9 +385,9 @@ func TestConcurrentChurn(t *testing.T) {
 						return
 					default:
 					}
-					s := b.Subscribe(1)
+					s := b.Subscribe()
 					b.Broadcast([]byte("churn"))
-					b.Unsubscribe(s)
+					s.Close()
 				}
 			}()
 		}
@@ -282,4 +401,17 @@ func TestConcurrentChurn(t *testing.T) {
 		b.Close()
 		waitOrFail(t, &drainWG, "drainers")
 	})
+}
+
+// waitOrFail waits for wg, failing instead of hanging the whole test binary
+// until the package timeout if something deadlocked.
+func waitOrFail(t *testing.T, wg *sync.WaitGroup, what string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); wg.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("timed out waiting for the %s to finish", what)
+	}
 }

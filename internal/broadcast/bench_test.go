@@ -1,9 +1,9 @@
 package broadcast
 
 import (
+	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -74,28 +74,27 @@ const benchBuffer = DefaultBuffer
 // that nothing can ever fill. 1<<20 slices is ~16MB of channel buffer.
 const benchFanoutBudget = 1 << 20
 
-// benchChurnBuffer is the buffer given to the short-lived subscribers in
-// the churn benchmarks. Smaller on purpose: the channel allocation costs
-// the same in every implementation, and a large one buries the membership
-// bookkeeping that those benchmarks exist to compare.
-const benchChurnBuffer = 64
-
 // benchMsg is a plausible chat frame. Implementations share it by reference,
 // so its size should not matter — if an implementation's numbers move with
 // it, it is copying, which is worth knowing.
 var benchMsg = []byte(`MSG {"nick":"someone","channel":"#general","data":"hello world"}`)
 
+// benchBatch is the number of frames a drainer takes per wakeup. A real
+// write pump would size this to what it can coalesce into one socket
+// write.
+const benchBatch = 16
+
 // drained builds a broadcaster with n subscribers, each with a goroutine
 // discarding its messages. The returned stop function closes the
 // broadcaster and waits for every drainer to exit.
-func drained(b *testing.B, mk func() Broadcaster, n, buf int) (Broadcaster, func()) {
+func drained(b *testing.B, mk func(int) Broadcaster, n, size int) (Broadcaster, func()) {
 	b.Helper()
-	bc := mk()
+	bc := mk(size)
 
 	var wg sync.WaitGroup
 	for range n {
 		wg.Add(1)
-		go drainer(bc, bc.Subscribe(buf), buf, &wg)
+		go drainer(bc, bc.Subscribe(), &wg)
 	}
 
 	return bc, func() {
@@ -115,17 +114,18 @@ func drained(b *testing.B, mk func() Broadcaster, n, buf int) (Broadcaster, func
 // nothing in it and reporting a wonderful number. An earlier version of
 // this file did exactly that and claimed 8.65 ns/op for a 100-subscriber
 // fan-out.
-func drainer(bc Broadcaster, s *Sub, buf int, wg *sync.WaitGroup) {
+func drainer(bc Broadcaster, s Sub, wg *sync.WaitGroup) {
 	defer wg.Done()
+	dst := make([][]byte, benchBatch)
 	for {
-		for range s.C() {
-		}
-		if !s.Dropped() {
-			return // orderly Unsubscribe or Close: we are done
+		if _, err := s.Recv(dst); err == nil {
+			continue
+		} else if !errors.Is(err, ErrLagged) {
+			return // orderly Close: we are done
 		}
 		// Resubscribe. Once the broadcaster is closed this hands back an
 		// already-finished Sub, so the next pass exits the loop.
-		s = bc.Subscribe(buf)
+		s = bc.Subscribe()
 	}
 }
 
@@ -156,17 +156,21 @@ func fanoutBuffer(subs int) int {
 	return max(benchFanoutBudget/subs, benchBuffer)
 }
 
-// drain empties a subscription without blocking.
-func drain(s *Sub) {
-	for {
-		select {
-		case _, ok := <-s.C():
-			if !ok {
-				return
-			}
-		default:
+// drainN takes exactly count messages off a subscription.
+//
+// The count has to be known: Recv blocks, and there is no non-blocking
+// variant on purpose — a real write pump always wants to block. Stopping
+// on a short batch instead would look like it works and then deadlock
+// whenever the pending count happens to be an exact multiple of the batch
+// size, which is what the first version of this did.
+func drainN(s Sub, count int) {
+	dst := make([][]byte, benchBatch)
+	for got := 0; got < count; {
+		n, err := s.Recv(dst)
+		if err != nil {
 			return
 		}
+		got += n
 	}
 }
 
@@ -178,17 +182,16 @@ func BenchmarkFanout(b *testing.B) {
 	for _, impl := range impls {
 		for _, subs := range benchSubCounts {
 			b.Run(fmt.Sprintf("%s/subs=%d", impl.name, subs), func(b *testing.B) {
-				bc := impl.new()
+				size := fanoutBuffer(subs)
+				bc := impl.new(size)
 				defer bc.Close()
 
-				buf := fanoutBuffer(subs)
-				list := make([]*Sub, subs)
+				list := make([]Sub, subs)
 				for i := range list {
-					list[i] = bc.Subscribe(buf)
+					list[i] = bc.Subscribe()
 				}
-				drainEvery := buf / 2
+				drainEvery := size / 2
 
-				var dropped int64
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := range b.N {
@@ -198,18 +201,18 @@ func BenchmarkFanout(b *testing.B) {
 						// reason the buffers are sized this way.
 						b.StopTimer()
 						for _, s := range list {
-							drain(s)
+							drainN(s, drainEvery)
 						}
 						b.StartTimer()
 					}
-					dropped += int64(bc.Broadcast(benchMsg))
+					bc.Broadcast(benchMsg)
 				}
 				b.StopTimer()
 
-				if dropped > 0 {
-					b.Fatalf("%d drops in a benchmark that cannot drop: buffer sizing is wrong", dropped)
+				if dropped := bc.Drops(); dropped > 0 {
+					b.Fatalf("%d drops in a benchmark that cannot drop: sizing is wrong", dropped)
 				}
-				report(b, subs, dropped)
+				report(b, subs, 0)
 			})
 		}
 	}
@@ -226,14 +229,14 @@ func BenchmarkFanoutLive(b *testing.B) {
 				defer stop()
 				warm(bc)
 
-				var dropped int64
+				before := bc.Drops()
 				b.ReportAllocs()
 				b.ResetTimer()
 				for range b.N {
-					dropped += int64(bc.Broadcast(benchMsg))
+					bc.Broadcast(benchMsg)
 				}
 				b.StopTimer()
-				report(b, subs, dropped)
+				report(b, subs, bc.Drops()-before)
 			})
 		}
 	}
@@ -260,18 +263,16 @@ func BenchmarkFanoutSaturated(b *testing.B) {
 				defer stop()
 				warm(bc)
 
-				var dropped atomic.Int64
+				before := bc.Drops()
 				b.ReportAllocs()
 				b.ResetTimer()
 				b.RunParallel(func(pb *testing.PB) {
-					var local int64
 					for pb.Next() {
-						local += int64(bc.Broadcast(benchMsg))
+						bc.Broadcast(benchMsg)
 					}
-					dropped.Add(local)
 				})
 				b.StopTimer()
-				report(b, subs, dropped.Load())
+				report(b, subs, bc.Drops()-before)
 			})
 		}
 	}
@@ -279,6 +280,11 @@ func BenchmarkFanoutSaturated(b *testing.B) {
 
 // BenchmarkSubscribeUnsubscribe measures pure membership churn with nothing
 // else going on — the join/part path, against member sets of three sizes.
+//
+// What a join costs is not only bookkeeping: an implementation that gives
+// every subscriber its own buffer pays for that allocation here, and one
+// with shared storage does not. That is a real difference between the two
+// designs, so it is left in the measurement rather than tuned away.
 func BenchmarkSubscribeUnsubscribe(b *testing.B) {
 	for _, impl := range impls {
 		for _, subs := range []int{0, 100, 1_000} {
@@ -289,7 +295,7 @@ func BenchmarkSubscribeUnsubscribe(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for range b.N {
-					bc.Unsubscribe(bc.Subscribe(benchChurnBuffer))
+					bc.Subscribe().Close()
 				}
 			})
 		}
@@ -328,7 +334,7 @@ func BenchmarkChurnUnderLoad(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for range b.N {
-					bc.Unsubscribe(bc.Subscribe(benchChurnBuffer))
+					bc.Subscribe().Close()
 				}
 				b.StopTimer()
 
