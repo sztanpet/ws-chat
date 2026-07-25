@@ -10,7 +10,10 @@ behind one interface, and the harness that decides between them.
   buffered channel per subscriber, non-blocking sends). Commits `bb3bc4c`,
   `7a2e81d`.
 - `ring.go` — `Ring`, a shared ring buffer. One copy of the history, each
-  subscriber reading at its own position. Commit `5c26cf4`.
+  subscriber reading at its own position. **This is the one to use.**
+  Commit `5c26cf4`.
+- `ring_cond.go` — `CondRing`, Ring with a `sync.Cond` instead of the
+  notify channel. Measured and rejected; see below.
 - `broadcast_test.go` — contract tests, table-driven over the `impls` list,
   plus `TestConcurrentChurn` for `-race`. Both implementations pass the
   same suite.
@@ -72,6 +75,53 @@ reader decides how much history everyone gets (a per-subscriber queue
 isolates them), and it allocates 112B once per broadcast whenever anyone is
 asleep, for the replacement notify channel. MapChan allocates nothing.
 
+## The sync.Cond variant (measured, rejected)
+
+`Ring` wakes sleepers by closing a shared `notify chan struct{}` and
+installing a fresh one, which allocates ~112B per broadcast whenever
+anybody is asleep — and that is the *common* case, since a quiet room is
+one where every write pump is parked in `Recv`. `sync.Cond` allocates
+nothing, so it looked worth trying.
+
+Medians over repeated runs (AMD Ryzen 5 5600G, 4 procs):
+
+```
+                         ring      condring
+send path (no receivers)  8.3ns      9.6ns
+paced delivery, 1000     20.8us     19.8us     (n=8 medians)
+part, 1000 sleepers        169ns    2260ns     (n=5 medians)
+part, 100 sleepers         147ns     495ns
+part, no sleepers          146ns      80ns
+alloc per broadcast       114B/1      0B/0
+churn under load, 1 sender 405ns    4502ns
+```
+
+**Verdict: keep `Ring`.** The allocation saving is real and delivery is a
+wash, but `sync.Cond` cannot wake one specific waiter — no select, and
+`Signal` wakes an arbitrary one — so ending a subscription must
+`Broadcast` and wake every sleeper in the room to re-check a predicate
+and go back to sleep. That is 13x on a part, it grows linearly with room
+size, and it is worst exactly where a chat server cares most. `Ring`
+wakes exactly one, because a subscriber parks on a `select` over its own
+`done` channel.
+
+Below ~100 sleepers `CondRing` wins on churn (80ns against 146ns: no
+`done` channel to allocate and nobody to wake). Not the case the server
+is built for.
+
+One thing `sync.Cond` is genuinely better at, and it is not performance:
+`Wait` enqueues the waiter *before* releasing the lock, so lost wakeups
+are impossible by construction. `Ring` needs the ordering argument
+written out in its `Broadcast` comment — waiters register under `RLock`,
+the decision is made under `Lock`, so the two cannot interleave. Correct,
+but a paragraph of reasoning where `Cond` would be none.
+
+Untested hypothesis for why the channel swap is not slower despite
+allocating: waking generation N and parking for generation N+1 use two
+*different* channel locks, where `sync.Cond` has one notify list that
+both the waker and the re-parking sleeper contend on. Would need a
+profile to confirm.
+
 ## Harness gotchas (hard-won, do not undo)
 
 1. **Count deliveries, not Broadcast calls.** A broadcaster that drops on
@@ -93,7 +143,13 @@ asleep, for the replacement notify channel. MapChan allocates nothing.
 5. **Concurrent senders cannot be drop-free with GOMAXPROCS=4** — every P
    busy sending leaves no core to receive on. That case is
    `FanoutSaturated` and is explicitly an overload benchmark.
-6. **`BenchmarkFanout`'s untimed drain is O(b.N x subs)**, so an
+6. **`BenchmarkFanoutPaced` is noisy — never read a single run.** It
+   varies by up to 3x run to run, and the first run of a series is
+   routinely a 10x outlier (goroutine setup, GC, `b.N` ramping). One run
+   of it said `CondRing` was 2.2x slower on delivery; eight runs and a
+   median put the two within 5%. Use `-count=8` and take the median for
+   anything that decides something.
+7. **`BenchmarkFanout`'s untimed drain is O(b.N x subs)**, so an
    implementation with a much cheaper timed op gets a much larger `b.N` and
    the drain stops finishing. `needsDrain` skips it for shared-storage
    implementations, which genuinely do not need it. New implementations may

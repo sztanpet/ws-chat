@@ -47,6 +47,11 @@ _(none yet)_
   is the component most likely to be rewritten, so alternatives are added
   to one table and are measured by the existing tests and benchmarks
   without touching a caller.
+- **`sync.Cond` was measured against the ring's notify channel and lost.**
+  It removes the per-broadcast allocation and delivery is a wash, but it
+  cannot wake one waiter, so a part wakes the whole room — 13x on a
+  thousand sleepers, growing with room size. Detail in
+  `state/broadcast.md`; do not re-litigate without reading it.
 - **Fan-out benchmarks count deliveries, not calls.** A drop-on-full
   broadcaster looks fastest when it fails fastest, so every fan-out
   benchmark reports `delivered/sent` and `drops/op` next to `ns/op`.
