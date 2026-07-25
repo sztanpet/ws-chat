@@ -1,0 +1,10 @@
+# github.com/coder/websocket v1.8.15
+## explicit; go 1.23
+github.com/coder/websocket
+github.com/coder/websocket/internal/bpool
+github.com/coder/websocket/internal/errd
+github.com/coder/websocket/internal/util
+github.com/coder/websocket/internal/wsjs
+# github.com/tailscale/hujson v0.0.0-20260722022634-78b5b162ee49
+## explicit; go 1.26
+github.com/tailscale/hujson

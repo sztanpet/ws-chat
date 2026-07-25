@@ -6,11 +6,12 @@ messages, presence and moderation events. The server owns authentication,
 channel membership, message fan-out, scrollback and moderation state.
 Clients (web, bots) speak the line protocol described below.
 
-> **Status: greenfield.** Nothing but tooling exists in this repo yet.
-> Everything under "Architecture" is the intended design, not a
-> description of code that is already there — it is what the first
-> milestones should build toward. When reality and this file disagree,
-> reality wins and this file gets updated in the same commit.
+> **Status: walking skeleton.** The fan-out, the config loader, the frame
+> codec, the extension points and a single-channel server exist and are
+> tested. Channels themselves, persistence and scrollback do not. Sections
+> below marked *(not built yet)* are intent; everything else describes code
+> that is there. When reality and this file disagree, reality wins and this
+> file gets updated in the same commit.
 
 ## Architecture
 
@@ -28,31 +29,48 @@ ever needed, are `go:embed`ded — the binary is self-contained except for
 
 `coder/websocket` (`github.com/coder/websocket`, the former
 `nhooyr.io/websocket`) does the upgrade on a stdlib `http.ServeMux`
-route. Everything after the upgrade follows one rule: **exactly two
-goroutines per connection, and only the writer touches the socket.**
+route. After the upgrade a connection runs **three goroutines**
+(`conn.go`):
 
-- The **read pump** loops on `conn.Read`, parses one frame, and hands
-  the command to the hub or the channel. It never writes to the socket.
-- The **write pump** owns `conn.Write` and drains a *bounded* outbound
-  `chan []byte` (~256 frames). Nothing else in the process is allowed to
-  write to a connection.
-- A full outbound channel means the client is slower than the fan-out.
-  **Drop the connection, never block the sender.** Backpressure that
-  propagates into the hub is how a chat server dies: one dead TCP
-  connection stalls every other member of the channel.
+- The **read pump** loops on `conn.Read` and parses one frame at a time.
+  It writes to the socket only for replies belonging to this client alone
+  (`PONG`, `ERR`).
+- The **write pump** feeds the client the broadcast stream. It blocks in
+  `Sub.Recv`, which hands back everything that piled up since the last
+  call, so a client that has fallen behind costs one wakeup rather than
+  one per message.
+- The **private pump** delivers messages addressed to this client alone,
+  off a small bounded queue.
 
-Fan-out is per-channel, not global. The hub holds
-`map[channelName]*channel` behind an `RWMutex` and is only consulted on
-join/part/lookup. Each `*channel` owns its own member set and does its
-own fan-out: a broadcast iterates that channel's members and does a
-non-blocking send into each member's outbound channel. So a busy channel
-never serializes behind a quiet one, and the hot path takes no global
-lock.
+All three may write, which is safe because coder/websocket serializes
+writes internally ("all methods may be called concurrently except for
+Reader and Read"). That is a deliberate deviation from a single-writer
+rule: the alternative is one merge channel in front of the socket, which
+would put a channel hop back in front of every broadcast message and undo
+the work in `internal/broadcast`.
+
+**Backpressure stops at the connection.** A subscriber that cannot keep
+up is dropped (`ErrLagged`) rather than waited on, a private message to
+somebody whose queue is full is refused (`ERR recipientbusy`) rather than
+blocked on, and every socket write is bounded by `WriteTimeout`. A
+private message arrives on *somebody else's* read pump, so this is not
+theoretical: without it, one person who stopped reading would stall
+everyone who messages them.
+
+Fan-out is `internal/broadcast`. `Ring` is the implementation to use: one
+shared buffer, each subscriber reading at its own position, so a
+broadcast is O(1) in the member count and never walks the subscribers.
+See `state/broadcast.md` for the measurements behind that choice.
+
+There is currently **one broadcaster**, a single implicit channel every
+connection joins. *(Not built yet)* Channels replace it with a lookup
+from channel name to its own `Ring`; nothing in the connection handling
+should need to change.
 
 A user has **one connection and many channel memberships**, not one
-connection per channel. `PRIVMSG` and presence therefore need a
-`map[userID]*conn` lookup that lives on the hub, alongside the channel
-map.
+connection per channel. The `map[nick]*conn` directory in `init.go` is
+what `PRIVMSG` is addressed through, and it is separate from any
+channel's member set for that reason.
 
 ### Wire protocol
 
@@ -67,19 +85,56 @@ object. No trailing newline, no batching — one frame is one command. A
 frame with no payload is just the verb (`PING`). Unknown verbs get an
 `ERR` back and do not close the connection.
 
-Client → server: `MSG`, `PRIVMSG`, `JOIN`, `PART`, `NAMES`, `PING`, and
-the moderation verbs `MUTE`, `UNMUTE`, `BAN`, `UNBAN`.
+Implemented today — client → server: `MSG`, `PRIVMSG`, `PING`. Server →
+client: `READY`, `MSG`, `PRIVMSG`, `PONG`, `ERR`.
 
-Server → client: `MSG`, `PRIVMSG`, `JOIN`, `QUIT`, `NAMES`, `PONG`,
-`ERR`, `BROADCAST`, plus the moderation echoes. Every server-originated
-message carries `channel`, `nick`, `timestamp` (unix millis) and a
-server-assigned monotonic `id` for the channel.
+*(Not built yet)*: `JOIN`, `PART`, `NAMES`, and the moderation verbs
+`MUTE`, `UNMUTE`, `BAN`, `UNBAN` with their echoes.
+
+`READY` is the first frame the server sends and carries the connection's
+assigned nick. It exists because the WebSocket handshake completes before
+the server has subscribed the connection: a client that talks before
+`READY` can miss its own message. Every server-originated message carries
+`nick`, `timestamp` (unix millis) and a server-assigned monotonic `id`
+— and, once channels exist, `channel`.
+
+The id, the timestamp and the nick are the server's to assign. A client
+that puts a `nick` in its payload is ignored.
 
 `ERR` payloads use a stable machine-readable code
 (`{"description":"needlogin"}`-style), never a prose string clients have
 to parse.
 
-### Database
+### Extension points
+
+Everything that is not "move messages between sockets" lives behind an
+interface in `internal/hook`, and is handed to the server at startup as a
+`hook.Hooks`. The core imports `hook`, an implementation imports `hook`,
+and the core never imports an implementation. The zero `Hooks` is a
+working server: anonymous connections, everything allowed, nothing
+persisted.
+
+- **`Authenticator`** turns the HTTP upgrade into an `Identity`. Runs
+  once, at connect time, before the upgrade, so a refusal is a real HTTP
+  401 rather than a socket that opens and shuts. It sees a narrow
+  `hook.Request`, not the `*http.Request`, so it cannot hijack the
+  connection.
+- **`Directory`** supplies chatter data (display name, roles, attrs) for
+  an authenticated id. Also once per connection. A miss (`ErrNoChatter`)
+  or a failure is not fatal — a broken directory must not cost somebody
+  their login.
+- **`Filter`** decides whether a message may be sent. On the hot path, in
+  front of every message, so it must be a lookup and not a round trip.
+  Its refusal reason becomes the `ERR` code verbatim.
+- **`Recorder`** writes messages down, public and private. It runs on a
+  background worker **after** delivery, off a bounded queue, and drops
+  with a counter when that queue is full. A store having a bad day costs
+  history, never delivery.
+
+`hooks.go` is the only place any of them is called, so the rules about
+which may block live in one file.
+
+### Database *(not built yet)*
 
 SQLite via `modernc.org/sqlite` (pure Go, no cgo), files under `data/`.
 Two pools: `db.Write` (max 1 conn — SQLite is a single-writer) and
@@ -106,13 +161,13 @@ stall must degrade scrollback, not delivery.
 
 ### Other load-bearing pieces
 
-- **Config**: HuJSON (`tailscale/hujson`). `config_default.hujson` is
-  committed and fully commented-out; real values go in an uncommitted
-  `config.hujson` next to the binary.
-- **Auth**: the client presents a session token on the upgrade request
-  (cookie or `Authorization`), resolved to a user once, at connect time.
-  Never re-check auth per frame. Anonymous connections may read but not
-  `MSG` — the check is a field on the connection, not a database hit.
+- **Config**: HuJSON (`tailscale/hujson`) in `internal/config`.
+  `config_default.hujson` is committed and fully commented-out; real
+  values go in an uncommitted `config.hujson` next to the binary. A
+  config test loads the committed file and compares it against the
+  defaults in code, so the two cannot drift.
+- **Auth**: see the `Authenticator` hook above. Resolved once, at connect
+  time; never re-checked per frame.
 - **Presence**: `NAMES` is served from the channel's in-memory member
   set, never from the database.
 - **Scrollback**: the last N messages per channel are kept in a ring
@@ -124,10 +179,13 @@ stall must degrade scrollback, not delivery.
 - **Moderation**: mutes and bans are in-memory state on the channel with
   a SQLite row behind them, so a restart does not clear them. An IP ban
   is checked at upgrade time, before the WebSocket handshake completes.
-- **Shutdown**: `signal.go`/`shutdown.go` — on SIGTERM stop accepting
-  upgrades, send a close frame to every connection, drain the message
-  writer, then exit. Systemd socket activation via `coreos/go-systemd`
-  if the deployment ever needs zero-downtime restarts.
+- **Shutdown** (`shutdown.go`): on SIGTERM stop accepting upgrades, send
+  a close frame to every connection, then unblock both pumps and drain
+  the persistence queue. `net/http`'s `Shutdown` deliberately ignores
+  hijacked connections and every WebSocket is one, so all of this is the
+  server's own doing. **Order matters**: cancelling a read context drops
+  the socket without a close frame, because a cancelled read leaves the
+  stream at an unknown offset, so the goodbye has to go out first.
 
 ### Makefile
 
