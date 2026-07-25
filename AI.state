@@ -6,17 +6,20 @@ only when you are touching that track.
 
 ## Latest
 
-Repository bootstrap. `git init`, Go module `github.com/sztanpet/ws-chat`
-(Go 1.26, toolchain 1.26.4), `Makefile`, `CLAUDE.md`, `.gitignore`,
-`.editorconfig`, `AGENTS.md`, `.sembleignore`, `config_default.hujson`.
-No Go source yet — `CLAUDE.md`'s Architecture section is the intended
-design, not a description of existing code. Next milestone: the first
-walking skeleton (config + HTTP server + `/ws` upgrade + read/write
-pumps + an `httptest`-based client test).
+`internal/broadcast`: the fan-out primitive, with `MapChan` (map behind an
+RWMutex, buffered channel per subscriber) as the reference implementation
+and a benchmark harness built to compare alternatives against it. Zero
+allocations on the broadcast path; the headline finding is that ~two
+thirds of a broadcast's cost is waking receiver goroutines, not walking
+the member set. Full detail, baseline numbers and the harness traps are in
+`state/broadcast.md`. Nothing consumes the package yet — the next
+milestone is still the walking skeleton (config + HTTP server + `/ws`
+upgrade + read/write pumps + an `httptest`-based client test).
 
 ## State file index
 
-_(none yet — create `state/<track>.md` when the first spec's work begins)_
+- `state/broadcast.md` — `internal/broadcast`, the fan-out primitive and
+  its comparative benchmark harness.
 
 ## Release log
 
@@ -37,6 +40,13 @@ _(none yet)_
 - **Backpressure never propagates into the hub.** A full outbound buffer
   disconnects that client; it must not block the sender.
 - **Wire protocol is `VERB {json}` text frames**, one command per frame.
+- **Swappable `Broadcaster` interface in `internal/broadcast`.** The fan-out
+  is the component most likely to be rewritten, so alternatives are added
+  to one table and are measured by the existing tests and benchmarks
+  without touching a caller.
+- **Fan-out benchmarks report `drops/op` alongside `ns/op`.** A drop-on-full
+  broadcaster can post a fantastic time by delivering to nobody; without
+  that metric an invalid run is indistinguishable from a fast one.
 
 ## Removed
 
