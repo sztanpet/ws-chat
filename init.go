@@ -60,6 +60,12 @@ type app struct {
 	// is history.Memory; a deployment can install anything.
 	hist hook.History
 
+	// limiters are the rate limit buckets shared between the connections of
+	// one account, keyed by whatever the Limiter hook decided an account
+	// is. Connections with no key are not in here at all.
+	limitersMu sync.Mutex
+	limiters   map[string]*limiterEntry
+
 	// chanLimit is the bucket every member of the channel shares. Nil means
 	// unlimited, which is the default. One per channel once channels exist.
 	chanLimit *ratelimit.Bucket
@@ -111,12 +117,13 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 	}
 
 	a := &app{
-		cfg:   cfg,
-		hooks: hooks,
-		log:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})),
-		bcs:   make(map[string]broadcast.Broadcaster, len(proto.Codecs())),
-		mux:   http.NewServeMux(),
-		conns: make(map[string]*conn),
+		cfg:      cfg,
+		hooks:    hooks,
+		log:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})),
+		bcs:      make(map[string]broadcast.Broadcaster, len(proto.Codecs())),
+		mux:      http.NewServeMux(),
+		conns:    make(map[string]*conn),
+		limiters: make(map[string]*limiterEntry),
 
 		records:     make(chan func(context.Context) error, recordQueue),
 		recordsDone: make(chan struct{}),
@@ -143,6 +150,7 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 	)
 
 	a.ctx, a.stopConn = context.WithCancel(context.Background())
+	go a.janitor(a.ctx)
 	if hooks.Recorder != nil {
 		go a.recordWorker(a.ctx)
 	} else {
@@ -152,6 +160,18 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 	a.srv = &http.Server{Addr: cfg.Addr, Handler: a.mux}
 	return a, nil
 }
+
+// limiterEntry is a shared rate limit bucket and the number of connections
+// currently holding it.
+type limiterEntry struct {
+	bucket *ratelimit.Bucket
+	refs   int
+}
+
+// janitorInterval is how often expired moderation entries and unreferenced
+// rate limiters are reclaimed. Nothing waits on it, so it is deliberately
+// unhurried.
+const janitorInterval = time.Minute
 
 // mainChannel is the single implicit channel everything belongs to until
 // channels exist. It is passed to the hooks that take a channel name so

@@ -553,3 +553,196 @@ func TestThrottlingDoesNotCloseTheConnection(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// --- account-wide rate limits ------------------------------------------
+
+// keyedLimiter builds the bucket key out of whatever the auth layer
+// attached to the identity, which is the point of the key being a string
+// the hook chooses rather than a flag the core interprets.
+type keyedLimiter struct {
+	client  hook.Limits
+	channel hook.Limits
+	attr    string // the Attrs entry to key on; empty means Identity.ID
+}
+
+func (k keyedLimiter) ClientLimits(ctx context.Context, id hook.Identity) hook.Limits {
+	limits := k.client
+	if k.attr != "" {
+		limits.Key = id.Attrs[k.attr]
+	} else {
+		limits.Key = id.ID
+	}
+	return limits
+}
+
+func (k keyedLimiter) ChannelLimits(ctx context.Context, channel string) hook.Limits {
+	return k.channel
+}
+
+// Two connections of one account share a budget.
+func TestAccountRateLimitIsSharedAcrossConnections(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Auth: fakeAuth{byToken: map[string]hook.Identity{
+			"a1": {ID: "u1", Nick: "alice"},
+			"a2": {ID: "u1", Nick: "alice2"}, // same account, second socket
+			"b":  {ID: "u2", Nick: "bob"},
+		}},
+		Limiter: keyedLimiter{client: hook.Limits{Burst: 3, Interval: time.Hour}},
+	})
+
+	first, err := ta.dialWith(t, "?token=a1")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	second, err := ta.dialWith(t, "?token=a2")
+	if err != nil {
+		t.Fatalf("dial the second socket: %v", err)
+	}
+	bob, err := ta.dialWith(t, "?token=b")
+	if err != nil {
+		t.Fatalf("dial bob: %v", err)
+	}
+
+	room := []*client{first, second, bob}
+
+	// Two from one socket, one from the other: that is the account's three.
+	first.send(proto.VerbMsg, proto.In{Data: "one"})
+	expectAll(room, "alice", "one")
+	first.send(proto.VerbMsg, proto.In{Data: "two"})
+	expectAll(room, "alice", "two")
+	second.send(proto.VerbMsg, proto.In{Data: "three"})
+	expectAll(room, "alice2", "three")
+
+	// A fourth is refused on EITHER socket — opening a second one bought
+	// nothing.
+	second.send(proto.VerbMsg, proto.In{Data: "four"})
+	second.expectErr(proto.ErrThrottled)
+	first.send(proto.VerbMsg, proto.In{Data: "also four"})
+	first.expectErr(proto.ErrThrottled)
+
+	// And it is that account's budget, not everybody's.
+	bob.send(proto.VerbMsg, proto.In{Data: "bob is fine"})
+	expectAll(room, "bob", "bob is fine")
+}
+
+// The key can come from anything the auth layer attached, not just the id.
+func TestAccountKeyFromAuthAttributes(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Auth: fakeAuth{byToken: map[string]hook.Identity{
+			"a": {ID: "u1", Nick: "alice", Attrs: map[string]string{"org": "acme"}},
+			"b": {ID: "u2", Nick: "bob", Attrs: map[string]string{"org": "acme"}},
+			"c": {ID: "u3", Nick: "carol", Attrs: map[string]string{"org": "other"}},
+		}},
+		Limiter: keyedLimiter{
+			client: hook.Limits{Burst: 2, Interval: time.Hour},
+			attr:   "org",
+		},
+	})
+
+	alice, _ := ta.dialWith(t, "?token=a")
+	bob, _ := ta.dialWith(t, "?token=b")
+	carol, _ := ta.dialWith(t, "?token=c")
+
+	room := []*client{alice, bob, carol}
+
+	// Two different people, one organisation, one budget.
+	alice.send(proto.VerbMsg, proto.In{Data: "one"})
+	expectAll(room, "alice", "one")
+	bob.send(proto.VerbMsg, proto.In{Data: "two"})
+	expectAll(room, "bob", "two")
+
+	bob.send(proto.VerbMsg, proto.In{Data: "three"})
+	bob.expectErr(proto.ErrThrottled)
+
+	// A different organisation is untouched.
+	carol.send(proto.VerbMsg, proto.In{Data: "different org"})
+	expectAll(room, "carol", "different org")
+}
+
+// Reconnecting must not hand back a full bucket, which is the first thing
+// somebody being throttled would try.
+func TestAccountLimitSurvivesReconnection(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Auth:    fakeAuth{byToken: map[string]hook.Identity{"a": {ID: "u1", Nick: "alice"}}},
+		Limiter: keyedLimiter{client: hook.Limits{Burst: 1, Interval: time.Hour}},
+	})
+
+	first, err := ta.dialWith(t, "?token=a")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	first.send(proto.VerbMsg, proto.In{Data: "spent it"})
+	first.expectMsg("alice", "spent it")
+	first.send(proto.VerbMsg, proto.In{Data: "refused"})
+	first.expectErr(proto.ErrThrottled)
+
+	// Go away and come back.
+	first.ws.CloseNow()
+
+	second, err := ta.dialWith(t, "?token=a")
+	if err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	second.send(proto.VerbMsg, proto.In{Data: "try again"})
+	second.expectErr(proto.ErrThrottled)
+}
+
+// Without a key it is one bucket per connection, which is the default and
+// the weaker guarantee.
+func TestPerConnectionIsTheDefault(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Auth: fakeAuth{byToken: map[string]hook.Identity{
+			"a1": {ID: "u1", Nick: "alice"},
+			"a2": {ID: "u1", Nick: "alice2"},
+		}},
+		Limiter: &fakeLimiter{client: hook.Limits{Burst: 1, Interval: time.Hour}},
+	})
+
+	first, _ := ta.dialWith(t, "?token=a1")
+	second, _ := ta.dialWith(t, "?token=a2")
+
+	room := []*client{first, second}
+
+	first.send(proto.VerbMsg, proto.In{Data: "one"})
+	expectAll(room, "alice", "one")
+	first.send(proto.VerbMsg, proto.In{Data: "refused"})
+	first.expectErr(proto.ErrThrottled)
+
+	// The same account's other socket has its own budget, because no key
+	// was given.
+	second.send(proto.VerbMsg, proto.In{Data: "still allowed"})
+	expectAll(room, "alice2", "still allowed")
+}
+
+// A shared bucket is reclaimed once nobody holds it AND it has refilled,
+// never before.
+func TestSharedLimiterReclamation(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Auth:    fakeAuth{byToken: map[string]hook.Identity{"a": {ID: "u1", Nick: "alice"}}},
+		Limiter: keyedLimiter{client: hook.Limits{Burst: 2, Interval: time.Hour}},
+	})
+
+	c, err := ta.dialWith(t, "?token=a")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c.send(proto.VerbMsg, proto.In{Data: "spend one"})
+	c.expectMsg("alice", "spend one")
+
+	// Held by a live connection: not reclaimable however long we wait.
+	if n := ta.app.sweepLimiters(time.Now().Add(24 * time.Hour)); n != 0 {
+		t.Fatalf("swept %d buckets that are still held", n)
+	}
+
+	// Released but still spent: not reclaimable either, which is what
+	// stops a reconnect refilling it.
+	ta.app.releaseLimiter("u1")
+	if n := ta.app.sweepLimiters(time.Now()); n != 0 {
+		t.Fatalf("swept %d buckets that still had spent tokens", n)
+	}
+
+	// Released and refilled: now it holds nothing a new bucket would not.
+	if n := ta.app.sweepLimiters(time.Now().Add(24 * time.Hour)); n != 1 {
+		t.Fatalf("swept %d buckets, want the 1 that had refilled", n)
+	}
+}

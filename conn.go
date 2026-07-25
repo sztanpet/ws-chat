@@ -46,9 +46,12 @@ type conn struct {
 	id    hook.Identity
 	codec proto.Codec
 
-	// limit is this connection's own bucket. Nil means unlimited, which is
-	// the default.
-	limit *ratelimit.Bucket
+	// limit is this connection's bucket — its own, or one shared with the
+	// other connections of the same account. Nil means unlimited, which is
+	// the default. releaseLimit hands a shared one back and is nil when
+	// there is nothing to hand back.
+	limit        *ratelimit.Bucket
+	releaseLimit func()
 
 	log *slog.Logger
 }
@@ -116,8 +119,8 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 		priv:  make(chan []byte, a.cfg.PrivBuffer),
 		id:    id,
 		codec: codec,
-		limit: a.clientLimiter(r.Context(), id),
 	}
+	c.limit, c.releaseLimit = a.clientLimiter(r.Context(), id)
 	c.log = a.log.With("nick", c.nick(), "remote", r.RemoteAddr, "codec", codec.Name())
 
 	// Deliberately not r.Context(): the connection is hijacked, and its
@@ -129,6 +132,12 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 func (c *conn) serve(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+
+	// Whatever happens below, a shared bucket goes back. Every early return
+	// in here is a connection that never really started.
+	if c.releaseLimit != nil {
+		defer c.releaseLimit()
+	}
 
 	c.sub = c.app.bcs[c.codec.Name()].Subscribe()
 	c.app.register(c)

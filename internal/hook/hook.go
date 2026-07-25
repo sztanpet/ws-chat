@@ -118,6 +118,27 @@ type Limits struct {
 	// Interval is how long one message costs, sustained. Burst 5 with an
 	// Interval of 2s is "five at once, then one every two seconds".
 	Interval time.Duration
+
+	// Key shares one bucket between every connection that reports the same
+	// key. Empty — the default — gives each connection its own, which is
+	// the weaker guarantee: somebody who opens four sockets gets four
+	// budgets.
+	//
+	// What the key MEANS is entirely the implementation's business, which
+	// is why it is a string and not a flag. An account id is the obvious
+	// one, but it can equally be a payment tier, an organisation from
+	// Attrs, or an address — whatever the auth layer attached to the
+	// identity is available here to build it from. The core only compares
+	// keys for equality.
+	//
+	// Two things follow. The bucket is created by the first connection to
+	// name a key and its limits stand for as long as anybody holds it, so
+	// returning different limits for the same key does not change a bucket
+	// already in use. And a keyed bucket outlives the connections holding
+	// it, on purpose: a bucket dropped the moment its last connection left
+	// would hand a full one back to anyone who reconnected, which is
+	// exactly what somebody being throttled would try.
+	Key string
 }
 
 // Unlimited reports whether these limits enforce anything.
@@ -135,10 +156,10 @@ type Limiter interface {
 	// fast this person may talk. It is the seam for "mods are not
 	// throttled" and "new accounts are throttled harder".
 	//
-	// The limit is per CONNECTION, not per identity: an anonymous
-	// connection has no stable id to key on, so somebody who opens two
-	// sockets gets two buckets. Tightening that needs logins and a keyed
-	// registry, and is noted in state/server.md.
+	// Whether the limit covers one connection or every connection of an
+	// account is decided by Limits.Key: empty is per connection, which is
+	// the default because an anonymous connection has no account to share a
+	// budget with.
 	ClientLimits(ctx context.Context, id Identity) Limits
 
 	// ChannelLimits is asked once, when a channel is created, for how fast

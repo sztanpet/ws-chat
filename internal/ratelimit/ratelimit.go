@@ -60,25 +60,48 @@ func (b *Bucket) AllowAt(now time.Time) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.last.IsZero() {
-		b.last = now
-	}
-
-	// Refill. A clock that went backwards refills nothing rather than
-	// draining the bucket, and does not move `last` back.
-	if elapsed := now.Sub(b.last); elapsed > 0 {
-		b.tokens += float64(elapsed) / float64(b.interval)
-		if b.tokens > b.burst {
-			b.tokens = b.burst
-		}
-		b.last = now
-	}
+	b.refillLocked(now)
 
 	if b.tokens < 1 {
 		return false
 	}
 	b.tokens--
 	return true
+}
+
+// refillLocked adds the tokens that have accrued since the last call. A
+// clock that went backwards refills nothing rather than draining the
+// bucket, and does not move `last` back.
+func (b *Bucket) refillLocked(now time.Time) {
+	if b.last.IsZero() {
+		b.last = now
+	}
+	elapsed := now.Sub(b.last)
+	if elapsed <= 0 {
+		return
+	}
+	b.tokens += float64(elapsed) / float64(b.interval)
+	if b.tokens > b.burst {
+		b.tokens = b.burst
+	}
+	b.last = now
+}
+
+// Idle reports whether the bucket has refilled completely — that is,
+// whether it holds anything a brand new bucket would not.
+//
+// It is what makes a shared bucket safe to forget. A bucket that has
+// refilled is indistinguishable from one that never existed, so dropping
+// it loses nothing, where dropping a half-spent one would hand somebody a
+// fresh budget for reconnecting.
+func (b *Bucket) Idle(now time.Time) bool {
+	if b == nil {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.refillLocked(now)
+	return b.tokens >= b.burst
 }
 
 // Tokens reports what is left, for logging and tests.

@@ -76,15 +76,100 @@ func (a *app) identify(ctx context.Context, r *http.Request) (hook.Identity, err
 	return id, nil
 }
 
-// clientLimiter builds the rate limiter for one connection. No Limiter
-// installed, or one with no opinion, means unlimited — which New returns as
-// a nil *Bucket, so the check on the hot path costs a nil comparison.
-func (a *app) clientLimiter(ctx context.Context, id hook.Identity) *ratelimit.Bucket {
+// clientLimiter builds the rate limiter for one connection, and returns the
+// function that hands it back.
+//
+// No Limiter installed, or one with no opinion, means unlimited — which New
+// returns as a nil *Bucket, so the check on the hot path costs a nil
+// comparison. A Limits with no Key gets a bucket of its own and nothing to
+// release; one with a Key shares a bucket with every other connection
+// naming it.
+func (a *app) clientLimiter(ctx context.Context, id hook.Identity) (*ratelimit.Bucket, func()) {
 	if a.hooks.Limiter == nil {
-		return nil
+		return nil, nil
 	}
+
 	limits := a.hooks.Limiter.ClientLimits(ctx, id)
-	return ratelimit.New(limits.Burst, limits.Interval)
+	if limits.Key == "" {
+		return ratelimit.New(limits.Burst, limits.Interval), nil
+	}
+	return a.acquireLimiter(limits)
+}
+
+// acquireLimiter hands out the bucket for a key, creating it if this is the
+// first connection to ask.
+//
+// The limits of an existing bucket are left alone. A bucket in use is
+// somebody's remaining budget, and rebuilding it because a later connection
+// reported different numbers would refill it — which is a way to escape a
+// throttle by opening a second socket.
+func (a *app) acquireLimiter(limits hook.Limits) (*ratelimit.Bucket, func()) {
+	a.limitersMu.Lock()
+	defer a.limitersMu.Unlock()
+
+	entry, ok := a.limiters[limits.Key]
+	if !ok {
+		entry = &limiterEntry{bucket: ratelimit.New(limits.Burst, limits.Interval)}
+		a.limiters[limits.Key] = entry
+	}
+	entry.refs++
+
+	key := limits.Key
+	return entry.bucket, func() { a.releaseLimiter(key) }
+}
+
+// releaseLimiter drops one connection's hold on a shared bucket.
+//
+// It does NOT delete the entry at zero. A bucket that still has spent
+// tokens is somebody's throttle, and handing back a fresh one the moment
+// they disconnect is exactly what a person being throttled would try.
+// Reclaiming is the janitor's job, and only once the bucket has refilled.
+func (a *app) releaseLimiter(key string) {
+	a.limitersMu.Lock()
+	defer a.limitersMu.Unlock()
+	if entry, ok := a.limiters[key]; ok && entry.refs > 0 {
+		entry.refs--
+	}
+}
+
+// sweepLimiters drops shared buckets that nobody holds and that have
+// refilled, and reports how many it removed. A refilled bucket is
+// indistinguishable from one that never existed, so forgetting it loses
+// nothing.
+func (a *app) sweepLimiters(now time.Time) int {
+	a.limitersMu.Lock()
+	defer a.limitersMu.Unlock()
+
+	removed := 0
+	for key, entry := range a.limiters {
+		if entry.refs == 0 && entry.bucket.Idle(now) {
+			delete(a.limiters, key)
+			removed++
+		}
+	}
+	return removed
+}
+
+// janitor reclaims what lazy expiry leaves behind. Nothing depends on it
+// running — every read already treats an expired entry as absent — so it
+// only exists to stop a long-lived server accumulating them.
+func (a *app) janitor(ctx context.Context) {
+	ticker := time.NewTicker(janitorInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			if n := a.sweepLimiters(now); n > 0 {
+				a.log.Debug("reclaimed rate limiters", "count", n)
+			}
+			if n := a.mod.Sweep(); n > 0 {
+				a.log.Debug("reclaimed expired moderation", "count", n)
+			}
+		}
+	}
 }
 
 // channelLimiter builds the bucket every member of a channel shares.

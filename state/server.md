@@ -56,9 +56,19 @@ extension points, and a single-channel WebSocket chat server.
 - **A nil `*ratelimit.Bucket` allows everything**, which is what makes the
   unlimited default free — a nil comparison rather than a mutex and a
   clock read.
-- **Client limits are per connection, not per identity.** Anonymous
-  connections have no stable id to key on. Per-identity needs logins and a
-  keyed registry with a lifetime; noted under Pending.
+- **Client limit scope is the hook's choice, via `Limits.Key`.** Empty is
+  per connection, which stays the default because an anonymous connection
+  has no account to share a budget with. Non-empty shares a refcounted
+  bucket between every connection naming that key. The key is a string
+  rather than a flag so the hook can build it from anything the auth layer
+  attached — an account id, a tier, an org out of `Attrs`.
+- **A keyed bucket outlives its connections on purpose.** Reclaiming it at
+  refcount zero would refill somebody's throttle for them the moment they
+  reconnected. The janitor only drops a bucket that nobody holds *and*
+  that has refilled, which by definition holds nothing.
+- **The limits of a bucket already in use are never changed.** A later
+  connection reporting different numbers for the same key would otherwise
+  rebuild — and so refill — a budget somebody is part way through.
 - **Both buckets are spent even when the message is later refused.** A
   rate limit that only counts successful messages makes sending garbage
   free.
@@ -136,12 +146,13 @@ extension points, and a single-channel WebSocket chat server.
   especially *un*-moderation, needs to name somebody who is not connected.
   That wants a `Directory` lookup by nick, which the interface does not
   have yet.
+- **Nothing sweeps on a timer except the janitor**, which runs once a
+  minute. Expired mutes and unreferenced limiters therefore linger for up
+  to that long; every read already treats them as absent, so this is
+  memory, not correctness.
 - **Moderation state is memory-only.** It is recorded through `Recorder`
   but never loaded back, so a restart forgets every mute and ban. Loading
   wants a hook method that reads them at startup.
-- **Per-identity rate limits.** Today two sockets from one person get two
-  buckets. Needs a registry keyed by `Identity.ID`, with an eviction
-  policy, and it only means anything once logins exist.
 - **Real nick collision handling.** Nicks are server-assigned and unique
   today, so `register` cannot collide. With logins it can, and `init.go`
   is where that gets decided.

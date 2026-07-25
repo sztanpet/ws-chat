@@ -214,6 +214,17 @@ func (c *client) expectPriv(data string) proto.Priv {
 	return msg
 }
 
+// expectAll requires every client to receive the same message. Clients that
+// are in the room receive everything said in it, so a test with more than
+// two of them has to drain all of them or the next assertion reads a
+// message it was not looking for.
+func expectAll(clients []*client, nick, data string) {
+	for _, c := range clients {
+		c.t.Helper()
+		c.expectMsg(nick, data)
+	}
+}
+
 // expectErr reads one frame and requires it to be an ERR with this code.
 func (c *client) expectErr(description string) {
 	c.t.Helper()

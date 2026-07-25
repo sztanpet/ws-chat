@@ -175,6 +175,14 @@ persisted.
   implementation is asked once and never sees an individual message.
   Defaults are unlimited, and so is any `Limits` with a non-positive
   field — "no limit" and "a limit of nothing" must not be one typo apart.
+
+  `Limits.Key` decides the **scope**. Empty (the default) is one bucket per
+  connection. Non-empty shares one bucket between every connection
+  reporting the same key, which is how an account is limited as a whole
+  rather than per socket. What the key means is the hook's business — an
+  account id, a payment tier, an organisation out of `Attrs` — since only
+  it knows what the auth layer attached. The core compares keys for
+  equality and nothing else.
 - **`History`** is the replay window a connecting client is shown.
   Separate from `Recorder` on purpose: `Recorder` is durability and runs
   behind delivery on a worker, `History` is read back on every connect and
@@ -298,6 +306,14 @@ stall must degrade scrollback, not delivery.
 
   A nil `*Bucket` allows everything, so the unlimited default costs a nil
   comparison on the hot path rather than a mutex and a clock read.
+
+  A keyed bucket is refcounted and **outlives the connections holding
+  it**. Dropping it when the last one leaves would hand a full bucket back
+  to anyone who reconnected, which is the first thing somebody being
+  throttled would try. The janitor reclaims a bucket only once nobody
+  holds it *and* it has refilled — at which point it is indistinguishable
+  from one that never existed, so forgetting it loses nothing. The same
+  janitor sweeps expired mutes and bans.
 
   The client's limit is checked first, so somebody over their own budget
   is told it is their fault (`ERR throttled`) rather than the room's
