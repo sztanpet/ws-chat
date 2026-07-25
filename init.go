@@ -6,13 +6,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sztanpet/ws-chat/internal/broadcast"
 	"github.com/sztanpet/ws-chat/internal/config"
 	"github.com/sztanpet/ws-chat/internal/filter"
+	"github.com/sztanpet/ws-chat/internal/history"
 	"github.com/sztanpet/ws-chat/internal/hook"
 	"github.com/sztanpet/ws-chat/internal/moderation"
 	"github.com/sztanpet/ws-chat/internal/proto"
@@ -55,10 +56,9 @@ type app struct {
 	// channel once channels exist.
 	mod *moderation.Store
 
-	// history is the last cfg.Backlog messages, replayed to a client when
-	// it connects. Guarded by sendMu, the same lock that orders the
-	// broadcast, so the history cannot disagree with what was delivered.
-	history []proto.Msg
+	// hist is the replay window a connecting client is shown. The default
+	// is history.Memory; a deployment can install anything.
+	hist hook.History
 
 	// chanLimit is the bucket every member of the channel shares. Nil means
 	// unlimited, which is the default. One per channel once channels exist.
@@ -127,6 +127,13 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 	a.chanLimit = a.channelLimiter(context.Background(), mainChannel)
 	a.mod = moderation.New()
 
+	// The default window is what the server did before the hook existed:
+	// the last cfg.Backlog messages, in memory.
+	a.hist = hooks.History
+	if a.hist == nil {
+		a.hist = history.NewMemory(cfg.Backlog)
+	}
+
 	// Text hygiene first, then policy. A message that is not valid text
 	// should never reach a filter that was written assuming it was.
 	a.filters = filter.Chain(
@@ -190,38 +197,65 @@ func (a *app) lookup(nick string) (*conn, bool) {
 	return c, ok
 }
 
-// broadcastMsg is broadcast for a chat message, which additionally goes
-// into the history a connecting client is replayed.
+// broadcastMsg fans out a chat message and adds it to the replay window.
 //
-// The history is appended under the same lock that orders the fan-out, so
-// what a joining client is shown cannot disagree with what the room saw.
-func (a *app) broadcastMsg(build func(id uint64) proto.Msg) (uint64, error) {
+// Everything a client sees is derived from the identity and the text, so
+// the caller passes those rather than assembling a frame: the wire form and
+// the history form are then two views of the same thing and cannot drift.
+//
+// The window is appended under the same lock that orders the fan-out, so
+// what a joining client is shown cannot disagree with the order the room
+// saw.
+func (a *app) broadcastMsg(from hook.Identity, data string, at time.Time) (uint64, error) {
 	return a.broadcastWith(proto.VerbMsg,
-		func(id uint64) any { return build(id) },
-		func(payload any) { a.remember(payload.(proto.Msg)) },
+		func(id uint64) any {
+			return wireMsg(hook.Message{ID: id, From: from, Data: data, At: at})
+		},
+		func(id uint64) {
+			a.hist.Append(context.Background(), mainChannel, hook.Message{
+				ID: id, From: from, Data: data, At: at,
+			})
+		},
 	)
 }
 
-// remember appends to the replay history. The caller holds sendMu.
-func (a *app) remember(msg proto.Msg) {
-	if a.cfg.Backlog < 1 {
-		return
+// wireMsg is the one place a recorded message becomes a frame, so the
+// backlog and live traffic cannot describe the same message differently.
+func wireMsg(m hook.Message) proto.Msg {
+	return proto.Msg{
+		ID:        m.ID,
+		Nick:      m.From.Nick,
+		Data:      m.Data,
+		Timestamp: m.At.UnixMilli(),
+		Roles:     m.From.Roles,
+		Attrs:     m.From.Attrs,
 	}
-	if len(a.history) == a.cfg.Backlog {
-		copy(a.history, a.history[1:])
-		a.history = a.history[:len(a.history)-1]
-	}
-	a.history = append(a.history, msg)
 }
 
-// backlog copies the replay history.
-func (a *app) backlog() []proto.Msg {
-	a.sendMu.Lock()
-	defer a.sendMu.Unlock()
-	if len(a.history) == 0 {
+// backlog is what a connecting client is replayed.
+//
+// Deliberately not under sendMu: a History implementation may be backed by
+// something slow, and Recent is allowed to be — it runs once per
+// connection. Holding the broadcast lock across it would let a slow store
+// stall the whole channel.
+func (a *app) backlog(ctx context.Context) []proto.Msg {
+	if a.cfg.Backlog < 1 {
 		return nil
 	}
-	return slices.Clone(a.history)
+
+	recent, err := a.hist.Recent(ctx, mainChannel, a.cfg.Backlog)
+	if err != nil {
+		// Failing to show history is not a reason to refuse somebody a
+		// connection. Log it; they get an empty window.
+		a.log.Error("cannot read history", "channel", mainChannel, "err", err)
+		return nil
+	}
+
+	msgs := make([]proto.Msg, len(recent))
+	for i, m := range recent {
+		msgs[i] = wireMsg(m)
+	}
+	return msgs
 }
 
 // broadcast encodes the payload once per codec and hands each ring its own
@@ -231,7 +265,7 @@ func (a *app) broadcast(verb string, build func(id uint64) any) (uint64, error) 
 	return a.broadcastWith(verb, build, nil)
 }
 
-func (a *app) broadcastWith(verb string, build func(id uint64) any, after func(any)) (uint64, error) {
+func (a *app) broadcastWith(verb string, build func(id uint64) any, after func(uint64)) (uint64, error) {
 	frames := make(map[string][]byte, len(a.bcs))
 
 	a.sendMu.Lock()
@@ -250,7 +284,7 @@ func (a *app) broadcastWith(verb string, build func(id uint64) any, after func(a
 		frames[codec.Name()] = frame
 	}
 	if after != nil {
-		after(payload)
+		after(id)
 	}
 	for name, frame := range frames {
 		a.bcs[name].Broadcast(frame)

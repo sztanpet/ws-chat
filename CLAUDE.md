@@ -116,6 +116,13 @@ its own message. `BACKLOG` is one frame containing an array of the recent
 history, not a burst of `MSG` frames, so a client can tell "here is what
 you missed" from "this just happened" without a per-message flag.
 
+**A client must ignore a live message whose id it already has from the
+backlog.** The server subscribes a connection before it reads the history,
+so a message sent in between arrives twice. Doing it the other way round
+would lose that message instead, and a duplicate a client can drop by id
+is strictly better than a gap it cannot detect. Ids are monotonic, so the
+check is one comparison.
+
 Every server-originated message carries `nick`, `timestamp` (unix millis)
 and a server-assigned monotonic `id` — and, once channels exist,
 `channel`. `MSG` and `PRIVMSG` also carry the sender's `roles` and
@@ -168,6 +175,15 @@ persisted.
   implementation is asked once and never sees an individual message.
   Defaults are unlimited, and so is any `Limits` with a non-positive
   field — "no limit" and "a limit of nothing" must not be one typo apart.
+- **`History`** is the replay window a connecting client is shown.
+  Separate from `Recorder` on purpose: `Recorder` is durability and runs
+  behind delivery on a worker, `History` is read back on every connect and
+  has to be fast. `Append` runs under the lock that orders the fan-out and
+  **must not block**; `Recent` runs once per connection and may. A
+  `Recent` that fails is logged and the client gets an empty window —
+  failing to show history is not a reason to refuse somebody a connection.
+  The default is `history.Memory`, the last `Backlog` messages per channel
+  in memory, which is what the server did before the hook existed.
 - **`Recorder`** writes things down: public messages, private messages and
   moderation actions. It runs on a background worker **after** the thing
   has happened, off a bounded queue, and drops with a counter when that

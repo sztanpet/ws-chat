@@ -66,9 +66,20 @@ extension points, and a single-channel WebSocket chat server.
   explicitly; a rate limiter tested against real time fails on a loaded
   machine.
 
-- **The backlog is written under the same lock that orders the fan-out**,
-  so what a joining client is shown cannot disagree with what the room
-  saw. There is a test for exactly that.
+- **The backlog is behind the `History` hook**, with `history.Memory` as
+  the default. Split from `Recorder` because they are different jobs:
+  durability is asynchronous and allowed to be slow, a replay window is
+  read on every connect and is not.
+- **`History.Append` runs under the lock that orders the fan-out**, so what
+  a joining client is shown cannot disagree with what the room saw. There
+  is a test for exactly that. It is documented as must-not-block for the
+  same reason.
+- **`History.Recent` is deliberately NOT under that lock.** An
+  implementation may be backed by something slow; holding the broadcast
+  lock across it would let a slow store stall the channel.
+- **`wireMsg` is the only place a recorded message becomes a frame**, so
+  the backlog and live traffic cannot describe the same message
+  differently.
 - **`BACKLOG` is always sent when enabled, even when empty.** A
   conditional frame would make "the room is new" and "the backlog is off"
   look the same to a client and turn every client's first-frame handling
@@ -106,7 +117,11 @@ extension points, and a single-channel WebSocket chat server.
    frame**, which the harness consumes. Tests that dial into a server with
    history and then read a frame will see the backlog first if they do
    their own dialling.
-6. **Moderation can only name somebody who is connected.** `lookup` is by
+6. **A message sent between subscribe and the backlog read arrives
+   twice.** The server subscribes first on purpose — the other order loses
+   the message instead, and a duplicate a client drops by id beats a gap it
+   cannot see. The protocol documents the client-side rule.
+7. **Moderation can only name somebody who is connected.** `lookup` is by
    nick over the connection directory, so unbanning a banned user fails
    with `nosuchnick` — they were disconnected by the ban. There is a test
    pinning that down as known behaviour rather than a surprise.

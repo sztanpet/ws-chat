@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -566,5 +568,150 @@ func TestModerationIsNotInTheBacklog(t *testing.T) {
 	}
 	if len(later.backlog) != 0 {
 		t.Fatalf("backlog has %d entries, want none — a MOD frame got in", len(later.backlog))
+	}
+}
+
+// --- the history hook -------------------------------------------------
+
+// fakeHistory serves a canned window and records what it was handed.
+type fakeHistory struct {
+	mu       sync.Mutex
+	appended []hook.Message
+	canned   []hook.Message
+	fail     error
+	askedFor int
+}
+
+func (f *fakeHistory) Append(ctx context.Context, channel string, m hook.Message) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appended = append(f.appended, m)
+}
+
+func (f *fakeHistory) Recent(ctx context.Context, channel string, n int) ([]hook.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.askedFor = n
+	if f.fail != nil {
+		return nil, f.fail
+	}
+	return f.canned, nil
+}
+
+func TestHistoryHookReplacesTheDefault(t *testing.T) {
+	hist := &fakeHistory{canned: []hook.Message{
+		{ID: 41, From: hook.Identity{Nick: "ghost", Roles: []string{"mod"}}, Data: "from the archive", At: time.UnixMilli(1700000000000)},
+		{ID: 42, From: hook.Identity{Nick: "ghost"}, Data: "and another", At: time.UnixMilli(1700000001000)},
+	}}
+	ta := newTestAppWith(t, hook.Hooks{History: hist})
+
+	c := ta.dial(t)
+	if len(c.backlog) != 2 {
+		t.Fatalf("backlog has %d messages, want the hook's 2", len(c.backlog))
+	}
+	if c.backlog[0].Data != "from the archive" || c.backlog[1].Data != "and another" {
+		t.Fatalf("backlog = %v, want the hook's messages in order", c.backlog)
+	}
+	if c.backlog[0].Nick != "ghost" {
+		t.Errorf("nick = %q, want %q", c.backlog[0].Nick, "ghost")
+	}
+	if c.backlog[0].ID != 41 {
+		t.Errorf("id = %d, want the hook's 41", c.backlog[0].ID)
+	}
+	if c.backlog[0].Timestamp != 1700000000000 {
+		t.Errorf("timestamp = %d, want the hook's", c.backlog[0].Timestamp)
+	}
+	// Whatever the hook attached to the sender rides along, exactly as it
+	// does on a live message.
+	if roles := c.backlog[0].Roles; len(roles) != 1 || roles[0] != "mod" {
+		t.Errorf("roles = %v, want [mod]", roles)
+	}
+
+	hist.mu.Lock()
+	defer hist.mu.Unlock()
+	if hist.askedFor != config.Default().Backlog {
+		t.Errorf("the hook was asked for %d, want the configured %d", hist.askedFor, config.Default().Backlog)
+	}
+}
+
+func TestHistoryHookSeesDeliveredMessages(t *testing.T) {
+	hist := &fakeHistory{}
+	ta := newTestAppWith(t, hook.Hooks{
+		Auth:    fakeAuth{byToken: map[string]hook.Identity{"a": {ID: "u1", Nick: "alice"}}},
+		History: hist,
+	})
+
+	alice, err := ta.dialWith(t, "?token=a")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	alice.send(proto.VerbMsg, proto.In{Data: "remember this"})
+	alice.expectMsg("alice", "remember this")
+
+	hist.mu.Lock()
+	defer hist.mu.Unlock()
+	if len(hist.appended) != 1 {
+		t.Fatalf("the hook was handed %d messages, want 1", len(hist.appended))
+	}
+	got := hist.appended[0]
+	if got.Data != "remember this" {
+		t.Errorf("data = %q", got.Data)
+	}
+	// The identity, not just the display name: a store wants the stable id.
+	if got.From.ID != "u1" {
+		t.Errorf("from = %q, want the stable id u1", got.From.ID)
+	}
+	if got.ID == 0 || got.At.IsZero() {
+		t.Error("the recorded message has no id or no timestamp")
+	}
+}
+
+// Private messages are not channel history.
+func TestHistoryHookDoesNotSeePrivateMessages(t *testing.T) {
+	hist := &fakeHistory{}
+	ta := newTestAppWith(t, hook.Hooks{History: hist})
+	alice, bob := ta.dial(t), ta.dial(t)
+
+	alice.send(proto.VerbPriv, proto.InPriv{Nick: bob.nick, Data: "private"})
+	bob.expectPriv("private")
+	alice.expectPriv("private")
+
+	hist.mu.Lock()
+	defer hist.mu.Unlock()
+	if len(hist.appended) != 0 {
+		t.Fatalf("the history hook was handed %d private messages", len(hist.appended))
+	}
+}
+
+// A history that is having a bad day must not cost anybody a connection.
+func TestHistoryFailureIsNotFatal(t *testing.T) {
+	hist := &fakeHistory{fail: errors.New("archive on fire")}
+	ta := newTestAppWith(t, hook.Hooks{History: hist})
+
+	c := ta.dial(t) // fails the test if the connection is refused
+	if len(c.backlog) != 0 {
+		t.Fatalf("a failing history produced %d messages", len(c.backlog))
+	}
+
+	// And the connection works.
+	c.send(proto.VerbMsg, proto.In{Data: "still fine"})
+	c.expectMsg("", "still fine")
+}
+
+// Backlog=0 switches replay off whoever provides it, so a hook is not
+// consulted at all.
+func TestHistoryHookNotConsultedWhenDisabled(t *testing.T) {
+	hist := &fakeHistory{canned: []hook.Message{{ID: 1, Data: "would be replayed"}}}
+	ta := newTestAppWith(t, hook.Hooks{History: hist}, func(c *config.Config) { c.Backlog = 0 })
+
+	c := ta.dial(t)
+	if len(c.backlog) != 0 {
+		t.Fatalf("backlog disabled but %d messages arrived", len(c.backlog))
+	}
+
+	hist.mu.Lock()
+	defer hist.mu.Unlock()
+	if hist.askedFor != 0 {
+		t.Errorf("the hook was consulted (asked for %d) with the backlog off", hist.askedFor)
 	}
 }

@@ -190,7 +190,7 @@ func (c *conn) sendBacklog(ctx context.Context) {
 	if c.app.cfg.Backlog < 1 {
 		return // disabled: no frame at all, which is the one other case
 	}
-	c.sendVerb(ctx, proto.VerbBacklog, proto.Backlog{Messages: c.app.backlog()})
+	c.sendVerb(ctx, proto.VerbBacklog, proto.Backlog{Messages: c.app.backlog(ctx)})
 }
 
 // privPump writes the messages addressed to this client alone.
@@ -335,16 +335,7 @@ func (c *conn) handleMsg(ctx context.Context, payload []byte) {
 	// The id and the timestamp are the server's to assign: a client's clock
 	// is not evidence, and ordering has to come from one place.
 	at := time.Now()
-	id, err := c.app.broadcastMsg(func(id uint64) proto.Msg {
-		return proto.Msg{
-			ID:        id,
-			Nick:      c.nick(),
-			Data:      in.Data,
-			Timestamp: at.UnixMilli(),
-			Roles:     c.id.Roles,
-			Attrs:     c.id.Attrs,
-		}
-	})
+	id, err := c.app.broadcastMsg(c.id, in.Data, at)
 	if err != nil {
 		c.log.Error("cannot encode outgoing message", "err", err)
 		c.reply(ctx, proto.ErrProtocol)
