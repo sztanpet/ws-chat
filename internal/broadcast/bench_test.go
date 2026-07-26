@@ -286,7 +286,7 @@ func needsDrain(bc Broadcaster) bool { return !sharedStorage(bc) }
 // affordable — a per-subscriber buffer costs N times as much of it.
 func sharedStorage(bc Broadcaster) bool {
 	switch bc.(type) {
-	case *Ring, *CondRing:
+	case *Ring, *CondRing, *SeqRing:
 		return true
 	}
 	return false
