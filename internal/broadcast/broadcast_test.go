@@ -262,6 +262,62 @@ func TestLaggingSubscriberDoesNotAffectOthers(t *testing.T) {
 	})
 }
 
+// The drop threshold is exactly the promised slack, and it is the same
+// promise for every implementation however differently they keep it: a
+// subscriber that is `size` messages behind is still owed all of them, and
+// one that is size+1 behind is gone.
+//
+// This is worth pinning deterministically rather than inferring it from a
+// benchmark's delivery ratio. The capacity findings in state/broadcast.md —
+// that 256 slots collapses at ten thousand subscribers and 4096 does not —
+// only transfer between implementations if they all drop at the same
+// distance. One that dropped a message early would show up here as an
+// off-by-one, and in a benchmark as a slightly worse delivery ratio that
+// reads as slowness.
+func TestDropThresholdIsExactlyTheSlack(t *testing.T) {
+	t.Run("survives at the limit", func(t *testing.T) {
+		eachImpl(t, func(t *testing.T, b Broadcaster) {
+			s := b.Subscribe()
+			for i := range testSize {
+				b.Broadcast([]byte{byte(i)})
+			}
+
+			// Every message is still owed, in order, and the subscription is
+			// intact.
+			dst := make([][]byte, testSize)
+			for got := 0; got < testSize; {
+				n, err := recvWithin(t, s, dst[:testSize-got], 2*time.Second)
+				if err != nil {
+					t.Fatalf("dropped at exactly %d messages behind after %d: %v", testSize, got, err)
+				}
+				for j := range n {
+					if want := byte(got + j); dst[j][0] != want {
+						t.Fatalf("message %d = %d, want %d", got+j, dst[j][0], want)
+					}
+				}
+				got += n
+			}
+			if got := b.Drops(); got != 0 {
+				t.Fatalf("Drops() = %d, want 0 at exactly the limit", got)
+			}
+		})
+	})
+
+	t.Run("dropped one past it", func(t *testing.T) {
+		eachImpl(t, func(t *testing.T, b Broadcaster) {
+			s := b.Subscribe()
+			for i := range testSize + 1 {
+				b.Broadcast([]byte{byte(i)})
+			}
+
+			expectEnd(t, s, ErrLagged)
+			if got := b.Drops(); got != 1 {
+				t.Fatalf("Drops() = %d, want 1 one past the limit", got)
+			}
+		})
+	})
+}
+
 func TestSubClose(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
 		s := b.Subscribe()
