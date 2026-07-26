@@ -2,7 +2,7 @@ package loadgen
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -623,7 +623,12 @@ type codec struct {
 func codecByName(name string) (codec, error) {
 	switch name {
 	case "", proto.NameJSON:
-		return codec{proto.NameJSON, false, json.Marshal, json.Unmarshal}, nil
+		// Wrapped rather than passed straight in: encoding/json/v2 takes
+		// trailing options, so its functions do not have this shape.
+		return codec{proto.NameJSON, false,
+			func(v any) ([]byte, error) { return json.Marshal(v) },
+			func(frame []byte, v any) error { return json.Unmarshal(frame, v) },
+		}, nil
 	case proto.NameMsgPack:
 		return codec{proto.NameMsgPack, true, msgpack.Marshal, msgpack.Unmarshal}, nil
 	}

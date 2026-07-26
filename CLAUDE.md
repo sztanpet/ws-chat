@@ -144,6 +144,33 @@ Both codecs are held to the same test table in `codec_test.go`; if one
 needs its own test to pass they are not interchangeable. Struct fields
 carry both `json:` and `msgpack:` tags so the two agree on names.
 
+**The JSON codec is `encoding/json/v2`, which is experimental**, so the
+whole module builds with `GOEXPERIMENT=jsonv2` — the Makefile exports it,
+and anything run by hand needs it or the build fails with "build
+constraints exclude all Go files in .../encoding/json/v2". That is the
+price; what it buys, measured in `internal/proto/bench_test.go` on a
+message with roles and attrs:
+
+| chat.json | v1, no experiment | v1 API on the v2 engine | v2 API |
+|---|---|---|---|
+| Encode | 660ns, 5 allocs | 950ns, 5 allocs | 978ns, 5 allocs |
+| Decode | 795ns, 8 allocs | 422ns, 1 alloc | 354ns, 1 alloc |
+
+Read the middle column first: **encoding is slower because of the engine,
+not the API.** Turning the experiment on costs it whether the code calls
+v1 or v2, so with it on, calling v2 directly is strictly the better of the
+two. A message costs one decode and one encode per codec, neither of which
+scales with room size, so the net is about 8% less CPU and half the
+allocations per message — a small win, and the correctness is the larger
+part of it: invalid UTF-8 and duplicate object members are refused rather
+than repaired.
+
+Optional **scalars are tagged `omitzero`, not `omitempty`**. Under v2 those
+are different: `omitempty` is defined in JSON terms and only drops null,
+"", `{}` and `[]`, so a false bool and a zero int would start appearing on
+the wire. Strings, slices and maps mean the same under either and keep
+`omitempty`.
+
 The consequence to keep in mind: **a ring holds encoded bytes**, so there
 is one broadcaster per codec and a message is encoded once per codec
 rather than once per subscriber — O(codecs), not O(members). A message id
@@ -560,7 +587,15 @@ second on one box, some of the latency being measured is the measuring.
 
 ### Makefile
 
-All tooling lives in the `Makefile` (`make help` lists targets):
+All tooling lives in the `Makefile` (`make help` lists targets). It
+exports `GOEXPERIMENT=jsonv2`, which the module does not compile without —
+`go vet`, staticcheck and golangci-lint included, since they are compilers
+with opinions. Use `make`, or set it yourself:
+
+```
+GOEXPERIMENT=jsonv2 go test ./...
+```
+
 
 - `make run` — `go build -race` + run.
 - `make build` — full production build (`make generate`, then

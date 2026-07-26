@@ -6,6 +6,19 @@ GO := go
 # when GOPATH/bin is not on the user's PATH
 export PATH := $(shell $(GO) env GOPATH)/bin:$(PATH)
 
+# encoding/json/v2 only exists when the toolchain is built with its
+# experiment enabled, and the JSON wire codec uses it, so NOTHING in this
+# module compiles without this — including go vet, staticcheck and
+# golangci-lint, which are compilers with opinions. Anything run by hand
+# needs it too:
+#
+#	GOEXPERIMENT=jsonv2 go test ./...
+#
+# Appended to whatever is already set rather than replacing it, since the
+# variable is a list and somebody may have their own reasons.
+comma := ,
+export GOEXPERIMENT := jsonv2$(if $(GOEXPERIMENT),$(comma)$(GOEXPERIMENT))
+
 .PHONY: help
 help: ## list available targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "%-13s %s\n", $$1, $$2}'

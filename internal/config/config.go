@@ -7,7 +7,7 @@
 package config
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"os"
@@ -162,7 +162,11 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
-	if err := json.Unmarshal(std, &cfg); err != nil {
+	// Case-insensitive names are asked for explicitly because
+	// encoding/json/v2 dropped them, and a config file is the one place
+	// that must not get stricter quietly: a deployment that wrote "addr"
+	// would have its listen address silently replaced by the default.
+	if err := json.Unmarshal(std, &cfg, json.MatchCaseInsensitiveNames(true)); err != nil {
 		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := cfg.check(); err != nil {

@@ -114,6 +114,15 @@ _(none yet)_
   `internal/hook` defines auth, chatter data, message filtering and
   persistence as interfaces; the core imports the interfaces and never an
   implementation. The zero `Hooks` is a working server.
+- **The JSON codec is `encoding/json/v2`, so the module needs
+  `GOEXPERIMENT=jsonv2` to build at all.** The Makefile exports it. Decode
+  is 2.2x faster with one allocation instead of eight; encode is ~45%
+  slower, and that belongs to the engine rather than the API — v1 called
+  with the experiment on is just as slow, which is what makes calling v2
+  directly the right choice once it is on. Net per message is about 8% and
+  half the garbage; the strictness (invalid UTF-8, duplicate members) is
+  the better half of the deal. Optional scalars are tagged `omitzero`
+  because v2's `omitempty` would put `"sent":false` on the wire.
 - **The wire format is negotiated, not configured.** `proto.Codec` is an
   interface over bytes, selected by WebSocket subprotocol. MessagePack
   preferred, JSON the default for anything that did not ask. A ring holds

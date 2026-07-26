@@ -46,6 +46,14 @@ extension points, and a single-channel WebSocket chat server.
   constructors, and `Encode` takes a `proto.Outbound` so a verbless frame
   cannot be built. It would otherwise be a silent bug: a client would
   simply ignore the frame.
+- **The JSON codec is `encoding/json/v2`**, which is experimental, so
+  everything builds with `GOEXPERIMENT=jsonv2` (the Makefile exports it).
+  Measured in `internal/proto/bench_test.go`: decode 795ns/8 allocs to
+  354ns/1, encode 660ns to 978ns. The encode cost is the engine's, not the
+  API's — v1 with the experiment on measures 950ns — so once the
+  experiment is on, calling v2 directly is the better of the two. Optional
+  scalars are `omitzero`: v2's `omitempty` only drops null, "", {} and [],
+  so `"sent":false` would otherwise appear on the wire.
 - **One broadcaster per codec.** A ring holds encoded bytes, so clients on
   different wire formats cannot share one. A message is encoded once per
   codec — O(codecs), not O(members).

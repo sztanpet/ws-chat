@@ -205,6 +205,57 @@ func TestMsgPackIsSmaller(t *testing.T) {
 	t.Logf("msgpack %d bytes, json %d bytes", len(packed), len(jsonFrame))
 }
 
+// An optional scalar stays off the wire when it is zero, and appears when
+// it is not.
+//
+// This is the "omitzero" rule from the package doc, and it is worth a test
+// of its own because the failure is silent: with "omitempty" under
+// encoding/json/v2 every private message would carry "sent":false and
+// every MOD frame "until":0, and every round-trip test in this file would
+// still pass.
+func TestZeroOptionalsStayOffTheWire(t *testing.T) {
+	tests := []struct {
+		name    string
+		zero    Outbound
+		set     Outbound
+		absent  string
+		present string
+	}{
+		{
+			"private message sent flag",
+			NewPriv(Priv{ID: 1, Nick: "someone", Data: "hi"}),
+			NewPriv(Priv{ID: 1, Nick: "someone", Data: "hi", Sent: true}),
+			"sent", `"sent":true`,
+		},
+		{
+			"moderation expiry",
+			NewMod(Mod{Action: ActionMute, Nick: "someone", By: "amod"}),
+			NewMod(Mod{Action: ActionMute, Nick: "someone", By: "amod", Until: 1700000000000}),
+			"until", `"until":1700000000000`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame, err := (JSON{}).Encode(tt.zero)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(frame), tt.absent) {
+				t.Errorf("zero value is on the wire: %s", frame)
+			}
+
+			frame, err = (JSON{}).Encode(tt.set)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(frame), tt.present) {
+				t.Errorf("frame %s is missing %s", frame, tt.present)
+			}
+		})
+	}
+}
+
 // The JSON form is meant to be readable by a person, which is most of the
 // reason it is the default.
 func TestJSONFrameIsReadable(t *testing.T) {
