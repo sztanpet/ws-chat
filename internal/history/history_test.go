@@ -153,7 +153,7 @@ func TestConcurrentUse(t *testing.T) {
 			defer wg.Done()
 			for i := range 500 {
 				m.Append(context.Background(), "main", msg(uint64(i), fmt.Sprintf("w%d-%d", w, i)))
-				m.Recent(context.Background(), "main", 16)
+				_, _ = m.Recent(context.Background(), "main", 16)
 				m.Len("main")
 			}
 		}()

@@ -109,7 +109,7 @@ func TestMetricsGaugesFollowState(t *testing.T) {
 	c := ta.dial(t)
 	requireMetric(t, ta.scrape(t), "wschat_connections 1")
 
-	c.ws.CloseNow()
+	_ = c.ws.CloseNow()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {

@@ -205,7 +205,7 @@ func TestDisconnectPartsEverything(t *testing.T) {
 	alice.expectJoined("second")
 	bob.expectJoin("second", alice.nick)
 
-	bob.ws.CloseNow()
+	_ = bob.ws.CloseNow()
 
 	// alice is told bob left both, in whichever order the teardown got to
 	// them.

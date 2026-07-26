@@ -375,7 +375,7 @@ func TestNoSubprotocolGetsTheDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer ws.CloseNow()
+	defer func() { _ = ws.CloseNow() }()
 
 	if got := ws.Subprotocol(); got != "" {
 		t.Fatalf("negotiated %q, want none", got)

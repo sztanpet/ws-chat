@@ -76,7 +76,10 @@ func TestRefillCapsAtBurst(t *testing.T) {
 	b.AllowAt(epoch)
 	later := epoch.Add(time.Hour)
 
-	if !b.AllowAt(later) || !b.AllowAt(later) {
+	// Both calls have to happen: the point is that an hour buys exactly
+	// two tokens back, so they are spent one at a time and then checked.
+	first, second := b.AllowAt(later), b.AllowAt(later)
+	if !first || !second {
 		t.Fatal("the bucket did not refill")
 	}
 	if b.AllowAt(later) {

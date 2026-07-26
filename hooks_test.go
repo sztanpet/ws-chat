@@ -102,7 +102,7 @@ func (ta *testApp) dialWith(t *testing.T, query string) (*client, error) {
 	if err != nil {
 		return nil, err
 	}
-	t.Cleanup(func() { ws.CloseNow() })
+	t.Cleanup(func() { _ = ws.CloseNow() })
 
 	c := &client{t: t, ws: ws, codec: proto.Default()}
 	verb, payload := c.recv()
@@ -672,7 +672,7 @@ func TestAccountLimitSurvivesReconnection(t *testing.T) {
 	first.expectErr(proto.ErrThrottled)
 
 	// Go away and come back.
-	first.ws.CloseNow()
+	_ = first.ws.CloseNow()
 
 	second, err := ta.dialWith(t, "?token=a")
 	if err != nil {

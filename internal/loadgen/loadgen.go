@@ -79,19 +79,19 @@ const readLimit = 1 << 20
 func (c Config) check() error {
 	switch {
 	case c.URL == "":
-		return errors.New("URL must not be empty")
+		return errors.New("field URL must not be empty")
 	case c.Conns < 1:
-		return errors.New("Conns must be at least 1")
+		return errors.New("field Conns must be at least 1")
 	case c.SpeakPercent < 0 || c.SpeakPercent > 100:
-		return errors.New("SpeakPercent must be between 0 and 100")
+		return errors.New("field SpeakPercent must be between 0 and 100")
 	case c.Channels < 1:
-		return errors.New("Channels must be at least 1")
+		return errors.New("field Channels must be at least 1")
 	case c.MessageSize < 1:
-		return errors.New("MessageSize must be at least 1")
+		return errors.New("field MessageSize must be at least 1")
 	case c.PingEvery <= 0:
-		return errors.New("PingEvery must be positive")
+		return errors.New("field PingEvery must be positive")
 	case c.speakers() > 0 && c.Rate <= 0:
-		return errors.New("Rate must be positive when anybody is speaking")
+		return errors.New("field Rate must be positive when anybody is speaking")
 	}
 	return nil
 }
@@ -274,7 +274,7 @@ func (c *client) run(ctx context.Context, settling *sync.WaitGroup, start <-chan
 		c.stats.dialErr(reasonOf(err))
 		return
 	}
-	defer c.ws.CloseNow()
+	defer func() { _ = c.ws.CloseNow() }()
 	c.stats.dialed.Add(1)
 
 	// The reader runs for the whole life of the connection and owns every
@@ -328,11 +328,11 @@ func (c *client) dial(ctx context.Context) error {
 	// thousand others it is about to be told about.
 	var f frame
 	if err := c.readFrame(ctx, &f); err != nil {
-		ws.CloseNow()
+		_ = ws.CloseNow()
 		return err
 	}
 	if f.Verb != proto.VerbReady {
-		ws.CloseNow()
+		_ = ws.CloseNow()
 		return fmt.Errorf("first frame was %s, want %s", f.Verb, proto.VerbReady)
 	}
 	c.nick = f.Nick

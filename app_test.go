@@ -91,7 +91,7 @@ func (ta *testApp) dialCodec(t *testing.T, codec proto.Codec) *client {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	t.Cleanup(func() { ws.CloseNow() })
+	t.Cleanup(func() { _ = ws.CloseNow() })
 
 	if got := ws.Subprotocol(); got != codec.Name() {
 		t.Fatalf("negotiated %q, want %q", got, codec.Name())

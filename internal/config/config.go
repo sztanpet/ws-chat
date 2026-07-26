@@ -180,29 +180,29 @@ func Load(path string) (Config, error) {
 func (c Config) check() error {
 	switch {
 	case c.Addr == "":
-		return errors.New("Addr must not be empty")
+		return errors.New("field Addr must not be empty")
 	case c.Capacity < 1:
-		return errors.New("Capacity must be at least 1")
+		return errors.New("field Capacity must be at least 1")
 	case c.WriteBatch < 1:
-		return errors.New("WriteBatch must be at least 1")
+		return errors.New("field WriteBatch must be at least 1")
 	case c.MaxFrameSize < 1:
-		return errors.New("MaxFrameSize must be at least 1")
+		return errors.New("field MaxFrameSize must be at least 1")
 	case c.MaxMessage < 1:
-		return errors.New("MaxMessage must be at least 1")
+		return errors.New("field MaxMessage must be at least 1")
 	case c.Backlog < 0:
-		return errors.New("Backlog must not be negative")
+		return errors.New("field Backlog must not be negative")
 	case c.DefaultChannel == "":
-		return errors.New("DefaultChannel must not be empty")
+		return errors.New("field DefaultChannel must not be empty")
 	case c.MaxChannels < 1:
-		return errors.New("MaxChannels must be at least 1")
+		return errors.New("field MaxChannels must be at least 1")
 	case c.MaxChannelsPerConn < 1:
-		return errors.New("MaxChannelsPerConn must be at least 1")
+		return errors.New("field MaxChannelsPerConn must be at least 1")
 	case c.PrivBuffer < 1:
-		return errors.New("PrivBuffer must be at least 1")
+		return errors.New("field PrivBuffer must be at least 1")
 	case c.WriteTimeout <= 0:
-		return errors.New("WriteTimeout must be positive")
+		return errors.New("field WriteTimeout must be positive")
 	case c.IdleTimeout <= 0:
-		return errors.New("IdleTimeout must be positive")
+		return errors.New("field IdleTimeout must be positive")
 	}
 	return nil
 }

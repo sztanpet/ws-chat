@@ -67,7 +67,7 @@ func (s *stub) serve(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer ws.CloseNow()
+	defer func() { _ = ws.CloseNow() }()
 
 	codec, err := proto.ByName(ws.Subprotocol())
 	if err != nil {

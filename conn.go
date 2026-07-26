@@ -161,7 +161,7 @@ func (c *conn) serve(parent context.Context) {
 	ready, err := c.codec.Encode(proto.NewReady(c.nick()))
 	if err != nil {
 		c.log.Error("cannot format READY", "err", err)
-		c.ws.CloseNow()
+		_ = c.ws.CloseNow()
 		c.app.unregister(c)
 		return
 	}
@@ -203,7 +203,7 @@ func (c *conn) serve(parent context.Context) {
 	cancel()
 	pumps.Wait()
 
-	c.ws.CloseNow()
+	_ = c.ws.CloseNow()
 	c.log.Debug("disconnected", "err", rerr)
 }
 
@@ -519,7 +519,7 @@ func (c *conn) writeBatch(ctx context.Context, frames [][]byte) bool {
 func (c *conn) writeTo(ctx context.Context, frame []byte) bool {
 	if err := c.ws.Write(ctx, c.msgType(), frame); err != nil {
 		c.log.Debug("write failed", "err", err)
-		c.ws.CloseNow() // unblocks the read pump
+		_ = c.ws.CloseNow() // unblocks the read pump
 		return false
 	}
 	return true
@@ -530,7 +530,7 @@ func (c *conn) writeTo(ctx context.Context, frame []byte) bool {
 // so the polite version may not land.
 func (c *conn) close(status websocket.StatusCode, reason string) {
 	if err := c.ws.Close(status, reason); err != nil {
-		c.ws.CloseNow()
+		_ = c.ws.CloseNow()
 	}
 }
 

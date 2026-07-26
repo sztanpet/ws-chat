@@ -610,7 +610,7 @@ func TestModerationOfSomebodyWhoLeft(t *testing.T) {
 	user.send(proto.Command{Verb: proto.VerbMsg, Data: "and goodbye"})
 	mod.expectMsg("auser", "and goodbye")
 	user.expectMsg("auser", "and goodbye")
-	user.ws.CloseNow()
+	_ = user.ws.CloseNow()
 	mod.expectPart("main", "auser")
 
 	// Muted after leaving. The room is told, because the room is where the
@@ -636,7 +636,7 @@ func TestOfflineModerationUsesTheStableIdentity(t *testing.T) {
 	store := newFakeSanctions()
 	ta, mod, user := modApp(t, hook.Hooks{Sanctions: store})
 
-	user.ws.CloseNow()
+	_ = user.ws.CloseNow()
 	mod.expectPart("main", "auser")
 
 	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
