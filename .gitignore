@@ -3,6 +3,8 @@
 config.hujson
 ws-chat
 ws-chat.exe
+loadgen
+loadgen.exe
 chat.db
 data/*.db
 data/*.db-*

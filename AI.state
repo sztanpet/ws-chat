@@ -6,21 +6,17 @@ only when you are touching that track.
 
 ## Latest
 
-Channels. A channel is a fan-out (one Ring per codec), a rate limit and a
-member list; connections hold many memberships, each with its own write
-pump. `JOIN`/`PART`/`NAMES` with presence, per-channel backlog and rate
-limits, channels created on demand and reclaimed when empty. The
-`Channels` hook decides where a connection starts (`Autojoin`) and where
-it may go (`CanJoin`). Detail in `state/server.md`; the fan-out
-underneath is in `state/broadcast.md`.
+The load generator. `cmd/loadgen` is a separate process holding N
+connections open, a configurable percentage of which talk, reporting
+delivery ratio, latency percentiles, refusals by `ERR` code and
+disconnections by close reason. Mechanics in `internal/loadgen`, detail
+and measurements in `state/loadgen.md`.
 
-Two defects were found and fixed on the way: the config defaults for
-`Capacity` and `DebugAddr` had never actually been applied despite two
-commits claiming so, because the test that was supposed to catch drift
-compared an all-commented file against the code — that is, `Default()`
-against itself. The test now uncomments the file and checks the
-documented values really are the defaults, and that every field is
-documented.
+First numbers on one laptop with the server beside it: 500 connections
+with 10% speaking is 47k deliveries/s at 99.8% and p99 20ms; 1500
+connections with 20% speaking at 20/s is where the server starts dropping
+people for lag, which the report names (`StatusPolicyViolation: too
+slow`). Anything past ~100k deliveries/s on one box is measuring the box.
 
 ## State file index
 
@@ -28,6 +24,8 @@ documented.
   its comparative benchmark harness.
 - `state/server.md` — config, wire codecs, extension points, and the
   connection handling built on the fan-out.
+- `state/loadgen.md` — `internal/loadgen` and `cmd/loadgen`, the
+  out-of-process load generator and what it has measured.
 
 ## Release log
 
@@ -114,6 +112,11 @@ _(none yet)_
   one decode. `proto.Command` is a flat union of every inbound field; one
   struct per verb would reintroduce the second parse. This left the codecs
   as nothing but Marshal/Unmarshal — there is no framing code.
+- **Load is generated from another process, as a plain client.**
+  `cmd/loadgen` dials like anybody else and counts what lands on its own
+  sockets; it never reads a server counter. A benchmark inside the server
+  shares its scheduler, allocator and GC and then reports on them as the
+  server's — and cannot be aimed at another machine.
 - **The write pump takes batches, not single messages.** `Sub.Recv` fills a
   slice, so one wakeup drains everything pending and can coalesce it into a
   single socket write. This is what makes shared-storage fan-out possible

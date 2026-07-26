@@ -41,6 +41,13 @@ test-race: ## run all tests with the race detector
 soak: ## run the long-running connection soak tests
 	$(GO) test -tags soak -race -run TestSoak -count=1 -timeout 20m ./...
 
+# No -race here, deliberately. The load generator is the measuring
+# instrument: instrumenting it makes it ten times slower and it becomes the
+# bottleneck instead of the server.
+.PHONY: loadgen
+loadgen: ## build the load generator (cmd/loadgen)
+	$(GO) build -o loadgen ./cmd/loadgen
+
 .PHONY: vendor
 vendor: ## go mod vendor + tidy
 	$(GO) mod vendor

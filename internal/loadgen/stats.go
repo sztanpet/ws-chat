@@ -140,7 +140,8 @@ func (r *Result) String() string {
 	secs := r.Elapsed.Seconds()
 
 	fmt.Fprintf(&b, "elapsed      %s\n", r.Elapsed.Round(time.Millisecond))
-	fmt.Fprintf(&b, "connections  %d up, %d failed to dial, %d lost\n", r.Dialed, r.Failed, r.Lost)
+	fmt.Fprintf(&b, "connections  %d dialled, %d refused, %d dropped by the server\n",
+		r.Dialed, r.Failed, r.Lost)
 	fmt.Fprintf(&b, "speakers     %d of %d at %g msg/s each, %d byte messages\n",
 		r.Speakers, r.Conns, r.Rate, r.MsgSize)
 	fmt.Fprintf(&b, "channels     %d\n", r.Channels)
