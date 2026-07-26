@@ -250,6 +250,23 @@ func (c *client) nextInteresting() (verb string, payload []byte) {
 	}
 }
 
+// sync waits until the server has finished handling everything this client
+// has sent.
+//
+// Commands are read and handled one at a time on this connection's read
+// pump, so a PONG proves the ones before it are done. Any test that asserts
+// on server STATE rather than on what a client received needs this: a frame
+// can reach a client before the handler that sent it has finished its work,
+// and parting is the case that bites — the leaving client is told directly,
+// on purpose, before its membership is torn down.
+func (c *client) sync() {
+	c.t.Helper()
+	c.send(proto.Command{Verb: proto.VerbPing})
+	if verb, payload := c.nextInteresting(); verb != proto.VerbPong {
+		c.t.Fatalf("got %s %s, want %s", verb, payload, proto.VerbPong)
+	}
+}
+
 // expectMsg reads one frame and requires it to be a MSG with this body.
 func (c *client) expectMsg(nick, data string) proto.Msg {
 	c.t.Helper()

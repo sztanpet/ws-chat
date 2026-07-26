@@ -349,6 +349,11 @@ func TestEmptyChannelsAreReclaimed(t *testing.T) {
 	c.send(proto.Command{Verb: proto.VerbPart, Channel: "temporary"})
 	c.expectPart("temporary", c.nick)
 
+	// The PART reaches the client before the membership is torn down —
+	// deliberately, or ending the subscription would discard it — so the
+	// member set is not empty yet just because the frame arrived.
+	c.sync()
+
 	if n := ta.app.sweepChannels(); n != 1 {
 		t.Fatalf("swept %d channels, want the 1 that emptied", n)
 	}

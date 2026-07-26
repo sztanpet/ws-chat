@@ -567,6 +567,13 @@ func TestUnbanSomebodyWhoIsGone(t *testing.T) {
 
 	admin.send(proto.Command{Verb: proto.VerbUnban, Nick: "auser"})
 
+	// Wait for it to have happened before testing that it happened:
+	// dialling straight after sending races the read pump handling it, and
+	// fails on a loaded machine. There is no MOD frame to wait for instead
+	// — this unban is announced to nobody, because the person it concerns
+	// is not in the room, which is the point of the test.
+	admin.sync()
+
 	// And they can come back, which is the whole point of being able to
 	// lift a ban.
 	back, err := ta.dialWith(t, "?token=user")
