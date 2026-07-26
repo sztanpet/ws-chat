@@ -3,10 +3,14 @@ package loadgen
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -448,6 +452,60 @@ func TestMembersInAddUp(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// Losses are counted in a map keyed by the reason, so the reason has to
+// come from a closed set. A net.OpError carries the peer address, which
+// turned three thousand dropped sockets into three thousand report lines
+// the first time this ran at scale.
+func TestReasonsAreABoundedSet(t *testing.T) {
+	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 51234}
+	peer := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8099}
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			"lag drop",
+			websocket.CloseError{Code: websocket.StatusPolicyViolation, Reason: "too slow"},
+			"StatusPolicyViolation: too slow",
+		},
+		{
+			"close with no reason",
+			websocket.CloseError{Code: websocket.StatusGoingAway},
+			"StatusGoingAway",
+		},
+		{
+			"reset, wrapped the way the library wraps it",
+			fmt.Errorf("failed to get reader: failed to read frame header: %w",
+				&net.OpError{Op: "read", Net: "tcp", Source: addr, Addr: peer,
+					Err: os.NewSyscallError("read", syscall.ECONNRESET)}),
+			"read: connection reset by peer",
+		},
+		{
+			"our own close racing the read",
+			fmt.Errorf("failed to read: %w",
+				&net.OpError{Op: "read", Net: "tcp", Source: addr, Addr: peer, Err: net.ErrClosed}),
+			"connection closed",
+		},
+		{"truncated frame", fmt.Errorf("failed to read payload: %w", io.ErrUnexpectedEOF), "eof"},
+		{"deadline", fmt.Errorf("write: %w", context.DeadlineExceeded), "timed out"},
+		{"cancelled", context.Canceled, "cancelled"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reasonOf(tt.err)
+			if got != tt.want {
+				t.Errorf("reasonOf(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+			if strings.Contains(got, "51234") || strings.Contains(got, "8099") {
+				t.Errorf("reason %q names an address, so every socket gets its own line", got)
+			}
+		})
 	}
 }
 

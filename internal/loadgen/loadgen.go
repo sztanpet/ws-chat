@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -556,7 +557,14 @@ func (c *client) send(ctx context.Context, cmd proto.Command) bool {
 
 // reasonOf turns an error into something worth counting. A close frame
 // becomes its code and reason — "StatusPolicyViolation: too slow" is the
-// server telling us exactly what it did — and anything else keeps its text.
+// server telling us exactly what it did.
+//
+// Everything else has to collapse onto a CLOSED SET of strings, which is
+// the same rule the server applies to its own metric labels and for the
+// same reason. A net.OpError prints the peer address, so the first run at
+// three thousand connections ended in a report with one "losses" entry per
+// dropped socket, each with a port number in it. The error inside the
+// OpError says what happened without saying to whom.
 func reasonOf(err error) string {
 	var ce websocket.CloseError
 	if errors.As(err, &ce) {
@@ -564,6 +572,22 @@ func reasonOf(err error) string {
 			return ce.Code.String()
 		}
 		return ce.Code.String() + ": " + ce.Reason
+	}
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timed out"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, net.ErrClosed):
+		return "connection closed"
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		return "eof"
+	}
+
+	var oe *net.OpError
+	if errors.As(err, &oe) && oe.Err != nil {
+		return oe.Err.Error()
 	}
 	return err.Error()
 }
