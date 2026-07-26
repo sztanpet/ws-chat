@@ -19,22 +19,15 @@ variables:
   # toolchain, and alpine ships neither. The race detector is the point
   # of this repository's test suite, so this is not negotiable.
   - &golang 'golang:1.26'
-  # The default GOCACHE is under $HOME, which is inside the container
-  # and dies with it. Putting it on the workspace volume means the
-  # second step in a pipeline does not recompile what the first already
-  # did.
+  # The homelab agent mounts a persistent /cache into every step. Every
+  # cache Go has goes there, or each run recompiles every vendored
+  # dependency and rebuilds the linters from source -- which is most of
+  # the pipeline. GOPATH holds both the module cache and the binaries
+  # `make tools` installs, so they survive to the next run.
   - &goenv
-    GOCACHE: /go/.cache/go-build
-
-# GOPATH is /go in the golang image, so basing the workspace there puts
-# the module cache and whatever `make tools` installs on the volume the
-# steps share: the linters are built once per pipeline instead of once
-# per step. The volume is per-pipeline, so nothing survives to the next
-# run; making it survive needs a host volume, which needs the repository
-# to be trusted in Woodpecker's settings.
-workspace:
-  base: /go
-  path: src/github.com/sztanpet/ws-chat
+    GOCACHE: /cache/go-build
+    GOPATH: /cache/gopath
+    GOLANGCI_LINT_CACHE: /cache/golangci-lint
 
 steps:
   # First, because it is the answer people actually want, and because a
@@ -50,9 +43,12 @@ steps:
     environment: *goenv
     commands:
       # `make tools` builds staticcheck and golangci-lint from source,
-      # which is minutes on a cold cache. It is the price of not pinning
-      # a linter image to a Go version this module cannot use.
-      - make tools
+      # which is minutes. With GOPATH on /cache they are still there from
+      # the last run, so build them only when they are not. The Makefile
+      # puts $(go env GOPATH)/bin on PATH for its own recipes; this shell
+      # needs it too, to be able to look for them.
+      - export PATH="/cache/gopath/bin:$PATH"
+      - command -v staticcheck >/dev/null && command -v golangci-lint >/dev/null || make tools
       - make lint
 
   # go test compiles every package, so this is only here to catch the
@@ -75,5 +71,6 @@ steps:
     when:
       - event: cron
     commands:
-      - make tools
+      - export PATH="/cache/gopath/bin:$PATH"
+      - command -v govulncheck >/dev/null || make tools
       - make vulncheck

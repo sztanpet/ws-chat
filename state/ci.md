@@ -39,9 +39,14 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   stale `vendor/` fails the next step anyway.
 - **Debian image (`golang:1.26`), not alpine.** `go test -race` needs cgo
   and a C toolchain; the race tests are the point of this suite.
-- **`workspace.base: /go`** so the shared volume lands on GOPATH: the
-  module cache and the linters `make tools` builds are shared between
-  steps, so they are built once per pipeline rather than once per step.
+- **Every Go cache lives on the agent's `/cache` volume**, the same
+  convention as `kikapcsologo/backend`: `GOCACHE=/cache/go-build`,
+  `GOPATH=/cache/gopath`, `GOLANGCI_LINT_CACHE=/cache/golangci-lint`.
+  The homelab agent mounts `/cache` into every step (a docker named
+  volume inside its dind), so it survives between runs, not just between
+  steps. GOPATH carries the linters `make tools` installs, so the lint
+  step builds them only when they are missing — over there that took
+  lint from ~106s of a ~216s pipeline down to the cost of running it.
 - **The linters are not installed by `make lint`.** A `go install` in
   front of every commit is a network round trip between somebody and
   their commit, and the response to that is to stop running the hook.
@@ -51,9 +56,9 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
 
 ## Pending / known rough edges
 
-- **The lint step builds golangci-lint from source on every pipeline**
-  (minutes cold). Woodpecker's volume is per-run; making it survive needs
-  a host volume, which needs the repository marked trusted in Woodpecker.
+- **The first run after `/cache` is cleared is cold**: every vendored
+  dependency recompiles and the linters are built from source, minutes of
+  it. Nothing to do about it beyond not clearing the cache.
 - **`make tools` installs golangci-lint from the v1 module path**, which
   `@latest` now pins to v1.64.8 forever (v2 lives at
   `github.com/golangci/golangci-lint/v2/cmd/golangci-lint`). v1.64.8 still
