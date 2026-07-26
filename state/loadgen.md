@@ -68,6 +68,42 @@ disconnect shows up by name in `losses`. It is also where the generator is
 competing with the server for the same cores, so treat those latencies as
 an upper bound on this box rather than a server number.
 
+## Profiled (26 Jul 2026, 4 cores, generator on the same box)
+
+Steady load: 500 connections, 10% speaking at 2/s, one channel — 49k
+deliveries/s, 100.00% delivered, p50 4.1ms p99 36.9ms. 25s CPU profile off
+`/debug/pprof/profile`, allocation delta over 20s off `/debug/pprof/allocs`.
+
+CPU: 94.5% cumulative in `conn.channelPump`, 60% flat in `write(2)`. That
+is the right shape — a fan-out server should be a socket-write server.
+
+**The one real finding: a deadline context per delivered frame.**
+`conn.write` (`conn.go:477`) does `context.WithTimeout(ctx,
+cfg.WriteTimeout)` on every frame, inside `channelPump`'s batch loop.
+
+- 9.2% of CPU: `context.WithTimeout` → `WithDeadlineCause`, split between
+  `newobject`, `propagateCancel` and `time.AfterFunc`.
+- **99% of everything allocated under load** is that context and the timer
+  machinery it drags in — ~740 bytes of garbage per delivered message,
+  none of it the message. `WithTimeout` 264MB, coder/websocket's own
+  `setupWriteTimeout` → `context.AfterFunc` 376MB, `cancelCtx.Done` 101MB
+  over 20 seconds.
+
+The fix is to hoist the deadline out of the per-frame loop and give the
+whole batch one, which trades "every write is bounded by WriteTimeout" for
+"every wakeup is". Not done: it is a documented invariant and a change to
+the server, not to the generator.
+
+Note the library half cannot be hoisted away. `setupWriteTimeout` skips
+everything when `ctx.Done() == nil` (`vendor/.../conn.go:171`) but
+allocates an `AfterFunc` per `Write` for any cancellable context, and
+coder/websocket has no `SetWriteDeadline`. One deadline per batch removes
+our 35% of the garbage; the library's 50% needs one `Write` per batch,
+which the protocol does not allow — one chat message is one frame.
+
+No leaks: in-use heap 16MB, and after 2950 connections over the session
+the process is back to 8 goroutines.
+
 ## Pending
 
 - Two machines. Everything above shares a laptop with the server, so the
