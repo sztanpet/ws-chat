@@ -108,9 +108,15 @@ tools: ## install the linters and govulncheck
 vulncheck: ## scan dependencies for known vulnerabilities
 	govulncheck ./...
 
+# The toolchain is updated along with everything else, because it is a
+# dependency like any other: govulncheck reports standard library CVEs
+# against the version pinned in go.mod, and Go's patch releases are
+# mostly security fixes. Bumping it here is safe because the two steps
+# that follow are the whole test suite and a vulnerability scan.
 .PHONY: update-deps
-update-deps: tools ## update all go dependencies, vendor, vulncheck
+update-deps: tools ## update all go dependencies and the toolchain, vendor, vulncheck
 	$(GO) get -u ./...
+	$(GO) get toolchain@latest
 	$(GO) mod tidy
 	$(GO) mod vendor
 	$(MAKE) test

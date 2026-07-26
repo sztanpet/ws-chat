@@ -29,6 +29,22 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   on `!b.AllowAt(later) || !b.AllowAt(later)` in the ratelimit test, which
   was correct but reads like a copy-paste bug and is now two variables.
 
+- **`make update-deps` run 2026-07-26.** No module moved — everything was
+  already at its latest version. What it did find, through govulncheck,
+  was the toolchain: GO-2026-5856 (an ECH privacy leak in `crypto/tls`)
+  is fixed in go1.26.5 and `go.mod` pinned go1.26.4. Bumped, and
+  `update-deps` now runs `go get toolchain@latest` itself so the pin
+  cannot be the thing nobody updates. Scan is clean.
+
+- **One flake fixed on the way** (`3c85675`). `make test` in that run hit
+  "unexpected PART frame during connect" in
+  `TestAccountLimitSurvivesReconnection`: a dropped connection's PART is
+  broadcast after it leaves the directory, so an immediate reconnect can
+  be subscribed in time to receive its own predecessor's departure. The
+  test now keeps a second connection in the room and waits for the PART
+  there before dialling again, which is what the moderation tests already
+  do.
+
 ## Decisions
 
 - **Every step shells out to the Makefile, never to `go` directly.** The

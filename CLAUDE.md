@@ -16,7 +16,9 @@ Clients (web, bots) speak the line protocol described below.
 ## Architecture
 
 Single Go module `github.com/sztanpet/ws-chat` (Go 1.26, toolchain pinned
-to 1.26.4; dependencies vendored in `vendor/`). The server is `package
+to 1.26.5; dependencies vendored in `vendor/`). The pin is a dependency
+like any other — `make update-deps` bumps it, because govulncheck reports
+standard library CVEs against it. The server is `package
 main` at the repo root; helper packages live under `internal/`; auxiliary
 binaries under `cmd/`.
 

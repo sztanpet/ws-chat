@@ -11,9 +11,13 @@ production build on every push and pull request, and `make vulncheck` on
 a cron; `make init` sets a clone up (linters + the git pre-commit hook)
 and `make lint` now refuses to run without the tools instead of dying
 halfway through. Getting there meant clearing the 19 findings `make lint`
-had accumulated, none of them a bug. Detail, the step table and the rough
-edges — golangci-lint rebuilt per pipeline, still on the v1 module path,
-no cron created yet — in `state/ci.md`.
+had accumulated, none of them a bug. Every Go cache lives on the agent's
+persistent `/cache` volume, the same convention as `kikapcsologo/backend`.
+`make update-deps` moved no module — they were all current — but
+govulncheck caught the toolchain pin at go1.26.4 with a `crypto/tls` CVE
+fixed in go1.26.5, so the pin is bumped and `update-deps` now updates it
+too. Detail, the step table and the rough edges — still on the v1
+golangci-lint module path, no cron created yet — in `state/ci.md`.
 
 Before that: the load generator. `cmd/loadgen` is a separate process holding N
 connections open, a configurable percentage of which talk, reporting
