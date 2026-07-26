@@ -6,12 +6,17 @@ messages, presence and moderation events. The server owns authentication,
 channel membership, message fan-out, scrollback and moderation state.
 Clients (web, bots) speak the line protocol described below.
 
-> **Status: walking skeleton.** The fan-out, the config loader, the frame
-> codec, the extension points and a single-channel server exist and are
-> tested. Channels themselves, persistence and scrollback do not. Sections
-> below marked *(not built yet)* are intent; everything else describes code
-> that is there. When reality and this file disagree, reality wins and this
-> file gets updated in the same commit.
+> **Status: walking skeleton.** The fan-out, channels and memberships,
+> private messages, moderation, rate limiting, both wire codecs, the
+> extension points, metrics and the load generator exist and are tested.
+> Persistence does not: the replay window is `history.Memory`, so
+> scrollback is what is in RAM and dies with the process. Sections below
+> marked *(not built yet)* are intent; everything else describes code that
+> is there. When reality and this file disagree, reality wins and this file
+> gets updated in the same commit.
+>
+> [`README.md`](README.md) is the how-to — building, running,
+> configuring, the flags. This file is the why.
 
 ## Architecture
 
@@ -446,9 +451,11 @@ stall must degrade scrollback, not delivery.
   time; never re-checked per frame.
 - **Presence**: `NAMES` is served from the channel's in-memory member
   set, never from the database.
-- **Scrollback**: the last N messages per channel are kept in a ring
-  buffer on the channel and replayed on `JOIN`; the SQLite table is for
-  history beyond that.
+- **Scrollback**: the `History` hook, replayed as one `BACKLOG` frame on
+  join. The default `history.Memory` keeps the last `Backlog` messages per
+  channel in memory, which means scrollback dies with the process;
+  anything longer-lived is a `History` implementation, and the SQLite one
+  is *(not built yet)*.
 - **Rate limiting** (`internal/ratelimit`): two token buckets, both
   unlimited by default and both configured by the `Limiter` hook. The
   client's bucket is per **connection** — an anonymous connection has no
@@ -476,9 +483,12 @@ stall must degrade scrollback, not delivery.
   comes after: a rate limit that only counts *successful* messages makes
   sending garbage free. Private messages spend the client's budget but
   not the channel's, since they are not in the channel.
-- **Moderation**: mutes and bans are in-memory state on the channel with
-  a SQLite row behind them, so a restart does not clear them. An IP ban
-  is checked at upgrade time, before the WebSocket handshake completes.
+- **Moderation**: mutes and bans are `internal/moderation` state, scoped
+  by channel or server-wide, with lazy expiry. Surviving a restart is the
+  `Sanctions` hook's job (`Record` + `Active`), not the core's — nothing
+  here writes to a database. A server-wide ban is checked at upgrade time,
+  before the WebSocket handshake completes, so it is an HTTP 403 rather
+  than a socket that opens and shuts.
 - **Shutdown** (`shutdown.go`): on SIGTERM stop accepting upgrades, send
   a close frame to every connection, then unblock both pumps and drain
   the persistence queue. `net/http`'s `Shutdown` deliberately ignores
@@ -616,7 +626,12 @@ GOEXPERIMENT=jsonv2 go test ./...
 - `make tools` — install staticcheck, golangci-lint, govulncheck.
 - `make vulncheck` — `govulncheck ./...` (kept out of pre-commit: it
   needs the network vuln db).
-- `make update-deps` — `go get -u`, tidy, vendor, then test + vulncheck.
+- `make update-deps` — `go get -u`, `go get toolchain@latest`, tidy,
+  vendor, then test + vulncheck. The toolchain is updated with everything
+  else because govulncheck reports standard library CVEs against the pin
+  in `go.mod`, and Go's patch releases are mostly security fixes. It is
+  safe there and nowhere else: the test suite and the scan run
+  immediately after it.
 
 ### Continuous integration
 
@@ -628,6 +643,18 @@ Every step shells out to the Makefile rather than to `go`, so the
 CI does **not** run `make vendor`, the one thing `make pre-commit` does
 that it skips: a CI run checks the tree it was handed instead of
 rewriting it. A stale `vendor/` fails the build a step later anyway.
+
+Every cache Go has lives on the agent's persistent `/cache` volume —
+`GOCACHE`, `GOPATH` (the module cache *and* the tool binaries) and
+`GOLANGCI_LINT_CACHE` — the same convention as the sibling
+`kikapcsologo/backend` pipeline on the same agent. Without it every run
+recompiles every vendored dependency and rebuilds staticcheck and
+golangci-lint from source, which over there was half the pipeline. The
+lint step therefore installs the linters only when they are missing
+rather than calling `make tools` unconditionally.
+
+Detail, the step table and the known rough edges are in
+[`state/ci.md`](state/ci.md).
 
 Tests are integration-first: a real `httptest.Server` and a real
 WebSocket client dialing it, over real SQLite, via a `newTestApp`

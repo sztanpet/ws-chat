@@ -70,7 +70,6 @@ _(none yet)_
   join/part/lookup.
 - **Backpressure never propagates into the hub.** A full outbound buffer
   disconnects that client; it must not block the sender.
-- **Wire protocol is `VERB {json}` text frames**, one command per frame.
 - **Swappable `Broadcaster` interface in `internal/broadcast`.** The fan-out
   is the component most likely to be rewritten, so alternatives are added
   to one table and are measured by the existing tests and benchmarks
