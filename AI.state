@@ -6,7 +6,16 @@ only when you are touching that track.
 
 ## Latest
 
-The load generator. `cmd/loadgen` is a separate process holding N
+CI. `.woodpecker.yaml` runs `make test-race`, `make lint` and the
+production build on every push and pull request, and `make vulncheck` on
+a cron; `make init` sets a clone up (linters + the git pre-commit hook)
+and `make lint` now refuses to run without the tools instead of dying
+halfway through. Getting there meant clearing the 19 findings `make lint`
+had accumulated, none of them a bug. Detail, the step table and the rough
+edges — golangci-lint rebuilt per pipeline, still on the v1 module path,
+no cron created yet — in `state/ci.md`.
+
+Before that: the load generator. `cmd/loadgen` is a separate process holding N
 connections open, a configurable percentage of which talk, reporting
 delivery ratio, latency percentiles, refusals by `ERR` code and
 disconnections by close reason. Mechanics in `internal/loadgen`, detail
@@ -36,6 +45,8 @@ frame; at 3000 connections with 90% speaking it takes `WithTimeout` from
   connection handling built on the fan-out.
 - `state/loadgen.md` — `internal/loadgen` and `cmd/loadgen`, the
   out-of-process load generator and what it has measured.
+- `state/ci.md` — the Woodpecker pipeline and the Makefile targets a
+  clone needs.
 
 ## Release log
 
@@ -136,6 +147,10 @@ _(none yet)_
   sockets; it never reads a server counter. A benchmark inside the server
   shares its scheduler, allocator and GC and then reports on them as the
   server's — and cannot be aimed at another machine.
+- **CI runs the Makefile, not `go`.** `.woodpecker.yaml` shells out to
+  `make` for every step so `GOEXPERIMENT=jsonv2` is stated in exactly one
+  place. It skips `make vendor`: a CI run checks the tree it was handed
+  rather than rewriting it.
 - **The write pump takes batches, not single messages.** `Sub.Recv` fills a
   slice, so one wakeup drains everything pending and can coalesce it into a
   single socket write. This is what makes shared-storage fan-out possible
