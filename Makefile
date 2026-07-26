@@ -66,14 +66,29 @@ vendor: ## go mod vendor + tidy
 	$(GO) mod vendor
 	$(GO) mod tidy
 
+# The linters are installed by `make init`, not by every lint run: a
+# `go install` in front of every commit is a network round trip between
+# somebody and their commit, and the first thing they would do about it
+# is stop running the hook.
+.PHONY: check-tools
+check-tools:
+	@for t in staticcheck golangci-lint; do \
+		command -v $$t >/dev/null || { echo "$$t is not installed; run: make init"; exit 1; }; \
+	done
+
 .PHONY: lint
-lint: ## go vet, staticcheck, golangci-lint
+lint: check-tools ## go vet, staticcheck, golangci-lint
 	$(GO) vet ./...
 	staticcheck ./...
 	golangci-lint run
 
 .PHONY: pre-commit
 pre-commit: vendor lint test-race ## what the git pre-commit hook runs
+
+# One command for a fresh clone: the linters the hook needs, and the
+# hook itself. Everything else in here assumes it has been run.
+.PHONY: init
+init: tools hook ## set a clone up: install the linters and the git hook
 
 .PHONY: hook
 hook: ## install the pre-commit git hook

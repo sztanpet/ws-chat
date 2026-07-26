@@ -597,6 +597,9 @@ GOEXPERIMENT=jsonv2 go test ./...
 ```
 
 
+- `make init` — what a fresh clone runs once: installs the linters and
+  the git pre-commit hook. `make lint` refuses to run without them and
+  says so rather than skipping them quietly.
 - `make run` — `go build -race` + run.
 - `make build` — full production build (`make generate`, then
   `go build -ldflags="-buildid=" -trimpath -race`).
@@ -607,11 +610,22 @@ GOEXPERIMENT=jsonv2 go test ./...
   `soak` build tag so they stay out of `make test`.
 - `make loadgen` — build the load generator; see above.
 - `make lint` / `make vendor` / `make pre-commit` — what the git
-  pre-commit hook runs; `make hook` installs the hook.
+  pre-commit hook runs; `make hook` installs the hook on its own.
 - `make tools` — install staticcheck, golangci-lint, govulncheck.
 - `make vulncheck` — `govulncheck ./...` (kept out of pre-commit: it
   needs the network vuln db).
 - `make update-deps` — `go get -u`, tidy, vendor, then test + vulncheck.
+
+### Continuous integration
+
+`.woodpecker.yaml` runs on every push and pull request: `make test-race`,
+`make lint`, then the production build, with `make vulncheck` on a cron.
+Every step shells out to the Makefile rather than to `go`, so the
+`GOEXPERIMENT=jsonv2` the module needs is stated in exactly one place.
+
+CI does **not** run `make vendor`, the one thing `make pre-commit` does
+that it skips: a CI run checks the tree it was handed instead of
+rewriting it. A stale `vendor/` fails the build a step later anyway.
 
 Tests are integration-first: a real `httptest.Server` and a real
 WebSocket client dialing it, over real SQLite, via a `newTestApp`
