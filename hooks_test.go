@@ -658,7 +658,10 @@ func TestAccountKeyFromAuthAttributes(t *testing.T) {
 // somebody being throttled would try.
 func TestAccountLimitSurvivesReconnection(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
-		Auth:    fakeAuth{byToken: map[string]hook.Identity{"a": {ID: "u1", Nick: "alice"}}},
+		Auth: fakeAuth{byToken: map[string]hook.Identity{
+			"a": {ID: "u1", Nick: "alice"},
+			"w": {ID: "u2", Nick: "watcher"},
+		}},
 		Limiter: keyedLimiter{client: hook.Limits{Burst: 1, Interval: time.Hour}},
 	})
 
@@ -666,13 +669,27 @@ func TestAccountLimitSurvivesReconnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
+
+	// Somebody has to stay in the room for the disconnect to be
+	// observable. A dropped socket is torn down on the server's own
+	// goroutine, and the PART that ends it is broadcast after the
+	// connection has already left the directory -- so an alice who
+	// reconnects immediately can be subscribed in time to be handed her
+	// own departure, which is not what the next dial is asserting about.
+	watcher, err := ta.dialWith(t, "?token=w")
+	if err != nil {
+		t.Fatalf("dial watcher: %v", err)
+	}
+
 	first.send(proto.Command{Verb: proto.VerbMsg, Data: "spent it"})
 	first.expectMsg("alice", "spent it")
+	watcher.expectMsg("alice", "spent it")
 	first.send(proto.Command{Verb: proto.VerbMsg, Data: "refused"})
 	first.expectErr(proto.ErrThrottled)
 
-	// Go away and come back.
+	// Go away, wait for the room to hear about it, and come back.
 	_ = first.ws.CloseNow()
+	watcher.expectPart("main", "alice")
 
 	second, err := ta.dialWith(t, "?token=a")
 	if err != nil {
