@@ -223,7 +223,7 @@ from rebuilding the linters from source every run.
 main.go, init.go, conn.go     the server: composition root and connections
 channel.go, membership.go     channels, and one write pump per membership
 hooks.go, moderation.go       the only callers of the hook interfaces
-internal/broadcast            the fan-out primitive (Ring)
+internal/broadcast            the fan-out primitive (SeqRing)
 internal/proto                the wire: one Command in, Outbound out
 internal/hook                 the extension surface, interfaces only
 internal/filter               UTF-8 and zalgo, in front of every message

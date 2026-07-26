@@ -6,7 +6,25 @@ only when you are touching that track.
 
 ## Latest
 
-CI. `.woodpecker.yaml` runs `make test-race`, `make lint` and the
+Fan-out, second iteration. `SeqRing` (`internal/broadcast/seqring.go`) is
+`Ring` with the lock taken off the read path — a pointer per slot so the
+writer never mutates what a reader holds (RCU-shaped, GC as the grace
+period), and a seqlock validated once per batch instead of per message, so
+a `Recv` is atomic loads with no read-modify-write anywhere. `channel.go`
+builds these now. Paced fan-out is 8.15 ns/msg against Ring's 17.50 at a
+thousand subscribers and 8.22 against 15.12 at ten thousand (medians of
+eight); churn under load is 219ns against 586 with one sender and 236ns
+against 1476 with four, and **flat in the sender count** because
+`Subscribe` takes no lock to queue behind. At the wire a busy room (700
+conns, 195k deliveries/s) improves mean and tail on both interleaved
+rounds; a quiet room is a wash, which is the design being honest — what it
+removes is reader contention, and a room where every write pump sleeps
+between messages has none. Costs 28ns against 8ns on the send path and one
+24-byte allocation per broadcast, which the indirection needs to stay
+race-free. Detail, the regimes and three new harness gotchas in
+`state/broadcast.md`.
+
+Before that: CI. `.woodpecker.yaml` runs `make test-race`, `make lint` and the
 production build on every push and pull request, and `make vulncheck` on
 a cron; `make init` sets a clone up (linters + the git pre-commit hook)
 and `make lint` now refuses to run without the tools instead of dying
@@ -85,6 +103,19 @@ _(none yet)_
   where the same slack per subscriber would be 655MB. The server default
   Capacity is 4096 for this reason. Measured in
   `BenchmarkFanoutChattyCapacity`.
+- **The fan-out read path is lock-free: `SeqRing`, not `Ring`.** A pointer
+  per slot means the writer replaces and never mutates, so a reader holds
+  what it loaded safely with the GC as the grace period; `begin`/`published`
+  bracket the write so a whole batch is validated with one load. 2x on
+  paced delivery, up to 6x on churn under load and flat in the sender
+  count, for 20ns and one 24-byte allocation per broadcast. **The win is
+  proportional to reader contention**, so busy rooms and join/part gain and
+  quiet rooms are a wash — worth knowing before optimising this again.
+  `Ring` stays as the reference implementation.
+- **A drop happens at exactly the promised slack, in every
+  implementation.** Survive at `size` behind, die at `size+1`, asserted
+  deterministically rather than inferred from delivery ratios — which is
+  what lets one implementation's capacity findings transfer to another's.
 - **`sync.Cond` was measured against the ring's notify channel and lost.**
   It removes the per-broadcast allocation and delivery is a wash, but it
   cannot wake one waiter, so a part wakes the whole room — 13x on a

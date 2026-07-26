@@ -67,15 +67,26 @@ private message arrives on *somebody else's* read pump, so this is not
 theoretical: without it, one person who stopped reading would stall
 everyone who messages them.
 
-Fan-out is `internal/broadcast`. `Ring` is the implementation to use: one
-shared buffer, each subscriber reading at its own position, so a
-broadcast is O(1) in the member count and never walks the subscribers.
-See `state/broadcast.md` for the measurements behind that choice.
+Fan-out is `internal/broadcast`. The shape is a shared buffer with each
+subscriber reading at its own position, so a broadcast is O(1) in the
+member count and never walks the subscribers. `SeqRing` is the
+implementation to use: it is that design with the lock taken off the read
+path, publishing a pointer per slot and validating a whole batch with a
+seqlock, so a `Recv` is atomic loads and no read-modify-write. `Ring` is
+the same design guarded by an `RWMutex` — simpler, one allocation per
+broadcast instead of two, and kept as the reference the alternatives are
+measured against.
+
+The win is proportional to how much time readers spend contending, so it
+shows up in busy rooms and disappears in quiet ones, and it is largest on
+join/part under load because `SeqRing.Subscribe` takes no lock at all.
+See `state/broadcast.md` for the numbers and the regimes.
 
 ### Channels
 
 A `channel` (`channel.go`) is a fan-out, a rate limit and a member list.
-The fan-out is one `Ring` **per codec**, since a ring holds encoded bytes.
+The fan-out is one `SeqRing` **per codec**, since a ring holds encoded
+bytes.
 
 A user has **one connection and many memberships**, not one connection
 per channel. There is a **write pump per membership** — `Sub.Recv` blocks

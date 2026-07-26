@@ -10,8 +10,12 @@ behind one interface, and the harness that decides between them.
   buffered channel per subscriber, non-blocking sends). Commits `bb3bc4c`,
   `7a2e81d`.
 - `ring.go` — `Ring`, a shared ring buffer. One copy of the history, each
-  subscriber reading at its own position. **This is the one to use.**
-  Commit `5c26cf4`.
+  subscriber reading at its own position. Commit `5c26cf4`. The reference
+  for the shared-storage design, and what the capacity findings below were
+  measured on.
+- `seqring.go` — `SeqRing`, `Ring` with the lock off the read path.
+  **This is the one to use**; `channel.go` builds these (`04f0e8a`).
+  Commits `aca8576`, `04f0e8a`.
 - `ring_cond.go` — `CondRing`, Ring with a `sync.Cond` instead of the
   notify channel. Measured and rejected; see below.
 - `broadcast_test.go` — contract tests, table-driven over the `impls` list,
@@ -121,6 +125,109 @@ allocating: waking generation N and parking for generation N+1 use two
 *different* channel locks, where `sync.Cond` has one notify list that
 both the waker and the re-parking sleeper contend on. Would need a
 profile to confirm.
+
+## SeqRing: the lock off the read path (measured, adopted)
+
+`Ring`'s `RWMutex` protects very little — a reader wants the write cursor
+and one slot per message — but an `RLock` is still a read-modify-write on
+one shared word, so every `Recv` batch bounces that cache line and every
+`Broadcast` takes the write half against all of them. `SeqRing` keeps
+everything else about `Ring` and removes the lock:
+
+- **A slot holds a pointer to the message header**, not the header. The
+  writer replaces the pointer and never mutates what it points to, so a
+  reader may hold what it loaded for as long as it likes and the GC is the
+  grace period. That is the RCU shape: reads are plain loads and
+  reclamation is free.
+- **Publication is two counters bracketing the slot write** — `begin`
+  before, `published` after. A reader loads `published`, copies pointers,
+  then loads `begin` ONCE for the whole batch: if `begin` has not reached
+  into what it copied, nothing it read was mid-replacement. A seqlock
+  validated per batch rather than per message.
+- **Writers serialize on a `Mutex` readers never touch.** Writer
+  concurrency was never the contended axis — the server already assigns
+  message ids under its own lock, so broadcasts to a channel are
+  serialized upstream of this anyway. Reader concurrency is.
+
+Medians of eight on `BenchmarkFanoutPaced`, the comparison that settles
+things (AMD Ryzen 5 5600G, 4 procs):
+
+```
+subs      ring           seqring
+1000      17.50 ns/msg    8.15 ns/msg
+10000     15.12 ns/msg    8.22 ns/msg
+```
+
+Both at 0.999 delivered, `seqring` at **zero** drops/op against `ring`'s
+0.04 at ten thousand, and steadier: eight runs spanned 8.1-9.3 ns/msg
+where `ring` spanned 11.6-15.6.
+
+Churn is the bigger win, medians of five on `ChurnUnderLoad` at a thousand
+subscribers:
+
+```
+senders   ring      seqring
+1          586ns     219ns
+4         1476ns     236ns
+```
+
+**`SeqRing`'s churn is flat in the sender count** (+8%) where `Ring`'s
+degrades 2.5x, because `Subscribe` takes no lock and cannot queue behind
+the traffic. `Ring.Subscribe` wants the same write lock every `Broadcast`
+holds. For a server where people join and leave busy channels constantly
+that matters more than the fan-out number does.
+
+**The cost is the send path: 28ns against 8ns, and one 24-byte allocation
+per broadcast**, because publishing `&msg` makes the slice header escape.
+It is once per broadcast, not per subscriber, against an encode measured
+at 660ns and five allocations per message per codec — so any room of any
+size pays it back. The zero-allocation version stores the header in the
+slot and reads it while a writer may be replacing it, which is a torn read
+`-race` refuses, and reassembling a possibly-torn pointer/length pair with
+`unsafe.Slice` trips `checkptr`, which `-race` turns on. **The indirection
+is what makes the design safe rather than merely fast** — do not try to
+remove it without solving that first.
+
+`TestDropThresholdIsExactlyTheSlack` (`4fc41dc`) pins every
+implementation to the same boundary: a subscriber exactly `size` behind is
+owed all of it, `size+1` behind is gone. That is what makes the capacity
+numbers below transferable to `SeqRing` rather than needing to be
+re-measured, and it is why a reader that loses the seqlock race **rewinds
+and retries instead of dying** — dropping there would have cost a slot of
+effective capacity and turned a near miss into a disconnection.
+
+### At the wire, and the regime that decides it
+
+`cmd/loadgen` against both binaries, one box, interleaved so drift
+cancels. A busy room (700 conns, 10% at 4/s, 195k deliveries/s, one
+channel), both rounds:
+
+```
+          p50      p90      p99      mean
+ring      18.4ms   53.3ms   114.7ms  24.4ms
+seqring   16.4ms   41.0ms    81.9ms  19.7ms
+ring      20.5ms   53.3ms   114.7ms  25.3ms
+seqring   20.5ms   49.2ms   106.5ms  24.4ms
+```
+
+A quiet room (500 conns at 2/s, 50k deliveries/s) is a **wash** over three
+rounds each: ring means 3.75/3.79/4.24ms against seqring's
+4.13/4.13/3.85, overlapping ranges with ring owning both the best and the
+worst run.
+
+**That is the expected shape, not a disappointment, and it is the thing to
+remember about this implementation.** What `SeqRing` removes is readers
+contending on the fan-out lock, so the win is proportional to how much
+time readers spend holding it. A quiet room is one where every write pump
+is parked in `Recv` between messages — no contention to remove, and
+`SeqRing` only pays its extra publication. Busy rooms and churn are where
+it earns its keep.
+
+Throughput was identical in every wire run because none was throughput
+bound: 195k/s is the offered rate and this box plateaus at 300-390k with
+the generator on it. The overload runs that would push past that are
+recorded in `state/loadgen.md` as **not comparable between runs**, so they
+are not evidence and were not used as any.
 
 ## The chatty-room benchmark
 
@@ -234,15 +341,49 @@ and why it has further to fall when it does not.
    implementations, which genuinely do not need it. New implementations may
    need a line there.
 
+10. **`BenchmarkFanoutChatty` at 100 subscribers is not usable on four
+    cores.** Three runs of the identical configuration gave 259.8, 8624 and
+    647.6 ns/msg — a 33x spread, where medians of five will not converge.
+    `pace` spins on `runtime.Gosched()`, so ten sender goroutines starve
+    the hundred drainers they are waiting for, and how badly is scheduling
+    luck. The 1000-subscriber case is stable. Since the 100 case was
+    already known to show every implementation as indistinguishable, it is
+    the most expensive and least informative run in the package — do not
+    reach for it to decide anything.
+11. **`-bench` matches each `/`-separated element as an UNANCHORED
+    regex.** `-bench='BenchmarkFanout/(ring|seqring)/'` runs all six
+    `Fanout*` families — `Live`, `Paced`, `Saturated`, `Chatty`,
+    `ChattyCapacity` — for `condring` as well, because `BenchmarkFanout`
+    is a substring of the others and `ring` is a substring of `condring`.
+    That is the 10,000-subscriber capacity sweep included by accident, and
+    it ran for 29 minutes and 87 minutes of CPU before being killed. Anchor
+    both elements: `-bench='^BenchmarkFanoutPaced$/^(ring|seqring)$/'`.
+12. **Prefer a deterministic test to a statistical one where the property
+    allows it.** Whether `SeqRing` had `Ring`'s lag tolerance looked like a
+    question for the capacity sweep at ten thousand subscribers, tens of
+    minutes a run and noisy. It is a boundary — survive at `size`, die at
+    `size+1` — so it is a table test that runs in milliseconds and proves
+    it outright. `TestDropThresholdIsExactlyTheSlack`.
+
 ## Pending
 
-- **Ring is the one to build the server on**, unless the shared-history
-  fairness property turns out to matter. Nothing consumes either yet.
-- Ring's per-broadcast allocation (the replacement notify channel) is its
-  only loss to MapChan. Worth attacking only if profiles say so — one
-  allocation per broadcast, not per subscriber.
-- Untried alternatives, now probably not worth it given Ring's numbers:
-  slice-based member set, sharded map, single owner goroutine.
+- **Settled: `SeqRing` is what `channel.go` builds** (`04f0e8a`). The
+  shared-history fairness property never turned out to matter.
+- The per-broadcast allocations are the remaining known cost: the
+  replacement notify channel (both implementations, whenever anybody is
+  asleep) and `SeqRing`'s 24-byte header publication. Worth attacking only
+  if a profile says so — they are per broadcast, not per subscriber, and
+  the notify channel is the one that would pay better, since it is the
+  larger of the two and it is allocated in exactly the quiet-room regime
+  where `SeqRing` currently wins nothing.
+- Never measured for `SeqRing`, and the one gap in its numbers:
+  `BenchmarkFanoutChattyCapacity` at ten thousand subscribers. The
+  capacity findings transfer on the strength of an identical drop
+  threshold (deterministic, see gotcha 12) rather than a re-measurement.
+  If a large busy room ever behaves oddly, measure that before believing
+  anything else.
+- Untried alternatives, now probably not worth it: slice-based member set,
+  sharded map, single owner goroutine.
 - Capacity for a real channel is now measured, not guessed: 256 is too
   small for a large busy room and 4096 costs 64KB. The server default moved
   accordingly.
