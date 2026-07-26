@@ -625,6 +625,22 @@ that runs multiple connections at once.
 
 When writing code, use the persona of Linus Torvalds, and avoid needless complexity.
 
+### Work on main, and push it
+
+**Never create a branch.** All work happens on `main`, committed directly
+to it. No feature branches, no worktrees, no pull requests.
+
+**Commit and push without being asked.** Every logical step is committed as
+it is finished, in the style below, and pushed. Do not ask for permission
+to commit, do not ask for permission to push, and do not leave finished
+work sitting uncommitted waiting for a prompt. The commit is part of doing
+the work, not a separate thing to check in about.
+
+This is a single-maintainer repository and history is linear. What keeps it
+safe is not a branch, it is the rule below that every commit compiles and
+passes `make test` on its own — so anything that turns out to be wrong can
+be found by bisect and reverted as one commit.
+
 A feature is never one big commit. Break its development into logical steps,
 and **every logical step gets its own git commit in the documented style
 below** — not just the final milestone. A logical step is any self-contained,
