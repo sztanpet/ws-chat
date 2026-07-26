@@ -1,0 +1,79 @@
+# CI runs what `make pre-commit` runs, and nothing it does not.
+#
+# Everything goes through the Makefile on purpose. The Makefile is the
+# only place that knows this module does not compile without
+# GOEXPERIMENT=jsonv2 -- go vet, staticcheck and golangci-lint included,
+# since they are compilers with opinions. A pipeline spelling the flags
+# out itself would be a second copy of that to keep in sync, and the
+# copy that is wrong is always the one nobody runs by hand.
+#
+# `make vendor` is the one pre-commit step left out: it rewrites go.mod
+# and vendor/, and a CI run must check the tree it was given rather than
+# fix it. A stale vendor/ breaks the build in the next step anyway.
+
+when:
+  - event: [push, pull_request, manual, cron]
+
+variables:
+  # Debian-based, not alpine: `go test -race` needs cgo and a C
+  # toolchain, and alpine ships neither. The race detector is the point
+  # of this repository's test suite, so this is not negotiable.
+  - &golang 'golang:1.26'
+  # The default GOCACHE is under $HOME, which is inside the container
+  # and dies with it. Putting it on the workspace volume means the
+  # second step in a pipeline does not recompile what the first already
+  # did.
+  - &goenv
+    GOCACHE: /go/.cache/go-build
+
+# GOPATH is /go in the golang image, so basing the workspace there puts
+# the module cache and whatever `make tools` installs on the volume the
+# steps share: the linters are built once per pipeline instead of once
+# per step. The volume is per-pipeline, so nothing survives to the next
+# run; making it survive needs a host volume, which needs the repository
+# to be trusted in Woodpecker's settings.
+workspace:
+  base: /go
+  path: src/github.com/sztanpet/ws-chat
+
+steps:
+  # First, because it is the answer people actually want, and because a
+  # concurrency bug in the fan-out is the failure that matters here.
+  - name: test
+    image: *golang
+    environment: *goenv
+    commands:
+      - make test-race
+
+  - name: lint
+    image: *golang
+    environment: *goenv
+    commands:
+      # `make tools` builds staticcheck and golangci-lint from source,
+      # which is minutes on a cold cache. It is the price of not pinning
+      # a linter image to a Go version this module cannot use.
+      - make tools
+      - make lint
+
+  # go test compiles every package, so this is only here to catch the
+  # production build itself breaking: -trimpath, the ldflags, generate.
+  - name: build
+    image: *golang
+    environment: *goenv
+    commands:
+      - make build
+      - make loadgen
+
+  # Kept off pushes for the same reason it is kept out of the pre-commit
+  # hook: it talks to the vulnerability database over the network, so it
+  # fails for reasons that have nothing to do with the commit. Nightly is
+  # often enough to hear about a CVE in a dependency. Needs a cron adding
+  # in the repository's Woodpecker settings; without one this never runs.
+  - name: vulncheck
+    image: *golang
+    environment: *goenv
+    when:
+      - event: cron
+    commands:
+      - make tools
+      - make vulncheck
