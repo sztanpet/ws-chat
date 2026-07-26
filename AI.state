@@ -82,6 +82,9 @@ _(none yet)_
   those.
 - **Moderation defaults to nobody being a moderator.** `Authorizer` is the
   one hook whose default is deny, and it is asked per scope.
+- **Moderation survives a restart through the `Sanctions` hook** (Record +
+  Active), separate from `Recorder`. A failing `Active` stops the server:
+  starting without knowing who is banned means letting them in.
 - **Moderation is scoped by the command's channel**: named acts there,
   empty acts server-wide, and a lookup checks both. A channel mute does
   not reach private messages; a server-wide one does.

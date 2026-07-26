@@ -148,9 +148,16 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 	a.metrics = newMetrics(a.registry)
 	a.registerStateMetrics(a.registry)
 
+	// Whatever was in force when the server last stopped. Before the
+	// listener, before the janitor: a connection must never be answered
+	// while the answer to "is this person banned" is still loading.
+	if err := a.loadSanctions(context.Background()); err != nil {
+		return nil, err
+	}
+
 	a.ctx, a.stopConn = context.WithCancel(context.Background())
 	go a.janitor(a.ctx)
-	if hooks.Recorder != nil {
+	if hooks.Recorder != nil || hooks.Sanctions != nil {
 		go a.recordWorker(a.ctx)
 	} else {
 		close(a.recordsDone)

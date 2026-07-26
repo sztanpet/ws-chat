@@ -40,6 +40,7 @@ type appMetrics struct {
 
 	// Moderation.
 	moderationTotal *metrics.CounterVec // by action
+	sanctionsLoaded *metrics.Counter    // recovered at startup
 }
 
 func newMetrics(r *metrics.Registry) *appMetrics {
@@ -74,6 +75,8 @@ func newMetrics(r *metrics.Registry) *appMetrics {
 
 		moderationTotal: r.CounterVec("moderation_total",
 			"Moderation actions taken.", "action"),
+		sanctionsLoaded: r.Counter("sanctions_loaded_total",
+			"Mutes and bans restored from the Sanctions hook at startup."),
 	}
 }
 

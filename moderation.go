@@ -119,7 +119,7 @@ func (c *conn) handleMod(ctx context.Context, cmd proto.Command) {
 		return
 	}
 
-	c.app.recordModeration(hook.Moderation{
+	c.app.recordSanction(hook.Moderation{
 		ID:     id,
 		Action: action,
 		Scope:  scope,

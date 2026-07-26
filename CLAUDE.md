@@ -251,10 +251,26 @@ persisted.
   failing to show history is not a reason to refuse somebody a connection.
   The default is `history.Memory`, the last `Backlog` messages per channel
   in memory, which is what the server did before the hook existed.
-- **`Recorder`** writes things down: public messages, private messages and
-  moderation actions. It runs on a background worker **after** the thing
-  has happened, off a bounded queue, and drops with a counter when that
-  queue is full. A store having a bad day costs history, never delivery.
+- **`Recorder`** writes the chat down: public and private messages. It runs
+  on a background worker **after** the thing has happened, off a bounded
+  queue, and drops with a counter when that queue is full. A store having a
+  bad day costs history, never delivery.
+- **`Sanctions`** persists mutes and bans **and hands them back**, which is
+  the difference between moderation that survives a restart and moderation
+  that does not. `Record` is on the same background queue as the chat
+  records — a store must not stall the moderator issuing a command — and
+  `Active` runs **once at startup**. Moderation is not in `Recorder`
+  because a mute is not a log line, it is state the server has to have back.
+
+  **A failing `Active` stops the server.** Starting without knowing who is
+  banned means letting them in, and a server that cannot answer that
+  question should not be answering connections. It is the one hook failure
+  that is fatal, and the only one where failing open would be a security
+  decision rather than a degraded feature.
+
+  `Record` is called for `unmute` and `unban` too. An implementation has to
+  remove what they lift, or `Active` hands back something that was
+  cancelled — there is a test for exactly that.
 - **`Authorizer`** decides who may use the moderation commands, **and
   where**: it is passed the scope, empty for server-wide. **Its default is
   deny**, unlike every other hook. The rest default permissive

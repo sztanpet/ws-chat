@@ -558,15 +558,15 @@ func TestUnbanNamesSomebodyWhoIsGone(t *testing.T) {
 }
 
 func TestModerationIsRecorded(t *testing.T) {
-	rec := newFakeRecorder()
-	_, mod, user := modApp(t, hook.Hooks{Recorder: rec})
+	rec := newFakeSanctions()
+	_, mod, user := modApp(t, hook.Hooks{Sanctions: rec})
 
 	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main", Duration: "5m", Reason: "spam"})
 	mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
 	select {
-	case m := <-rec.mods:
+	case m := <-rec.recorded:
 		if m.Action != proto.ActionMute {
 			t.Errorf("action = %q, want %q", m.Action, proto.ActionMute)
 		}
@@ -578,6 +578,9 @@ func TestModerationIsRecorded(t *testing.T) {
 		}
 		if m.Key != "id:u2" {
 			t.Errorf("key = %q, want id:u2", m.Key)
+		}
+		if m.Scope != "main" {
+			t.Errorf("scope = %q, want main", m.Scope)
 		}
 		if m.Reason != "spam" {
 			t.Errorf("reason = %q, want spam", m.Reason)
@@ -891,4 +894,202 @@ func TestModFrameCarriesItsScope(t *testing.T) {
 	if global.Channel != "main" {
 		t.Errorf("channel = %q, want the channel it was announced in", global.Channel)
 	}
+}
+
+// --- sanctions surviving a restart ------------------------------------
+
+// fakeSanctions is a store that keeps what it is told, so a second server
+// can be handed the first one's state.
+type fakeSanctions struct {
+	mu       sync.Mutex
+	active   map[string]hook.Moderation // by scope+key+action
+	recorded chan hook.Moderation
+	failLoad error
+	failSave error
+}
+
+func newFakeSanctions() *fakeSanctions {
+	return &fakeSanctions{
+		active:   make(map[string]hook.Moderation),
+		recorded: make(chan hook.Moderation, 16),
+	}
+}
+
+func (f *fakeSanctions) Record(ctx context.Context, m hook.Moderation) error {
+	if f.failSave != nil {
+		return f.failSave
+	}
+
+	f.mu.Lock()
+	switch m.Action {
+	case proto.ActionMute, proto.ActionBan:
+		f.active[m.Scope+"\x00"+m.Key+"\x00"+m.Action] = m
+	case proto.ActionUnmute:
+		delete(f.active, m.Scope+"\x00"+m.Key+"\x00"+proto.ActionMute)
+	case proto.ActionUnban:
+		delete(f.active, m.Scope+"\x00"+m.Key+"\x00"+proto.ActionBan)
+	}
+	f.mu.Unlock()
+
+	f.recorded <- m
+	return nil
+}
+
+func (f *fakeSanctions) Active(ctx context.Context) ([]hook.Moderation, error) {
+	if f.failLoad != nil {
+		return nil, f.failLoad
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]hook.Moderation, 0, len(f.active))
+	for _, m := range f.active {
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// waitFor blocks until the background worker has persisted n actions.
+func (f *fakeSanctions) waitFor(t *testing.T, n int) {
+	t.Helper()
+	for range n {
+		select {
+		case <-f.recorded:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the action was never persisted")
+		}
+	}
+}
+
+// The point of the whole hook: a mute issued by one server is still in
+// force on the next one.
+func TestMutesSurviveARestart(t *testing.T) {
+	store := newFakeSanctions()
+
+	// First server: mute somebody, and let it reach the store.
+	func() {
+		_, mod, user := modApp(t, hook.Hooks{Sanctions: store})
+		mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
+		mod.expectMod(proto.ActionMute, "auser")
+		user.expectMod(proto.ActionMute, "auser")
+		store.waitFor(t, 1)
+	}()
+
+	// Second server, same store. The user comes back to find it still
+	// applies, without anybody having to re-issue it.
+	_, _, user := modApp(t, hook.Hooks{Sanctions: store})
+	user.send(proto.Command{Verb: proto.VerbMsg, Data: "am i free"})
+	user.expectErr(proto.ErrMuted)
+}
+
+// And its scope survives with it: a mute in one channel does not come back
+// as a mute everywhere.
+func TestScopeSurvivesARestart(t *testing.T) {
+	store := newFakeSanctions()
+
+	func() {
+		_, mod, user := modApp(t, hook.Hooks{Sanctions: store})
+		mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
+		mod.expectMod(proto.ActionMute, "auser")
+		user.expectMod(proto.ActionMute, "auser")
+		store.waitFor(t, 1)
+	}()
+
+	_, _, user := modApp(t, hook.Hooks{Sanctions: store})
+	user.send(proto.Command{Verb: proto.VerbMsg, Channel: "main", Data: "in main"})
+	user.expectErr(proto.ErrMuted)
+
+	user.send(proto.Command{Verb: proto.VerbJoin, Channel: "second"})
+	user.expectJoined("second")
+	user.send(proto.Command{Verb: proto.VerbMsg, Channel: "second", Data: "in second"})
+	user.expectMsg("auser", "in second")
+}
+
+// A server-wide ban survives too, and is enforced where it always was:
+// before the upgrade.
+func TestBansSurviveARestart(t *testing.T) {
+	store := newFakeSanctions()
+
+	func() {
+		ta, _, user := modApp(t, hook.Hooks{Sanctions: store})
+		admin, err := ta.dialWith(t, "?token=admin")
+		if err != nil {
+			t.Fatalf("dial the admin: %v", err)
+		}
+		admin.send(proto.Command{Verb: proto.VerbBan, Nick: "auser"})
+		admin.expectMod(proto.ActionBan, "auser")
+		user.expectClosed()
+		store.waitFor(t, 1)
+	}()
+
+	ta := newTestAppWith(t, hook.Hooks{
+		Sanctions: store,
+		Auth:      fakeAuth{byToken: map[string]hook.Identity{"user": {ID: "u2", Nick: "auser"}}},
+	})
+	if _, err := ta.dialWith(t, "?token=user"); err == nil {
+		t.Fatal("a banned user connected to the restarted server")
+	} else if !strings.Contains(err.Error(), "403") {
+		t.Fatalf("dial error = %v, want a 403", err)
+	}
+}
+
+// Lifting a sanction has to be persisted too, or it comes back.
+func TestUnmuteSurvivesARestart(t *testing.T) {
+	store := newFakeSanctions()
+
+	func() {
+		_, mod, user := modApp(t, hook.Hooks{Sanctions: store})
+		mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
+		mod.expectMod(proto.ActionMute, "auser")
+		user.expectMod(proto.ActionMute, "auser")
+
+		mod.send(proto.Command{Verb: proto.VerbUnmute, Nick: "auser", Channel: "main"})
+		mod.expectMod(proto.ActionUnmute, "auser")
+		user.expectMod(proto.ActionUnmute, "auser")
+		store.waitFor(t, 2)
+	}()
+
+	_, _, user := modApp(t, hook.Hooks{Sanctions: store})
+	user.send(proto.Command{Verb: proto.VerbMsg, Data: "free again"})
+	user.expectMsg("auser", "free again")
+}
+
+// An expired sanction handed back is ignored rather than re-applied.
+func TestExpiredSanctionsAreIgnoredOnLoad(t *testing.T) {
+	store := newFakeSanctions()
+	store.active["expired"] = hook.Moderation{
+		Action: proto.ActionMute,
+		Scope:  "main",
+		Key:    "id:u2",
+		Until:  time.Now().Add(-time.Hour),
+	}
+
+	_, _, user := modApp(t, hook.Hooks{Sanctions: store})
+	user.send(proto.Command{Verb: proto.VerbMsg, Data: "long over"})
+	user.expectMsg("auser", "long over")
+}
+
+// A store that cannot say who is banned stops the server, rather than
+// starting one that lets everybody in.
+func TestStartupFailsIfSanctionsCannotBeLoaded(t *testing.T) {
+	store := newFakeSanctions()
+	store.failLoad = errors.New("the database is on fire")
+
+	cfg := config.Default()
+	cfg.LogLevel = "error"
+	if _, err := newAppWithConfig(cfg, hook.Hooks{Sanctions: store}); err == nil {
+		t.Fatal("the server started without knowing who is banned")
+	}
+}
+
+// No Sanctions installed is still a working server; it just forgets.
+func TestNoSanctionsHookStillWorks(t *testing.T) {
+	_, mod, user := modApp(t, hook.Hooks{})
+
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
+	mod.expectMod(proto.ActionMute, "auser")
+	user.expectMod(proto.ActionMute, "auser")
+
+	user.send(proto.Command{Verb: proto.VerbMsg, Data: "muted"})
+	user.expectErr(proto.ErrMuted)
 }

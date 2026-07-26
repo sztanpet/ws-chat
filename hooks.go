@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sztanpet/ws-chat/internal/hook"
+	"github.com/sztanpet/ws-chat/internal/proto"
 	"github.com/sztanpet/ws-chat/internal/ratelimit"
 )
 
@@ -228,12 +229,13 @@ func (a *app) canJoin(ctx context.Context, id hook.Identity, channel string) (bo
 }
 
 // record queues a persistence job. It never blocks and never fails the
-// message: by the time it is called, the message has already been
-// delivered.
+// message: by the time it is called, the thing has already happened.
+//
+// The caller checks that the hook it is about to close over exists. It
+// cannot be checked here — the job is a closure and this function does not
+// know which hook is inside it — and getting that wrong queues a job that
+// dereferences nil on a worker goroutine, which is how it was found.
 func (a *app) record(job func(context.Context) error) {
-	if a.hooks.Recorder == nil {
-		return
-	}
 	select {
 	case a.records <- job:
 	default:
@@ -245,15 +247,69 @@ func (a *app) record(job func(context.Context) error) {
 }
 
 func (a *app) recordMessage(m hook.Message) {
+	if a.hooks.Recorder == nil {
+		return
+	}
 	a.record(func(ctx context.Context) error { return a.hooks.Recorder.Message(ctx, m) })
 }
 
 func (a *app) recordPrivate(p hook.Private) {
+	if a.hooks.Recorder == nil {
+		return
+	}
 	a.record(func(ctx context.Context) error { return a.hooks.Recorder.Private(ctx, p) })
 }
 
-func (a *app) recordModeration(m hook.Moderation) {
-	a.record(func(ctx context.Context) error { return a.hooks.Recorder.Moderation(ctx, m) })
+// recordSanction persists a moderation action, if anything is listening.
+//
+// It goes on the same queue as the chat records, so a slow store cannot
+// stall the moderator who issued the command. That does mean a record
+// dropped under load is a sanction that will not survive a restart —
+// the tradeoff is stated in hook.Sanctions and the drops are counted.
+func (a *app) recordSanction(m hook.Moderation) {
+	if a.hooks.Sanctions == nil {
+		return
+	}
+	a.record(func(ctx context.Context) error { return a.hooks.Sanctions.Record(ctx, m) })
+}
+
+// loadSanctions puts the mutes and bans that survived a restart back into
+// memory. It runs once, before anything is served.
+//
+// A failure stops the server. Starting without knowing who is banned means
+// letting them in, and there is no sensible way to serve a connection when
+// the answer to "may this person be here" is unavailable.
+func (a *app) loadSanctions(ctx context.Context) error {
+	if a.hooks.Sanctions == nil {
+		return nil
+	}
+
+	active, err := a.hooks.Sanctions.Active(ctx)
+	if err != nil {
+		return fmt.Errorf("loading sanctions: %w", err)
+	}
+
+	loaded := 0
+	for _, m := range active {
+		switch m.Action {
+		case proto.ActionMute:
+			a.mod.Mute(m.Scope, m.Key, m.Until)
+		case proto.ActionBan:
+			a.mod.Ban(m.Scope, m.Key, m.Until)
+		default:
+			// Unmute and unban lift a sanction; they are not one. An
+			// implementation handing them back has misunderstood Active,
+			// and applying them would be worse than saying so.
+			a.log.Warn("ignoring a lifted action in the active set",
+				"action", m.Action, "key", m.Key)
+			continue
+		}
+		loaded++
+	}
+
+	a.metrics.sanctionsLoaded.Add(int64(loaded))
+	a.log.Info("loaded sanctions", "count", loaded)
+	return nil
 }
 
 // recordWorker drains the persistence queue until the server shuts down.

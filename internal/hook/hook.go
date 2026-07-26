@@ -29,11 +29,14 @@
 //   - ClientLimits and ChannelLimits are asked once each, when a connection
 //     or a channel is set up. They decide policy; the enforcing is the
 //     server's, on a token bucket, and costs a nil check when unlimited.
-//   - Message, Private and Moderation run on a background worker AFTER the
-//     thing has happened, so a slow or broken store delays persistence and
-//     never delivery. Their queue is bounded: when it is full, records are
+//   - Message, Private and Sanctions.Record run on a background worker
+//     AFTER the thing has happened, so a slow or broken store delays
+//     persistence and never delivery. Their queue is bounded: when it is full, records are
 //     dropped and counted rather than allowed to become backpressure on
 //     the chat.
+//   - Sanctions.Active runs once at startup and may block; a failure stops
+//     the server rather than starting one that does not know who is
+//     banned.
 //   - History.Append runs on the sender's path, under the lock that orders
 //     the fan-out, and must not block. It is for maintaining a replay
 //     window, not for durability — durability is Recorder, which is
@@ -301,12 +304,42 @@ type Channels interface {
 	CanJoin(ctx context.Context, id Identity, channel string) (allowed bool, reason string)
 }
 
-// Recorder writes things down. Every method runs on a background worker,
+// Recorder writes the chat down. Both methods run on a background worker,
 // after the thing has already happened.
+//
+// Moderation is not here: a mute is not a log line, it is state the server
+// has to have back after a restart, and that is Sanctions.
 type Recorder interface {
 	Message(ctx context.Context, m Message) error
 	Private(ctx context.Context, p Private) error
-	Moderation(ctx context.Context, m Moderation) error
+}
+
+// Sanctions persists mutes and bans and hands them back.
+//
+// It is the difference between moderation that survives a restart and
+// moderation that does not. With no Sanctions installed the server keeps
+// its mutes and bans in memory and forgets them when it stops, which is
+// fine for a test and not for anything anybody is being moderated on.
+//
+// Record runs on the background worker, like the Recorder methods, and for
+// the same reason: a store having a bad day must not stall the moderator
+// issuing the command. The cost is that a dropped record — the queue is
+// bounded — is a sanction that will not come back, which is visible in the
+// dropped-records metric.
+//
+// Active runs ONCE, at startup, before anything is served. If it fails the
+// server does not start. Starting without knowing who is banned means
+// letting them in, and a server that cannot answer that question should
+// not be answering connections.
+type Sanctions interface {
+	// Record persists one action. Unmute and unban are actions too — an
+	// implementation has to remove what they lift, or Active will hand
+	// back something that was cancelled.
+	Record(ctx context.Context, m Moderation) error
+
+	// Active returns the mutes and bans still in force, in any order.
+	// Entries that have already expired may be included; they are ignored.
+	Active(ctx context.Context) ([]Moderation, error)
 }
 
 // Authorizer decides who may use the moderation commands, and where.
@@ -339,6 +372,7 @@ type Hooks struct {
 	Limiter   Limiter
 	Channels  Channels
 	History   History
+	Sanctions Sanctions
 	Recorder  Recorder
 	Authz     Authorizer
 }

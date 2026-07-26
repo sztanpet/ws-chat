@@ -59,7 +59,6 @@ func (f fakeFilter) Allow(ctx context.Context, from hook.Identity, data string) 
 type fakeRecorder struct {
 	msgs  chan hook.Message
 	privs chan hook.Private
-	mods  chan hook.Moderation
 	fail  error
 }
 
@@ -67,13 +66,7 @@ func newFakeRecorder() *fakeRecorder {
 	return &fakeRecorder{
 		msgs:  make(chan hook.Message, 16),
 		privs: make(chan hook.Private, 16),
-		mods:  make(chan hook.Moderation, 16),
 	}
-}
-
-func (f *fakeRecorder) Moderation(ctx context.Context, m hook.Moderation) error {
-	f.mods <- m
-	return f.fail
 }
 
 func (f *fakeRecorder) Message(ctx context.Context, m hook.Message) error {

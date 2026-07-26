@@ -154,6 +154,15 @@ extension points, and a single-channel WebSocket chat server.
   keeps it to one copy of each frame. The other order needs a direct send
   as well and then duplicates for anybody whose pump had already drained
   the broadcast.
+- **Moderation state persists through the `Sanctions` hook**, separate
+  from `Recorder`: a mute is not a log line, it is state the server needs
+  back. `Record` is async on the shared queue; `Active` runs once at
+  startup and **a failure is fatal** — the alternative is a server that
+  lets banned people in because it could not find out.
+- **`record()` cannot check the hook for you.** It takes a closure and
+  cannot see which hook is inside it, so the caller checks. Getting that
+  wrong queues a job that dereferences nil on a worker goroutine, which is
+  how it was found.
 - **A refused autojoin sends the client an ERR**, rather than leaving it
   to wonder why the room it was put in is empty.
 
@@ -198,9 +207,6 @@ extension points, and a single-channel WebSocket chat server.
   minute. Expired mutes and unreferenced limiters therefore linger for up
   to that long; every read already treats them as absent, so this is
   memory, not correctness.
-- **Moderation state is memory-only.** It is recorded through `Recorder`
-  but never loaded back, so a restart forgets every mute and ban. Loading
-  wants a hook method that reads them at startup.
 - **Real nick collision handling.** Nicks are server-assigned and unique
   today, so `register` cannot collide. With logins it can, and `init.go`
   is where that gets decided.
