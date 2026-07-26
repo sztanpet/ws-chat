@@ -98,9 +98,10 @@ type Config struct {
 	// messages are rare, and a client that is not draining them is gone.
 	PrivBuffer int
 
-	// WriteTimeout bounds a single socket write. Without it a client that
-	// stops reading wedges the goroutine writing to it, which is how
-	// backpressure escapes into the rest of the server.
+	// WriteTimeout bounds a socket write — or one wakeup's worth of them,
+	// since a write pump drains its batch under a single deadline. Without
+	// it a client that stops reading wedges the goroutine writing to it,
+	// which is how backpressure escapes into the rest of the server.
 	WriteTimeout Duration
 
 	// IdleTimeout closes a connection that has sent nothing at all — not

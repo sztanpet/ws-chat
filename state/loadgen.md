@@ -49,6 +49,13 @@ which a configurable percentage speak".
 - **Settle has its own 30s timeout** and its failure is counted as
   `never joined`. Nothing else would count a server that answers the
   handshake and then does not finish the job, and the barrier would hang.
+- **Loss and refusal reasons must come from a closed set.** The map is
+  keyed by the reason, and a `net.OpError` prints the peer address, so the
+  first 3000-connection run ended in a report with one `losses` line per
+  dropped socket, port number and all. `reasonOf` unwraps to the error
+  inside the `OpError` and folds EOF, `net.ErrClosed` and context errors
+  onto fixed strings — the same rule the server applies to its metric
+  labels, learned the same way.
 - **A run never aborts on connection failures.** Dial errors, drops and
   refusals are counted and printed; a load test that gives up when three
   dials out of ten thousand fail never finishes.
@@ -62,11 +69,15 @@ Server on defaults (Capacity 4096, JSON unless stated).
 | 500 conns, 10% at 2/s, 1 channel | 47.4k deliveries/s, 99.81%, p50 4.1ms p99 20.5ms, 0 dropped |
 | 400 conns, 25% at 5/s, 4 channels, msgpack | 48.7k/s, 99.97%, p50 1.02ms p99 3.84ms, 0 dropped |
 | 1500 conns, 20% at 20/s, 1 channel | 302k/s, 11.5% delivered, 1231 of 1500 dropped `too slow`, p50 1.97s |
+| 3000 conns, 90% at 1/s, 1 channel | 300–390k/s, ~5% delivered, most of the room dropped `too slow`, p50 >20s |
 
-The third is the overload shape and it is the useful one: the server's lag
-disconnect shows up by name in `losses`. It is also where the generator is
-competing with the server for the same cores, so treat those latencies as
-an upper bound on this box rather than a server number.
+The last two are the overload shape and they are the useful ones: the
+server's lag disconnect shows up by name in `losses`. Deliveries plateau
+around 300–390k/s on this box either way, which is a four-core box with the
+generator on it, not a server limit. Two chaotic overload runs are **not
+comparable to each other** on throughput or drop count — the population
+collapses differently every time. Profiles taken during them are, because
+they are rates inside one window.
 
 ## Profiled (26 Jul 2026, 4 cores, generator on the same box)
 
@@ -89,17 +100,33 @@ cfg.WriteTimeout)` on every frame, inside `channelPump`'s batch loop.
   `setupWriteTimeout` → `context.AfterFunc` 376MB, `cancelCtx.Done` 101MB
   over 20 seconds.
 
-The fix is to hoist the deadline out of the per-frame loop and give the
-whole batch one, which trades "every write is bounded by WriteTimeout" for
-"every wakeup is". Not done: it is a documented invariant and a change to
-the server, not to the generator.
+### Fixed, and what it was worth
 
-Note the library half cannot be hoisted away. `setupWriteTimeout` skips
-everything when `ctx.Done() == nil` (`vendor/.../conn.go:171`) but
-allocates an `AfterFunc` per `Write` for any cancellable context, and
-coder/websocket has no `SetWriteDeadline`. One deadline per batch removes
-our 35% of the garbage; the library's 50% needs one `Write` per batch,
-which the protocol does not allow — one chat message is one frame.
+`conn.writeBatch` now gives a whole wakeup one deadline (`conn.go`,
+`membership.go`). The library half cannot be hoisted away:
+`setupWriteTimeout` skips everything when `ctx.Done() == nil`
+(`vendor/.../conn.go:171`) but allocates an `AfterFunc` per `Write` for any
+cancellable context, and coder/websocket has no `SetWriteDeadline`. One
+`Write` per batch would fix that too, and the protocol does not allow it —
+one chat message is one frame.
+
+**At the steady load it changes nothing measurable**, and that is the point
+worth remembering: at 100 messages a second into a room, a pump wakes up
+with exactly one frame, so one deadline per batch *is* one per frame.
+
+**At overload it is most of the garbage.** 3000 connections, 90% speaking,
+one room, 20s windows on the same load before and after:
+
+| | pre-fix | fixed |
+|---|---|---|
+| `context.WithTimeout` CPU | 11.0% | 1.7% |
+| allocated in 20s | 9.95 GB | 1.24 GB |
+| `write(2)` share of CPU | 56.5% | 77.5% |
+
+Half a gigabyte of garbage a second, down to sixty megabytes, and the
+remaining profile is the syscall it should be. This is the case where the
+CPU actually matters: a server that is behind is exactly the server whose
+pumps drain sixteen frames a wakeup.
 
 No leaks: in-use heap 16MB, and after 2950 connections over the session
 the process is back to 8 goroutines.

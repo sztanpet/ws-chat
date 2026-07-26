@@ -202,10 +202,11 @@ func (c *conn) channelPump(ctx context.Context, m *membership) {
 	for {
 		n, err := m.sub.Recv(batch)
 
-		for _, frame := range batch[:n] {
-			if !c.write(ctx, frame) {
-				return
-			}
+		// The whole batch goes out under one deadline. This is the hot
+		// path — one broadcast is one of these per member — and a deadline
+		// per frame was the single biggest thing the server allocated.
+		if !c.writeBatch(ctx, batch[:n]) {
+			return
 		}
 
 		switch {

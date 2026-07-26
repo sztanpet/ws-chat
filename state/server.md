@@ -35,7 +35,9 @@ extension points, and a single-channel WebSocket chat server.
 - **A private message never blocks its sender.** It arrives on somebody
   else's read pump; a recipient whose queue is full is refused (`ERR
   recipientbusy`) rather than waited on. Every socket write is bounded by
-  `WriteTimeout` for the same reason.
+  `WriteTimeout` for the same reason — one deadline per wakeup, covering
+  the batch a pump drains, since one per frame was 9% of CPU and 99% of
+  what the server allocated (`state/loadgen.md`).
 - **The verb is a field inside the frame, not a prefix.** One decode per
   inbound frame instead of a split plus a parse. `proto.Command` is a flat
   union of every inbound field for the same reason — one struct per verb

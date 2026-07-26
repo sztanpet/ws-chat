@@ -57,8 +57,9 @@
 	// further ones are refused with ERR recipientbusy.
 	// "PrivBuffer": 32,
 
-	// Bounds a single socket write. Without it a client that stops reading
-	// wedges whatever goroutine is writing to it.
+	// Bounds a socket write, or one wakeup's batch of them: a write pump
+	// drains everything pending under a single deadline. Without it a
+	// client that stops reading wedges whatever goroutine writes to it.
 	// "WriteTimeout": "10s",
 
 	// Closes a connection that has sent nothing at all — not even a PING —

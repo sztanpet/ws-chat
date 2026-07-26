@@ -52,7 +52,10 @@ the work in `internal/broadcast`.
 **Backpressure stops at the connection.** A subscriber that cannot keep
 up is dropped (`ErrLagged`) rather than waited on, a private message to
 somebody whose queue is full is refused (`ERR recipientbusy`) rather than
-blocked on, and every socket write is bounded by `WriteTimeout`. A
+blocked on, and every socket write is bounded by `WriteTimeout` — one
+deadline per wakeup, covering the whole batch a pump drains, because a
+deadline per frame was 9% of the server's CPU and almost all of what it
+allocated. A
 private message arrives on *somebody else's* read pump, so this is not
 theoretical: without it, one person who stopped reading would stall
 everyone who messages them.

@@ -18,12 +18,14 @@ connections with 20% speaking at 20/s is where the server starts dropping
 people for lag, which the report names (`StatusPolicyViolation: too
 slow`). Anything past ~100k deliveries/s on one box is measuring the box.
 
-Profiling under that load found one thing worth fixing: `conn.write`
-builds a `context.WithTimeout` per delivered frame, which is 9% of CPU and
-**99% of everything the server allocates** — ~740 bytes of garbage per
-message, none of it the message. Hoisting it to one deadline per batch
-would change "every write is bounded by WriteTimeout" to "every wakeup
-is", so it is a decision rather than a cleanup. Detail and the numbers in
+Profiling under that load found one thing worth fixing, and it is fixed:
+`conn.write` built a `context.WithTimeout` per delivered frame, which was
+99% of everything the server allocated. A write pump now drains its whole
+batch under one deadline (`conn.writeBatch`), so `WriteTimeout` bounds a
+wakeup rather than a single frame — the stricter reading where it matters.
+At a quiet 49k deliveries/s it changes nothing, because a batch is one
+frame; at 3000 connections with 90% speaking it takes `WithTimeout` from
+11% of CPU to 1.7% and garbage from 9.95GB per 20s to 1.24GB. Numbers in
 `state/loadgen.md`.
 
 ## State file index

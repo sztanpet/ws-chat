@@ -476,14 +476,48 @@ func (c *conn) send(ctx context.Context, frame []byte) {
 	c.write(ctx, frame)
 }
 
-// write puts one frame on the socket, reporting whether it worked. Every
-// write is bounded: a client that stops reading must not wedge the
-// goroutine writing to it.
+// write puts one frame on the socket under a deadline of its own,
+// reporting whether it worked. A client that stops reading must not wedge
+// the goroutine writing to it.
 func (c *conn) write(ctx context.Context, frame []byte) bool {
 	wctx, cancel := context.WithTimeout(ctx, c.app.cfg.WriteTimeout.Duration())
 	defer cancel()
+	return c.writeTo(wctx, frame)
+}
 
-	if err := c.ws.Write(wctx, c.msgType(), frame); err != nil {
+// writeBatch writes a wakeup's worth of frames under ONE deadline.
+//
+// One deadline per batch rather than one per frame, because a deadline
+// costs a context, a timer and three allocations, and a broadcast pays for
+// it once per member. Measured with cmd/loadgen at 49k deliveries a second
+// on a room of 500: building one per frame was 9% of the server's CPU and
+// 99% of everything it allocated — about 740 bytes of garbage per delivered
+// message, none of which was the message. See state/loadgen.md.
+//
+// It bounds a wakeup rather than a write, which is the stricter of the two
+// where it matters. A batch of sixteen frames used to be allowed sixteen
+// times WriteTimeout to drain; now the whole batch gets one, so a client
+// that reads just fast enough to keep restarting the clock no longer holds
+// its pump indefinitely.
+func (c *conn) writeBatch(ctx context.Context, frames [][]byte) bool {
+	if len(frames) == 0 {
+		return true
+	}
+
+	wctx, cancel := context.WithTimeout(ctx, c.app.cfg.WriteTimeout.Duration())
+	defer cancel()
+
+	for _, frame := range frames {
+		if !c.writeTo(wctx, frame) {
+			return false
+		}
+	}
+	return true
+}
+
+// writeTo puts one frame on the socket under a deadline somebody else set.
+func (c *conn) writeTo(ctx context.Context, frame []byte) bool {
+	if err := c.ws.Write(ctx, c.msgType(), frame); err != nil {
 		c.log.Debug("write failed", "err", err)
 		c.ws.CloseNow() // unblocks the read pump
 		return false
