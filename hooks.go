@@ -77,6 +77,47 @@ func (a *app) identify(ctx context.Context, r *http.Request) (hook.Identity, err
 	return id, nil
 }
 
+// resolve finds who a command is about.
+//
+// A connected person is resolved from the connection directory, which is
+// authoritative for anybody here: it has the identity the connection is
+// actually running as, and the connection itself for anything that has to
+// be enforced on it. Anybody else is looked up through the Directory hook,
+// which is what lets a command name somebody who has left.
+//
+// The returned conn is nil when the target is not connected, which every
+// caller has to handle — that is the whole point of the lookup succeeding
+// anyway.
+func (a *app) resolve(ctx context.Context, nick string) (*conn, hook.Identity, bool) {
+	if target, ok := a.lookup(nick); ok {
+		return target, target.id, true
+	}
+	if a.hooks.Directory == nil {
+		return nil, hook.Identity{}, false
+	}
+
+	id, err := a.hooks.Directory.Resolve(ctx, nick)
+	switch {
+	case errors.Is(err, hook.ErrNoChatter):
+		return nil, hook.Identity{}, false
+	case err != nil:
+		// A broken directory must not become a moderator quietly acting on
+		// the wrong person, so an error is a miss rather than a guess.
+		a.log.Error("cannot resolve a nick", "nick", nick, "err", err)
+		return nil, hook.Identity{}, false
+	}
+
+	// A directory that hands back nothing to file an action under is no
+	// better than one that said it did not know the name.
+	if id.Key() == "nick:" {
+		return nil, hook.Identity{}, false
+	}
+	if id.Nick == "" {
+		id.Nick = nick
+	}
+	return nil, id, true
+}
+
 // clientLimiter builds the rate limiter for one connection, and returns the
 // function that hands it back.
 //

@@ -221,10 +221,29 @@ type Request interface {
 	RemoteAddr() string
 }
 
-// Directory supplies what is known about a person: display name, roles,
-// whatever else. Called once per connection, after Authenticate.
+// Directory answers questions about people: what is known about an id, and
+// which id a display name belongs to.
 type Directory interface {
+	// Chatter supplies what is known about somebody — display name, roles,
+	// whatever else. Called once per connection, after Authenticate.
 	Chatter(ctx context.Context, id string) (Chatter, error)
+
+	// Resolve turns a display name into the identity behind it, for
+	// commands that name somebody who is not connected.
+	//
+	// It is what makes moderation work on people who have left. Without it
+	// the server can only act on names it can see on a live connection, so
+	// somebody who says something and disconnects is out of reach, and a
+	// ban cannot be lifted because the person it barred is by definition
+	// not here.
+	//
+	// Return ErrNoChatter for a name you do not recognise — including if
+	// you would simply rather not answer, in which case moderation goes
+	// back to being limited to who is connected.
+	//
+	// It runs on the moderator's read pump, in front of a command that is
+	// rare, so it may take a moment. It must not take forever.
+	Resolve(ctx context.Context, nick string) (Identity, error)
 }
 
 // Filter decides whether a message may be sent. It is the seam for

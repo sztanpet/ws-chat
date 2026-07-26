@@ -342,6 +342,14 @@ func modApp(t *testing.T, hooks hook.Hooks, tweak ...func(*config.Config)) (*tes
 		"admin": {ID: "u4", Nick: "anadmin", Roles: []string{"admin"}},
 	}}
 	hooks.Authz = fakeAuthz{}
+	if hooks.Directory == nil {
+		hooks.Directory = fakeDirectory{
+			"u1": {Nick: "themod", Roles: []string{"mod"}},
+			"u2": {Nick: "auser"},
+			"u3": {Nick: "alatecomer"},
+			"u4": {Nick: "anadmin", Roles: []string{"admin"}},
+		}
+	}
 
 	ta := newTestAppWith(t, hooks, tweak...)
 	mod, err := ta.dialWith(t, "?token=mod")
@@ -538,7 +546,10 @@ func TestServerWideBanDisconnectsAndRefusesReconnection(t *testing.T) {
 	}
 }
 
-func TestUnbanNamesSomebodyWhoIsGone(t *testing.T) {
+// Unbanning names somebody who is by definition not connected, which is
+// the case that could not work at all before the directory could resolve a
+// name.
+func TestUnbanSomebodyWhoIsGone(t *testing.T) {
 	ta, _, user := modApp(t, hook.Hooks{})
 
 	admin, err := ta.dialWith(t, "?token=admin")
@@ -550,11 +561,103 @@ func TestUnbanNamesSomebodyWhoIsGone(t *testing.T) {
 	admin.expectMod(proto.ActionBan, "auser")
 	user.expectClosed()
 
-	// Unbanning names somebody who is no longer connected, which the
-	// server cannot resolve — the limitation is real and worth pinning
-	// down in a test rather than discovering later.
+	if _, err = ta.dialWith(t, "?token=user"); err == nil {
+		t.Fatal("a banned user reconnected")
+	}
+
 	admin.send(proto.Command{Verb: proto.VerbUnban, Nick: "auser"})
-	admin.expectErr(proto.ErrNoSuch)
+
+	// And they can come back, which is the whole point of being able to
+	// lift a ban.
+	back, err := ta.dialWith(t, "?token=user")
+	if err != nil {
+		t.Fatalf("an unbanned user still cannot connect: %v", err)
+	}
+	back.send(proto.Command{Verb: proto.VerbMsg, Data: "back again"})
+	back.expectMsg("auser", "back again")
+}
+
+// Without a directory the server can still only act on who it can see,
+// which is the behaviour a deployment that installs nothing gets.
+func TestModerationWithoutADirectoryIsLimitedToTheConnected(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Auth: fakeAuth{byToken: map[string]hook.Identity{
+			"mod": {ID: "u1", Nick: "themod", Roles: []string{"mod"}},
+		}},
+		Authz: fakeAuthz{},
+	})
+
+	mod, err := ta.dialWith(t, "?token=mod")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "someonewhoisgone", Channel: "main"})
+	mod.expectErr(proto.ErrNoSuch)
+}
+
+// Somebody who says something and disconnects is no longer out of reach.
+func TestModerationOfSomebodyWhoLeft(t *testing.T) {
+	ta, mod, user := modApp(t, hook.Hooks{})
+
+	user.send(proto.Command{Verb: proto.VerbMsg, Data: "and goodbye"})
+	mod.expectMsg("auser", "and goodbye")
+	user.expectMsg("auser", "and goodbye")
+	user.ws.CloseNow()
+	mod.expectPart("main", "auser")
+
+	// Muted after leaving. The room is told, because the room is where the
+	// thing that earned it happened.
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
+	m := mod.expectMod(proto.ActionMute, "auser")
+	if m.Nick != "auser" {
+		t.Fatalf("the action names %q", m.Nick)
+	}
+
+	// And it is waiting for them when they come back.
+	back, err := ta.dialWith(t, "?token=user")
+	if err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	back.send(proto.Command{Verb: proto.VerbMsg, Data: "am i still muted"})
+	back.expectErr(proto.ErrMuted)
+}
+
+// The action is filed against the resolved identity, not the name, so it
+// still applies when they reconnect under the same account.
+func TestOfflineModerationUsesTheStableIdentity(t *testing.T) {
+	store := newFakeSanctions()
+	ta, mod, user := modApp(t, hook.Hooks{Sanctions: store})
+
+	user.ws.CloseNow()
+	mod.expectPart("main", "auser")
+
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
+	mod.expectMod(proto.ActionMute, "auser")
+
+	select {
+	case m := <-store.recorded:
+		if m.Key != "id:u2" {
+			t.Fatalf("filed under %q, want the stable id:u2", m.Key)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the action was never persisted")
+	}
+
+	back, err := ta.dialWith(t, "?token=user")
+	if err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	back.send(proto.Command{Verb: proto.VerbMsg, Data: "hello again"})
+	back.expectErr(proto.ErrMuted)
+}
+
+// A directory that does not know the name is a miss, not a guess.
+func TestUnknownNickIsStillRefused(t *testing.T) {
+	_, mod, _ := modApp(t, hook.Hooks{})
+
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "neverheardofthem", Channel: "main"})
+	mod.expectErr(proto.ErrNoSuch)
 }
 
 func TestModerationIsRecorded(t *testing.T) {

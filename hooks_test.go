@@ -34,6 +34,8 @@ func (f fakeAuth) Authenticate(ctx context.Context, r hook.Request) (hook.Identi
 	return id, nil
 }
 
+// fakeDirectory knows a set of people by their stable id, and can find
+// them by name the way a real one would — the same table read two ways.
 type fakeDirectory map[string]hook.Chatter
 
 func (f fakeDirectory) Chatter(ctx context.Context, id string) (hook.Chatter, error) {
@@ -42,6 +44,15 @@ func (f fakeDirectory) Chatter(ctx context.Context, id string) (hook.Chatter, er
 		return hook.Chatter{}, hook.ErrNoChatter
 	}
 	return c, nil
+}
+
+func (f fakeDirectory) Resolve(ctx context.Context, nick string) (hook.Identity, error) {
+	for id, c := range f {
+		if c.Nick == nick {
+			return hook.Identity{ID: id, Nick: c.Nick, Roles: c.Roles, Attrs: c.Attrs}, nil
+		}
+	}
+	return hook.Identity{}, hook.ErrNoChatter
 }
 
 type fakeFilter struct {

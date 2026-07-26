@@ -59,16 +59,20 @@ func (c *conn) handleMod(ctx context.Context, cmd proto.Command) {
 		return
 	}
 
-	// Moderation names a person, and the only people the server knows about
-	// are the ones connected. Acting on somebody who has already left needs
-	// the directory to resolve a name to a key, which is a hook away and
-	// noted in state/server.md.
-	target, ok := c.app.lookup(cmd.Nick)
+	// Moderation names a person, connected or not. The connection
+	// directory answers for anybody here; the Directory hook answers for
+	// everybody else, which is what makes a ban liftable — the person it
+	// barred is by definition not connected.
+	//
+	// target is nil when they are not here. Everything below has to cope
+	// with that: there is nobody to remove from a channel and, for a
+	// server-wide action, no room to announce it in.
+	target, id, ok := c.app.resolve(ctx, cmd.Nick)
 	if !ok {
 		c.reply(ctx, proto.ErrNoSuch)
 		return
 	}
-	key := target.id.Key()
+	key := id.Key()
 
 	var action string
 	switch cmd.Verb {
@@ -98,7 +102,7 @@ func (c *conn) handleMod(ctx context.Context, cmd proto.Command) {
 	// directly as well, and would then arrive twice for anybody whose pump
 	// had already drained it. Removing first means one copy of everything:
 	// the room sees PART then MOD, and so does the person it happened to.
-	if action == proto.ActionBan && scope != moderation.Global {
+	if action == proto.ActionBan && scope != moderation.Global && target != nil {
 		target.part(ctx, scope)
 	}
 
@@ -112,7 +116,7 @@ func (c *conn) handleMod(ctx context.Context, cmd proto.Command) {
 		Until:     millis(until),
 		Reason:    cmd.Reason,
 	}
-	id, err := c.app.announceModeration(target, scope, mod)
+	announced, err := c.app.announceModeration(target, scope, mod)
 	if err != nil {
 		c.log.Error("cannot encode moderation action", "action", action, "err", err)
 		c.reply(ctx, proto.ErrProtocol)
@@ -120,7 +124,7 @@ func (c *conn) handleMod(ctx context.Context, cmd proto.Command) {
 	}
 
 	c.app.recordSanction(hook.Moderation{
-		ID:     id,
+		ID:     announced,
 		Action: action,
 		Scope:  scope,
 		By:     c.id,
@@ -131,8 +135,8 @@ func (c *conn) handleMod(ctx context.Context, cmd proto.Command) {
 		At:     at,
 	})
 
-	if action == proto.ActionBan {
-		mod.ID, mod.Channel = id, scope
+	if action == proto.ActionBan && target != nil {
+		mod.ID, mod.Channel = announced, scope
 		c.app.enforceBan(ctx, target, scope, mod)
 	}
 
@@ -163,10 +167,12 @@ func (a *app) enforceBan(ctx context.Context, target *conn, scope modScope, mod 
 
 // announceModeration puts a MOD frame where the people who need it are.
 //
-// A channel action is announced in that channel. A server-wide one is
-// announced in every channel the target is in, because that is where the
-// people who saw what they did are, and a room told nothing has to guess
-// why somebody went quiet.
+// A channel action is announced in that channel, whether or not the person
+// it names is connected — the room is entitled to know somebody was banned
+// from it after they left. A server-wide one is announced in every channel
+// the target is in, because that is where the people who saw what they did
+// are; if they are not connected there is nowhere to announce it, and the
+// action is recorded and applies the moment they come back.
 func (a *app) announceModeration(target *conn, scope modScope, mod proto.Mod) (uint64, error) {
 	var channels []*channel
 
@@ -179,7 +185,7 @@ func (a *app) announceModeration(target *conn, scope modScope, mod proto.Mod) (u
 			return a.seq.Add(1), nil
 		}
 		channels = []*channel{ch}
-	} else {
+	} else if target != nil {
 		target.membersMu.RLock()
 		for _, m := range target.memberships {
 			channels = append(channels, m.ch)

@@ -213,10 +213,15 @@ persisted.
   401 rather than a socket that opens and shuts. It sees a narrow
   `hook.Request`, not the `*http.Request`, so it cannot hijack the
   connection.
-- **`Directory`** supplies chatter data (display name, roles, attrs) for
-  an authenticated id. Also once per connection. A miss (`ErrNoChatter`)
-  or a failure is not fatal — a broken directory must not cost somebody
-  their login.
+- **`Directory`** answers questions about people, two ways round.
+  `Chatter` supplies display name, roles and attrs for an authenticated id,
+  once per connection; a miss (`ErrNoChatter`) or a failure is not fatal,
+  because a broken directory must not cost somebody their login.
+  `Resolve` turns a display name into the identity behind it, which is what
+  lets moderation name somebody who is **not connected** — otherwise a ban
+  cannot be lifted, since the person it barred is by definition not here.
+  A deployment that would rather not answer returns `ErrNoChatter` and
+  moderation goes back to being limited to who is online.
 - **`Filter`** decides whether a message may be sent. On the hot path, in
   front of every message, so it must be a lookup and not a round trip.
   Its refusal reason becomes the `ERR` code verbatim. It runs *last*, in a
@@ -349,6 +354,14 @@ What each scope means where:
 
 `Authorizer.CanModerate` is asked **per scope**, so running one room is
 not the same permission as acting across the server.
+
+**A command can name somebody who is not connected.** The connection
+directory answers for anybody here — it has the identity the connection is
+running as, and the connection itself for anything to be enforced on — and
+`Directory.Resolve` answers for everybody else. An action is filed against
+the resolved `Identity.Key()`, so it still applies when they come back. An
+error from `Resolve` is a miss rather than a guess: a broken directory must
+not turn into a moderator quietly acting on the wrong person.
 
 A channel ban removes the target **before** announcing. Announcing first
 would put the frame in the ring while the target's subscription is being

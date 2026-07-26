@@ -154,6 +154,12 @@ extension points, and a single-channel WebSocket chat server.
   keeps it to one copy of each frame. The other order needs a direct send
   as well and then duplicates for anybody whose pump had already drained
   the broadcast.
+- **Moderation can name somebody who is not connected**, through
+  `Directory.Resolve`. The connection directory is authoritative for
+  anybody online; the hook answers for everybody else. Without a Directory
+  it falls back to online-only, which is what a server with no hooks gets.
+- **A `Resolve` error is a miss, not a guess.** A broken directory must not
+  become a moderator acting on the wrong person.
 - **Moderation state persists through the `Sanctions` hook**, separate
   from `Recorder`: a mute is not a log line, it is state the server needs
   back. `Record` is async on the shared queue; `Active` runs once at
@@ -192,17 +198,12 @@ extension points, and a single-channel WebSocket chat server.
    twice.** The server subscribes first on purpose — the other order loses
    the message instead, and a duplicate a client drops by id beats a gap it
    cannot see. The protocol documents the client-side rule.
-8. **Moderation can only name somebody who is connected.** `lookup` is by
-   nick over the connection directory, so unbanning a banned user fails
-   with `nosuchnick` — they were disconnected by the ban. There is a test
-   pinning that down as known behaviour rather than a surprise.
+8. **A moderation target may be offline, so `target *conn` can be nil.**
+   Everything after the lookup has to cope: there is nobody to part from a
+   channel, and a server-wide action has no room to be announced in.
 
 ## Pending
 
-- **Resolving a nick to a key without a connection.** Moderation, and
-  especially *un*-moderation, needs to name somebody who is not connected.
-  That wants a `Directory` lookup by nick, which the interface does not
-  have yet.
 - **Nothing sweeps on a timer except the janitor**, which runs once a
   minute. Expired mutes and unreferenced limiters therefore linger for up
   to that long; every read already treats them as absent, so this is
