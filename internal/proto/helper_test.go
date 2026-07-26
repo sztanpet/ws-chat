@@ -7,18 +7,19 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// mustMarshal encodes a value the way a client speaking this codec would.
-// It is not Codec.Encode, which only takes outbound frames.
+// marshalAs encodes a value the way a client speaking this codec would. It
+// is not Codec.Encode, which only takes outbound frames.
+func marshalAs(c Codec, v any) ([]byte, error) {
+	if c.Binary() {
+		return msgpack.Marshal(v)
+	}
+	return json.Marshal(v)
+}
+
 func mustMarshal(t *testing.T, c Codec, v any) []byte {
 	t.Helper()
 
-	var frame []byte
-	var err error
-	if c.Binary() {
-		frame, err = msgpack.Marshal(v)
-	} else {
-		frame, err = json.Marshal(v)
-	}
+	frame, err := marshalAs(c, v)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

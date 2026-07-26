@@ -17,6 +17,17 @@
 // It removes the framing code entirely as a side benefit. Both codecs are
 // now their encoder's Marshal and Unmarshal and nothing else — no
 // splitting, no length prefix, no bare-verb special case.
+//
+// # A note on the tags
+//
+// Optional scalars are tagged "omitzero", not "omitempty". Under
+// encoding/json/v2 the two are not the same thing: "omitempty" is defined
+// in terms of the JSON type system and omits a field only when it would
+// encode as null, an empty string, an empty object or an empty array — so
+// a false bool and a zero number are written out. "omitzero" is defined in
+// terms of the Go type system and omits the zero value, which is what the
+// wire format has always done and what clients parse. Strings, slices and
+// maps mean the same thing under either, and keep "omitempty".
 package proto
 
 import "errors"
@@ -169,7 +180,7 @@ type Priv struct {
 	Nick      string `json:"nick" msgpack:"nick"`
 	Data      string `json:"data" msgpack:"data"`
 	Timestamp int64  `json:"timestamp" msgpack:"timestamp"`
-	Sent      bool   `json:"sent,omitempty" msgpack:"sent,omitempty"`
+	Sent      bool   `json:"sent,omitzero" msgpack:"sent,omitempty"`
 
 	// Roles and Attrs describe the other party, the same way Msg carries
 	// them for the sender.
@@ -306,7 +317,7 @@ type Mod struct {
 
 	// Until is when the action expires, in unix milliseconds. Zero means it
 	// does not.
-	Until  int64  `json:"until,omitempty" msgpack:"until,omitempty"`
+	Until  int64  `json:"until,omitzero" msgpack:"until,omitempty"`
 	Reason string `json:"reason,omitempty" msgpack:"reason,omitempty"`
 }
 
