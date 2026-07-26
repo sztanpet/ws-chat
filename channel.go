@@ -91,7 +91,7 @@ func (a *app) channelFor(ctx context.Context, name string) (*channel, bool) {
 		members: make(map[string]*conn),
 	}
 	for _, codec := range proto.Codecs() {
-		ch.bcs[codec.Name()] = broadcast.NewRing(a.cfg.Capacity)
+		ch.bcs[codec.Name()] = broadcast.NewSeqRing(a.cfg.Capacity)
 	}
 	a.channels[name] = ch
 	a.metrics.channelsTotal.Inc()
