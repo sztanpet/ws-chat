@@ -426,6 +426,12 @@ func (c *conn) handlePriv(ctx context.Context, cmd proto.Command) {
 		return
 	}
 
+	// Counted here rather than at the end, because the message has been
+	// delivered here and the echo below is a blocking socket write. A
+	// counter that lands after it can be scraped by somebody who is already
+	// holding the message, which makes the metric look like it lost one.
+	c.app.metrics.privateTotal.Inc()
+
 	// The sender's echo names the recipient, so a client can render both
 	// halves of a conversation from the same frame type.
 	echo, err := c.codec.Encode(proto.NewPriv(proto.Priv{
@@ -440,7 +446,6 @@ func (c *conn) handlePriv(ctx context.Context, cmd proto.Command) {
 
 	// Recorded after delivery, like everything else. Both identities are
 	// passed on: a store wants stable ids, not display names.
-	c.app.metrics.privateTotal.Inc()
 	c.app.recordPrivate(hook.Private{
 		ID: id, From: c.id, To: target.id, Data: cmd.Data, At: at,
 	})
