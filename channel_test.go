@@ -19,48 +19,67 @@ import (
 func (c *client) expectJoined(channel string) proto.Backlog {
 	c.t.Helper()
 
-	verb, payload := c.recv()
-	if verb != proto.VerbBacklog {
-		c.t.Fatalf("got %s %s, want %s first", verb, payload, proto.VerbBacklog)
-	}
 	var backlog proto.Backlog
-	c.decode(payload, &backlog)
-	if backlog.Channel != channel {
-		c.t.Fatalf("BACKLOG channel = %q, want %q", backlog.Channel, channel)
+	for {
+		verb, payload := c.recv()
+		if verb == proto.VerbBacklog {
+			c.decode(payload, &backlog)
+			if backlog.Channel != channel {
+				c.t.Fatalf("BACKLOG channel = %q, want %q", backlog.Channel, channel)
+			}
+			break
+		}
+		// Somebody else arriving or leaving is not what this is about.
+		if verb != proto.VerbJoin && verb != proto.VerbPart {
+			c.t.Fatalf("got %s %s, want %s first", verb, payload, proto.VerbBacklog)
+		}
 	}
 
 	c.expectJoin(channel, c.nick)
 	return backlog
 }
 
-// expectJoin reads one frame and requires it to be somebody joining.
+// expectJoin waits for a particular person to arrive in a particular
+// channel, stepping over presence for anybody else.
+//
+// Skipping rather than asserting on the exact next frame, because a test
+// about one thing should not fail because a third client happened to
+// connect. The presence tests assert on what they are about and let the
+// rest through.
 func (c *client) expectJoin(channel, nick string) proto.Join {
 	c.t.Helper()
-	verb, payload := c.recv()
-	if verb != proto.VerbJoin {
-		c.t.Fatalf("got %s %s, want %s", verb, payload, proto.VerbJoin)
+	for {
+		verb, payload := c.recv()
+		if verb == proto.VerbJoin {
+			var join proto.Join
+			c.decode(payload, &join)
+			if join.Channel == channel && (nick == "" || join.Nick == nick) {
+				return join
+			}
+			continue
+		}
+		if verb != proto.VerbPart {
+			c.t.Fatalf("got %s %s, want a JOIN for %s/%s", verb, payload, channel, nick)
+		}
 	}
-	var join proto.Join
-	c.decode(payload, &join)
-	if join.Channel != channel {
-		c.t.Fatalf("JOIN channel = %q, want %q", join.Channel, channel)
-	}
-	if nick != "" && join.Nick != nick {
-		c.t.Fatalf("JOIN nick = %q, want %q", join.Nick, nick)
-	}
-	return join
 }
 
+// expectPart waits for a particular person to leave a particular channel.
 func (c *client) expectPart(channel, nick string) {
 	c.t.Helper()
-	verb, payload := c.recv()
-	if verb != proto.VerbPart {
-		c.t.Fatalf("got %s %s, want %s", verb, payload, proto.VerbPart)
-	}
-	var part proto.Part
-	c.decode(payload, &part)
-	if part.Channel != channel || part.Nick != nick {
-		c.t.Fatalf("PART %s/%s, want %s/%s", part.Channel, part.Nick, channel, nick)
+	for {
+		verb, payload := c.recv()
+		if verb == proto.VerbPart {
+			var part proto.Part
+			c.decode(payload, &part)
+			if part.Channel == channel && part.Nick == nick {
+				return
+			}
+			continue
+		}
+		if verb != proto.VerbJoin {
+			c.t.Fatalf("got %s %s, want a PART for %s/%s", verb, payload, channel, nick)
+		}
 	}
 }
 

@@ -204,13 +204,14 @@ func NewReady(nick string) Ready { return Ready{Verb: VerbReady, Nick: nick} }
 // can then tell "here is what you missed" from "this just happened" without
 // a per-message flag, and render the block in one pass.
 //
-// A client MUST ignore a live message whose id it already has from the
-// backlog. The server subscribes a connection to the channel before it
-// reads the history, so a message sent in between arrives twice: once in
-// the backlog and once live. Doing it the other way round would lose that
+// A client MUST ignore anything whose id it has already seen. It is a
+// general rule, not one about the backlog, though the backlog is where it
+// bites first: the server subscribes a connection to the channel before it
+// reads the history, so a message sent in between arrives twice, once in
+// the backlog and once live. Doing that the other way round would lose the
 // message instead, and a duplicate a client can drop by id is strictly
-// better than a gap it cannot detect at all. Ids are monotonic, so the
-// check is a comparison against the last id in the backlog.
+// better than a gap it cannot detect at all.
+
 type Backlog struct {
 	Verb     string `json:"verb" msgpack:"verb"`
 	Channel  string `json:"channel" msgpack:"channel"`
@@ -283,8 +284,20 @@ func NewNames(channel string, nicks []string, total int) Names {
 // happens invisibly gets re-litigated in the channel by people guessing at
 // what happened.
 type Mod struct {
-	Verb      string `json:"verb" msgpack:"verb"`
-	Channel   string `json:"channel" msgpack:"channel"`
+	Verb string `json:"verb" msgpack:"verb"`
+
+	// Channel is where this announcement was made. Scope is what the action
+	// covers: the same channel for a channel action, empty for one that
+	// applies server-wide.
+	//
+	// Two fields rather than one because they answer different questions. A
+	// server-wide mute is announced in every channel the person is in, so
+	// Channel differs per copy while Scope stays empty — and a client
+	// rendering "muted here" against "muted everywhere" needs to be able to
+	// tell them apart.
+	Channel string `json:"channel" msgpack:"channel"`
+	Scope   string `json:"scope,omitempty" msgpack:"scope,omitempty"`
+
 	ID        uint64 `json:"id" msgpack:"id"`
 	Action    string `json:"action" msgpack:"action"`
 	Nick      string `json:"nick" msgpack:"nick"`

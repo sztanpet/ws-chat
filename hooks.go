@@ -194,14 +194,14 @@ func (a *app) allow(ctx context.Context, from hook.Identity, data string) (bool,
 	return a.filters.Allow(ctx, from, data)
 }
 
-// canModerate reports whether this identity may use the moderation
-// commands. The default is DENY: a server that has not been told who its
-// moderators are does not have any.
-func (a *app) canModerate(ctx context.Context, id hook.Identity) bool {
+// canModerate reports whether this identity may moderate in a scope — a
+// channel name, or empty for server-wide. The default is DENY: a server
+// that has not been told who its moderators are does not have any.
+func (a *app) canModerate(ctx context.Context, id hook.Identity, scope string) bool {
 	if a.hooks.Authz == nil {
 		return false
 	}
-	return a.hooks.Authz.CanModerate(ctx, id)
+	return a.hooks.Authz.CanModerate(ctx, id, scope)
 }
 
 // autojoin is where a connection starts. No Channels hook, or one with no

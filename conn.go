@@ -11,6 +11,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/sztanpet/ws-chat/internal/hook"
+	"github.com/sztanpet/ws-chat/internal/moderation"
 	"github.com/sztanpet/ws-chat/internal/proto"
 	"github.com/sztanpet/ws-chat/internal/ratelimit"
 )
@@ -178,6 +179,11 @@ func (c *conn) serve(parent context.Context) {
 	// then a JOIN and a BACKLOG for each channel it landed in.
 	for _, name := range c.app.autojoin(ctx, c.id) {
 		if code := c.join(ctx, name, true); code != "" {
+			// Told, not just logged. A client that was put somewhere by the
+			// server and silently was not would spend the connection
+			// wondering why the room is empty; an ERR names the reason it
+			// is not there.
+			c.reply(ctx, code)
 			c.log.Warn("autojoin refused", "channel", name, "code", code)
 		}
 	}
@@ -326,7 +332,7 @@ func (c *conn) handleMsg(ctx context.Context, cmd proto.Command) {
 		c.reply(ctx, proto.ErrChanThrottled)
 		return
 	}
-	if muted, _ := c.app.mod.Muted(c.id.Key()); muted {
+	if muted, _ := c.app.mod.Muted(name, c.id.Key()); muted {
 		c.reply(ctx, proto.ErrMuted)
 		return
 	}
@@ -373,9 +379,11 @@ func (c *conn) handlePriv(ctx context.Context, cmd proto.Command) {
 		c.reply(ctx, proto.ErrThrottled)
 		return
 	}
-	// A mute is a mute: somebody silenced in the room does not get to
-	// carry on in private.
-	if muted, _ := c.app.mod.Muted(c.id.Key()); muted {
+	// Only a SERVER-WIDE mute reaches private messages. Being silenced in
+	// one room is about that room; it is not a statement that somebody may
+	// not talk to anybody at all, and treating it as one would make a
+	// channel mute a bigger punishment than the moderator asked for.
+	if muted, _ := c.app.mod.Muted(moderation.Global, c.id.Key()); muted {
 		c.reply(ctx, proto.ErrMuted)
 		return
 	}

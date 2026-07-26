@@ -141,41 +141,55 @@ extension points, and a single-channel WebSocket chat server.
 - **Empty channels are reclaimed and it costs nothing**: the ring holds
   frames for subscribers that no longer exist, and the backlog is in the
   History hook.
-- **Moderation is announced in every channel the target is in**, because
-  that is where the people who saw what they did are.
+- **Moderation is scoped by the command's channel**: named acts there,
+  empty acts server-wide. A lookup checks the channel then the global
+  entry. A channel action is announced in that channel; a server-wide one
+  in every channel the target is in.
+- **A channel mute does not block private messages**; only a server-wide
+  one does. Silencing somebody in a room is not a statement that they may
+  not talk to anybody.
+- **`CanModerate` is asked per scope**, so running a room is not
+  permission to act across the server.
+- **A channel ban removes the target before announcing**, which is what
+  keeps it to one copy of each frame. The other order needs a direct send
+  as well and then duplicates for anybody whose pump had already drained
+  the broadcast.
+- **A refused autojoin sends the client an ERR**, rather than leaving it
+  to wonder why the room it was put in is empty.
 
 ## Gotchas
 
 1. **`net/http`'s `Shutdown` ignores hijacked connections**, and every
    WebSocket is one. Ending them is entirely the server's own doing.
-2. **Cancelling a read context cannot be how a connection is closed
+2. **Only the ordering WITHIN a channel is guaranteed on join.** Its
+   backlog is written directly while its JOIN comes through its pump, so
+   with two channels the second backlog can overtake the first join. The
+   test harness counts outcomes rather than assuming an order.
+3. **Cancelling a read context cannot be how a connection is closed
    politely.** A cancelled read leaves the stream at an unknown offset, so
    the library drops the socket without a close frame, and a client cannot
    tell that from a network failure. The goodbye has to go out first —
    `app.close()` does them in that order.
-3. **Both pumps need telling separately**: the read pumps by cancelling
+4. **Both pumps need telling separately**: the read pumps by cancelling
    their context, the write pumps by ending the subscription they are
    parked in.
-4. A **test that dials and immediately sends** is racing the server's
+5. A **test that dials and immediately sends** is racing the server's
    setup. Wait for `READY`; the harness does.
-5. **A test client that connects after any message now gets a `BACKLOG`
+6. **A test client that connects after any message now gets a `BACKLOG`
    frame**, which the harness consumes. Tests that dial into a server with
    history and then read a frame will see the backlog first if they do
    their own dialling.
-6. **A message sent between subscribe and the backlog read arrives
+7. **A message sent between subscribe and the backlog read arrives
    twice.** The server subscribes first on purpose — the other order loses
    the message instead, and a duplicate a client drops by id beats a gap it
    cannot see. The protocol documents the client-side rule.
-7. **Moderation can only name somebody who is connected.** `lookup` is by
+8. **Moderation can only name somebody who is connected.** `lookup` is by
    nick over the connection directory, so unbanning a banned user fails
    with `nosuchnick` — they were disconnected by the ban. There is a test
    pinning that down as known behaviour rather than a surprise.
 
 ## Pending
 
-- **Channel-scoped moderation.** Mutes and bans are server-wide; muting
-  somebody in one room silences them everywhere. Per-channel moderation
-  wants the store keyed by (channel, identity).
 - **Resolving a nick to a key without a connection.** Moderation, and
   especially *un*-moderation, needs to name somebody who is not connected.
   That wants a `Directory` lookup by nick, which the interface does not

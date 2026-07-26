@@ -125,18 +125,25 @@ func (ta *testApp) dialCodec(t *testing.T, codec proto.Codec) *client {
 func (c *client) settle(ta *testApp) {
 	c.t.Helper()
 
-	joins := len(ta.app.autojoin(context.Background(), hook.Identity{}))
-	if ta.cfg.Backlog > 0 {
-		joins *= 2 // a BACKLOG follows each JOIN
-	}
-
-	for range joins {
+	// Each channel the server tried to put it in produces exactly one
+	// outcome — a JOIN, or an ERR saying why not — with a BACKLOG along the
+	// way if the backlog is on.
+	//
+	// Counted rather than read in a fixed order, because only the ordering
+	// WITHIN a channel is guaranteed. Its backlog is written directly while
+	// its JOIN comes through its pump, so with two channels the second
+	// backlog can overtake the first join.
+	outcomes := 0
+	for want := len(ta.app.autojoin(context.Background(), hook.Identity{})); outcomes < want; {
 		verb, payload := c.recv()
 		switch verb {
+		case proto.VerbErr:
+			outcomes++ // refused; that channel produces nothing else
 		case proto.VerbJoin:
 			var join proto.Join
 			c.decode(payload, &join)
 			c.joined = append(c.joined, join.Channel)
+			outcomes++
 		case proto.VerbBacklog:
 			var backlog proto.Backlog
 			c.decode(payload, &backlog)

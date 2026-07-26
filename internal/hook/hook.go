@@ -237,6 +237,7 @@ type Filter interface {
 type Moderation struct {
 	ID     uint64
 	Action string // one of proto's Action constants
+	Scope  string // the channel it applies to, or empty for server-wide
 	By     Identity
 	Target string // the nick the action names
 	Key    string // the Identity.Key the action is filed under
@@ -308,7 +309,7 @@ type Recorder interface {
 	Moderation(ctx context.Context, m Moderation) error
 }
 
-// Authorizer decides who may use the moderation commands.
+// Authorizer decides who may use the moderation commands, and where.
 //
 // Unlike every other hook, its default is DENY. The rest of them default to
 // permissive because the cost of being wrong is a server that does less
@@ -319,8 +320,14 @@ type Recorder interface {
 //
 // Roles are opaque to the core, so this is the only place that can say
 // whether "moderator" in an Identity means anything.
+//
+// The channel is the SCOPE of the action being attempted: a channel name,
+// or empty for one that would apply server-wide. They are separate
+// questions and an implementation should treat them as such — somebody
+// running one room is not somebody who can silence a person everywhere,
+// and answering only the first question is the common case.
 type Authorizer interface {
-	CanModerate(ctx context.Context, id Identity) bool
+	CanModerate(ctx context.Context, id Identity, channel string) bool
 }
 
 // Hooks is every extension point, bundled. Nil fields are simply not

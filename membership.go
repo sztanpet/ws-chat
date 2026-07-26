@@ -49,6 +49,15 @@ func (c *conn) join(ctx context.Context, name string, force bool) string {
 	}
 	c.membersMu.Unlock()
 
+	// A channel ban is enforced here rather than at connect: it bars
+	// somebody from one room, not from the server, so the connection is
+	// fine and the join is not. Checked even for an autojoin — a layer
+	// putting somebody somewhere does not overrule a moderator who threw
+	// them out of it.
+	if banned, _ := c.app.mod.Banned(name, c.id.Key()); banned {
+		return proto.ErrBanned
+	}
+
 	if !force {
 		if ok, reason := c.app.canJoin(ctx, c.id, name); !ok {
 			if reason == "" {

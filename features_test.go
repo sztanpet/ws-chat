@@ -318,10 +318,17 @@ func TestFiltersApplyToPrivateMessages(t *testing.T) {
 
 // --- moderation -------------------------------------------------------
 
-// canModerate returns true for identities carrying the "mod" role.
+// fakeAuthz answers per scope: the "mod" role runs a channel, and only
+// "admin" may act server-wide. Keeping those separate is the point of the
+// scope being passed in.
 type fakeAuthz struct{}
 
-func (fakeAuthz) CanModerate(ctx context.Context, id hook.Identity) bool { return id.Has("mod") }
+func (fakeAuthz) CanModerate(ctx context.Context, id hook.Identity, channel string) bool {
+	if channel == "" {
+		return id.Has("admin")
+	}
+	return id.Has("mod") || id.Has("admin")
+}
 
 // modApp builds a server with a moderator, a normal user, and moderation
 // authorization wired up.
@@ -332,6 +339,7 @@ func modApp(t *testing.T, hooks hook.Hooks, tweak ...func(*config.Config)) (*tes
 		"mod":   {ID: "u1", Nick: "themod", Roles: []string{"mod"}},
 		"user":  {ID: "u2", Nick: "auser"},
 		"later": {ID: "u3", Nick: "alatecomer"},
+		"admin": {ID: "u4", Nick: "anadmin", Roles: []string{"admin"}},
 	}}
 	hooks.Authz = fakeAuthz{}
 
@@ -371,7 +379,7 @@ func TestModerationDeniedByDefault(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	alice.send(proto.Command{Verb: proto.VerbMute, Nick: bob.nick})
+	alice.send(proto.Command{Verb: proto.VerbMute, Nick: bob.nick, Channel: "main"})
 	alice.expectErr(proto.ErrForbidden)
 
 	// And nothing happened to bob.
@@ -393,7 +401,7 @@ func TestNonModeratorRefused(t *testing.T) {
 func TestMuteSilences(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Reason: "spam"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main", Reason: "spam"})
 
 	// Everybody is told, including the person it is about.
 	for _, c := range []*client{mod, user} {
@@ -417,11 +425,31 @@ func TestMuteSilences(t *testing.T) {
 	user.expectMsg("themod", "you cannot")
 }
 
-func TestMuteBlocksPrivateMessagesToo(t *testing.T) {
+// A channel mute is about that channel. Somebody silenced in one room may
+// still talk to people directly, because a channel mute is not a statement
+// that they may not talk to anybody at all.
+func TestChannelMuteDoesNotBlockPrivateMessages(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
 	mod.expectMod(proto.ActionMute, "auser")
+	user.expectMod(proto.ActionMute, "auser")
+
+	user.send(proto.Command{Verb: proto.VerbPriv, Nick: "themod", Data: "let me out"})
+	mod.expectPriv("let me out")
+	user.expectPriv("let me out")
+}
+
+// A server-wide mute does block them.
+func TestGlobalMuteBlocksPrivateMessages(t *testing.T) {
+	ta, _, user := modApp(t, hook.Hooks{})
+
+	admin, err := ta.dialWith(t, "?token=admin")
+	if err != nil {
+		t.Fatalf("dial the admin: %v", err)
+	}
+
+	admin.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
 	user.expectMod(proto.ActionMute, "auser")
 
 	user.send(proto.Command{Verb: proto.VerbPriv, Nick: "themod", Data: "let me out"})
@@ -431,14 +459,14 @@ func TestMuteBlocksPrivateMessagesToo(t *testing.T) {
 func TestUnmute(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
 	mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
 	user.send(proto.Command{Verb: proto.VerbMsg, Data: "blocked"})
 	user.expectErr(proto.ErrMuted)
 
-	mod.send(proto.Command{Verb: proto.VerbUnmute, Nick: "auser"})
+	mod.send(proto.Command{Verb: proto.VerbUnmute, Nick: "auser", Channel: "main"})
 	mod.expectMod(proto.ActionUnmute, "auser")
 	user.expectMod(proto.ActionUnmute, "auser")
 
@@ -451,7 +479,7 @@ func TestTimedMuteReportsItsDeadline(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
 	before := time.Now()
-	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Duration: "10m"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main", Duration: "10m"})
 	m := mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
@@ -468,7 +496,7 @@ func TestBadDuration(t *testing.T) {
 	_, mod, _ := modApp(t, hook.Hooks{})
 
 	for _, d := range []string{"ten minutes", "-5m", "0s", "10"} {
-		mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Duration: d})
+		mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main", Duration: d})
 		mod.expectErr(proto.ErrBadDuration)
 	}
 }
@@ -476,14 +504,20 @@ func TestBadDuration(t *testing.T) {
 func TestModerationOfUnknownNick(t *testing.T) {
 	_, mod, _ := modApp(t, hook.Hooks{})
 
-	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "nobodyhere"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "nobodyhere", Channel: "main"})
 	mod.expectErr(proto.ErrNoSuch)
 }
 
-func TestBanDisconnectsAndRefusesReconnection(t *testing.T) {
+func TestServerWideBanDisconnectsAndRefusesReconnection(t *testing.T) {
 	ta, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.Command{Verb: proto.VerbBan, Nick: "auser", Reason: "enough"})
+	admin, err := ta.dialWith(t, "?token=admin")
+	if err != nil {
+		t.Fatalf("dial the admin: %v", err)
+	}
+
+	// No channel means server-wide, which only an admin may do here.
+	admin.send(proto.Command{Verb: proto.VerbBan, Nick: "auser", Reason: "enough"})
 
 	// The room is told.
 	mod.expectMod(proto.ActionBan, "auser")
@@ -497,7 +531,7 @@ func TestBanDisconnectsAndRefusesReconnection(t *testing.T) {
 	}
 
 	// And coming back is refused before the upgrade.
-	if _, err := ta.dialWith(t, "?token=user"); err == nil {
+	if _, err = ta.dialWith(t, "?token=user"); err == nil {
 		t.Fatal("a banned user reconnected")
 	} else if !strings.Contains(err.Error(), "403") {
 		t.Fatalf("dial error = %v, want a 403", err)
@@ -505,24 +539,29 @@ func TestBanDisconnectsAndRefusesReconnection(t *testing.T) {
 }
 
 func TestUnbanNamesSomebodyWhoIsGone(t *testing.T) {
-	_, mod, user := modApp(t, hook.Hooks{})
+	ta, _, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.Command{Verb: proto.VerbBan, Nick: "auser"})
-	mod.expectMod(proto.ActionBan, "auser")
+	admin, err := ta.dialWith(t, "?token=admin")
+	if err != nil {
+		t.Fatalf("dial the admin: %v", err)
+	}
+
+	admin.send(proto.Command{Verb: proto.VerbBan, Nick: "auser"})
+	admin.expectMod(proto.ActionBan, "auser")
 	user.expectClosed()
 
 	// Unbanning names somebody who is no longer connected, which the
 	// server cannot resolve — the limitation is real and worth pinning
 	// down in a test rather than discovering later.
-	mod.send(proto.Command{Verb: proto.VerbUnban, Nick: "auser"})
-	mod.expectErr(proto.ErrNoSuch)
+	admin.send(proto.Command{Verb: proto.VerbUnban, Nick: "auser"})
+	admin.expectErr(proto.ErrNoSuch)
 }
 
 func TestModerationIsRecorded(t *testing.T) {
 	rec := newFakeRecorder()
 	_, mod, user := modApp(t, hook.Hooks{Recorder: rec})
 
-	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Duration: "5m", Reason: "spam"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main", Duration: "5m", Reason: "spam"})
 	mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
@@ -556,7 +595,7 @@ func TestModerationIsRecorded(t *testing.T) {
 func TestModerationIsNotInTheBacklog(t *testing.T) {
 	ta, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
 	mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
@@ -711,5 +750,145 @@ func TestHistoryHookNotConsultedWhenDisabled(t *testing.T) {
 	defer hist.mu.Unlock()
 	if hist.askedFor != 0 {
 		t.Errorf("the hook was consulted (asked for %d) with the backlog off", hist.askedFor)
+	}
+}
+
+// --- moderation scope -------------------------------------------------
+
+// A mute in one channel is about that channel.
+func TestChannelMuteIsLocalToItsChannel(t *testing.T) {
+	_, mod, user := modApp(t, hook.Hooks{})
+
+	// Both move into a second room as well. Only the one already there
+	// sees the other arrive — presence is what happens while you are in
+	// the room, not a history of it.
+	for _, c := range []*client{mod, user} {
+		c.send(proto.Command{Verb: proto.VerbJoin, Channel: "second"})
+		c.expectJoined("second")
+	}
+	mod.expectJoin("second", user.nick)
+
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
+	mod.expectMod(proto.ActionMute, "auser")
+	user.expectMod(proto.ActionMute, "auser")
+
+	// Silenced in main...
+	user.send(proto.Command{Verb: proto.VerbMsg, Channel: "main", Data: "in main"})
+	user.expectErr(proto.ErrMuted)
+
+	// ...and not in second.
+	user.send(proto.Command{Verb: proto.VerbMsg, Channel: "second", Data: "in second"})
+	if got := user.expectMsg("auser", "in second"); got.Channel != "second" {
+		t.Fatalf("channel = %q, want second", got.Channel)
+	}
+}
+
+// A server-wide mute silences somebody in every channel, without having
+// been written into any of them.
+func TestGlobalMuteSilencesEverywhere(t *testing.T) {
+	ta, _, user := modApp(t, hook.Hooks{})
+
+	admin, err := ta.dialWith(t, "?token=admin")
+	if err != nil {
+		t.Fatalf("dial the admin: %v", err)
+	}
+
+	user.send(proto.Command{Verb: proto.VerbJoin, Channel: "second"})
+	user.expectJoined("second")
+
+	// Announced in every channel the target is in, so there are two.
+	admin.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
+	user.expectMod(proto.ActionMute, "auser")
+	user.expectMod(proto.ActionMute, "auser")
+
+	for _, channel := range []string{"main", "second"} {
+		user.send(proto.Command{Verb: proto.VerbMsg, Channel: channel, Data: "hello?"})
+		user.expectErr(proto.ErrMuted)
+	}
+}
+
+// Running one room is not permission to act across the server.
+func TestChannelModeratorCannotActGlobally(t *testing.T) {
+	_, mod, user := modApp(t, hook.Hooks{})
+
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
+	mod.expectErr(proto.ErrForbidden)
+
+	// And nothing happened.
+	user.send(proto.Command{Verb: proto.VerbMsg, Data: "still talking"})
+	user.expectMsg("auser", "still talking")
+}
+
+// A channel ban takes somebody out of that room and keeps them out,
+// without touching their connection or anywhere else they are.
+func TestChannelBanPartsAndBars(t *testing.T) {
+	_, mod, user := modApp(t, hook.Hooks{})
+
+	mod.send(proto.Command{Verb: proto.VerbBan, Nick: "auser", Channel: "main", Reason: "enough"})
+	mod.expectMod(proto.ActionBan, "auser")
+
+	// The banned client is removed first and told why after, so the order
+	// is PART then MOD and there is exactly one of each.
+	user.expectPart("main", "auser")
+	user.expectMod(proto.ActionBan, "auser")
+
+	// Still connected — it can say so somewhere else.
+	user.send(proto.Command{Verb: proto.VerbJoin, Channel: "elsewhere"})
+	user.expectJoined("elsewhere")
+
+	// But it cannot come back.
+	user.send(proto.Command{Verb: proto.VerbJoin, Channel: "main"})
+	user.expectErr(proto.ErrBanned)
+}
+
+// A channel ban outranks an autojoin: a layer putting somebody somewhere
+// does not overrule a moderator who threw them out of it.
+func TestChannelBanBeatsAutojoin(t *testing.T) {
+	ta, mod, user := modApp(t, hook.Hooks{
+		Channels: fakeChannels{autojoin: []string{"main"}},
+	})
+
+	mod.send(proto.Command{Verb: proto.VerbBan, Nick: "auser", Channel: "main"})
+	mod.expectMod(proto.ActionBan, "auser")
+	user.expectPart("main", "auser")
+	user.expectMod(proto.ActionBan, "auser")
+
+	// The ban is filed against the identity, so reconnecting does not shake
+	// it off — the same account comes back and lands nowhere.
+	back, err := ta.dialWith(t, "?token=user")
+	if err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	if len(back.joined) != 0 {
+		t.Fatalf("a banned user was autojoined into %v", back.joined)
+	}
+}
+
+// The scope travels with the announcement, so a client can tell "muted
+// here" from "muted everywhere".
+func TestModFrameCarriesItsScope(t *testing.T) {
+	ta, mod, user := modApp(t, hook.Hooks{})
+
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
+	local := mod.expectMod(proto.ActionMute, "auser")
+	user.expectMod(proto.ActionMute, "auser")
+	if local.Scope != "main" {
+		t.Errorf("scope = %q, want main", local.Scope)
+	}
+	if local.Channel != "main" {
+		t.Errorf("channel = %q, want main", local.Channel)
+	}
+
+	admin, err := ta.dialWith(t, "?token=admin")
+	if err != nil {
+		t.Fatalf("dial the admin: %v", err)
+	}
+	admin.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
+	global := user.expectMod(proto.ActionMute, "auser")
+	if global.Scope != "" {
+		t.Errorf("scope = %q, want empty for a server-wide action", global.Scope)
+	}
+	if global.Channel != "main" {
+		t.Errorf("channel = %q, want the channel it was announced in", global.Channel)
 	}
 }

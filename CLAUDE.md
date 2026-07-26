@@ -86,10 +86,13 @@ in an empty channel anybody can observe. `MaxChannels` is what stops a
 client inventing them until the server runs out of memory; a deployment
 that cares which names exist refuses the rest in `CanJoin`.
 
-**The order on joining is deterministic, and the code depends on it.**
-Subscribe, send the backlog directly, broadcast the `JOIN`, *then* start
-the pump. A client therefore sees `BACKLOG`, its own `JOIN`, then live
-traffic. Starting the pump any earlier makes the first two race, which it
+**The order on joining is deterministic within a channel, and the code
+depends on it.** Subscribe, send the backlog directly, broadcast the
+`JOIN`, *then* start the pump. A client therefore sees that channel's
+`BACKLOG`, its own `JOIN`, then its live traffic. Across channels there is
+no ordering — a second channel's backlog is written directly while the
+first's `JOIN` is still coming through a pump — so a client joining two at
+once may see both backlogs before either join. Starting the pump any earlier makes the first two race, which it
 did. Parting is the mirror: the parting client is told **directly**
 before its subscription ends, because ending it discards what it had not
 read — its own `PART` would be the most likely message to lose.
@@ -252,8 +255,9 @@ persisted.
   moderation actions. It runs on a background worker **after** the thing
   has happened, off a bounded queue, and drops with a counter when that
   queue is full. A store having a bad day costs history, never delivery.
-- **`Authorizer`** decides who may use the moderation commands. **Its
-  default is deny**, unlike every other hook. The rest default permissive
+- **`Authorizer`** decides who may use the moderation commands, **and
+  where**: it is passed the scope, empty for server-wide. **Its default is
+  deny**, unlike every other hook. The rest default permissive
   because the cost of being wrong is a server that does less than somebody
   wanted; here it is anybody in the room being able to ban anybody else. A
   server with no `Authorizer` has no moderators, which is correct for a
@@ -295,15 +299,47 @@ call rather than looping over nothing.
 
 ### Moderation
 
-`internal/moderation` is a `Store` of who is muted and who is banned, with
-lazy expiry. It is state only: it does not decide who may moderate (that
-is `Authorizer`), does not persist (that is `Recorder`), and does not know
-what a connection is.
+`internal/moderation` is a `Store` of who is muted and who is banned
+**and where**, with lazy expiry. It is state only: it does not decide who
+may moderate (that is `Authorizer`), does not persist (that is
+`Recorder`), and does not know what a connection is.
 
-Mutes are checked on both message paths — a mute is a mute, and somebody
-silenced in the room does not get to carry on in private. Bans are checked
-**before the upgrade**, so a banned client gets an HTTP 403 rather than a
-socket that opens and shuts.
+**The command's channel is the scope.** Naming one acts there and nowhere
+else; leaving it empty acts server-wide. It falls out of a field the
+protocol already had:
+
+```json
+{"verb":"MUTE","nick":"someone","channel":"main"}   silenced in main
+{"verb":"MUTE","nick":"someone"}                    silenced everywhere
+```
+
+A lookup checks the channel and then the global entry, so a server-wide
+mute applies in every channel without being written into each, and
+lifting a channel mute does not lift a global one — they were separate
+decisions.
+
+What each scope means where:
+
+- **Channel mute**: refused in that channel only. It does **not** block
+  private messages. Being silenced in one room is not a statement that
+  somebody may not talk to anybody at all, and treating it as one makes a
+  channel mute a bigger punishment than the moderator asked for.
+- **Server-wide mute**: refused everywhere, private messages included.
+- **Channel ban**: parted from that channel and refused on rejoin —
+  including on autojoin, since a layer putting somebody somewhere does not
+  overrule a moderator who threw them out. The connection is untouched.
+- **Server-wide ban**: checked **before the upgrade**, so it is an HTTP
+  403 rather than a socket that opens and shuts.
+
+`Authorizer.CanModerate` is asked **per scope**, so running one room is
+not the same permission as acting across the server.
+
+A channel ban removes the target **before** announcing. Announcing first
+would put the frame in the ring while the target's subscription is being
+closed — which discards it — so it would have to be sent directly too, and
+would then arrive twice for anybody whose pump had already drained it.
+Removing first means one copy of everything: the room sees `PART` then
+`MOD`, and so does the person it happened to.
 
 State is filed under `Identity.Key()`: the stable id when there is one,
 the display name when there is not. The anonymous case is weak on purpose

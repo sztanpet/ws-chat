@@ -92,7 +92,7 @@ func TestMetricsCountRefusedConnections(t *testing.T) {
 func TestMetricsCountModeration(t *testing.T) {
 	ta, mod, user := modApp(t, hook.Hooks{})
 
-	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
+	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
 	mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
