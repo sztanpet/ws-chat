@@ -7,16 +7,38 @@ which a configurable percentage speak".
 
 ## Done
 
-- **`c811c13` loadgen: add the latency histogram.** Log-linear, 8 buckets
+- **`2c06c36` metrics: count a private message before echoing it**, and
+  **`bc6a7e5` test: wait for the server, not for a frame.** Both land
+  first, because the generator's own tests are enough extra load to make
+  two latent races in the existing suite fail regularly. See below.
+- **`16ea90e` loadgen: add the latency histogram.** Log-linear, 8 buckets
   per octave of microseconds, 240 counters, ≤12.5% error, with count/sum/max
   kept exactly. One per connection, merged when it stops.
-- **`b7165e6` loadgen: add the connection driver.** `Config`/`Run`/`Result`,
+- **`e1717f5` loadgen: add the connection driver.** `Config`/`Run`/`Result`,
   the client, the client-side codecs, and the tests — including a stub chat
   server so the generator's arithmetic is tested without the real server's
   timing attached.
-- **`cmd/loadgen` + `make loadgen` + docs.** Flags, `signal.NotifyContext`
-  so Ctrl-C still prints the report, `.gitignore` for the binary, the
-  `### Load generation` section in CLAUDE.md.
+- **`b220fb1` loadgen: add the command.** Flags, `signal.NotifyContext` so
+  Ctrl-C still prints the report, `make loadgen`, the `### Load generation`
+  section in CLAUDE.md.
+- **`5c6b14e`** the profiling notes below, **`f1be661`** the closed-set
+  close reasons, **`85adfe5` conn: one write deadline per wakeup** — the
+  fix the profiling asked for.
+
+### What the generator's own tests found in the existing suite
+
+Running them alongside everything else was enough load to expose two
+things that had been passing on a quiet machine:
+
+- **`metrics`**: the private-message counter was incremented *after* the
+  sender's echo had been written to its socket. A client holding its echo
+  could scrape `/metrics` and be told the message never happened. It is now
+  counted where the recipient's copy is delivered.
+- **Two tests asserted on server state straight after receiving a frame.**
+  A frame arriving does not mean the handler that sent it has finished —
+  worst for `PART`, where the leaving client is told *before* its
+  membership is torn down, deliberately. `client.sync()` (a PING/PONG round
+  trip on the same read pump) is the barrier now.
 
 ## Decisions
 
