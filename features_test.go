@@ -316,6 +316,115 @@ func TestFiltersApplyToPrivateMessages(t *testing.T) {
 	alice.expectErr(filter.ReasonZalgo)
 }
 
+// --- watching without talking ------------------------------------------
+
+// optionalAuth is the auth layer of a server anybody may watch: a token
+// names the connection, and no token leaves the identity zero instead of
+// refusing the upgrade. That zero identity is what "unregistered" means
+// below — nobody claimed this connection.
+type optionalAuth map[string]hook.Identity
+
+func (o optionalAuth) Authenticate(ctx context.Context, r hook.Request) (hook.Identity, error) {
+	return o[r.Query("token")], nil
+}
+
+// registeredOnly is the whole of the "logged out means read-only" policy.
+//
+// It is a Filter because who may talk is policy and the core has no opinion
+// about it, and the identity a filter is handed is the one Authenticate
+// produced — so the question is one field.
+type registeredOnly struct{}
+
+func (registeredOnly) Allow(ctx context.Context, from hook.Identity, data string) (bool, string) {
+	if from.Anonymous() {
+		return false, proto.ErrNeedLogin
+	}
+	return true, ""
+}
+
+// An unregistered connection sees everything and says nothing.
+func TestUnregisteredMayWatchButNotTalk(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Auth:   optionalAuth{"a": {ID: "u1", Nick: "alice"}},
+		Filter: registeredOnly{},
+	})
+
+	alice, err := ta.dialWith(t, "?token=a")
+	if err != nil {
+		t.Fatalf("dial alice: %v", err)
+	}
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "said before anybody watched"})
+	alice.expectMsg("alice", "said before anybody watched")
+
+	// No token and no refusal: the connection is served, and named as the
+	// anonymous connection it is.
+	watcher, err := ta.dialWith(t, "")
+	if err != nil {
+		t.Fatalf("dial the watcher: %v", err)
+	}
+	if !strings.HasPrefix(watcher.nick, "anon") {
+		t.Fatalf("watcher nick = %q, want an assigned anonymous name", watcher.nick)
+	}
+
+	// It arrives with the history...
+	if len(watcher.backlog) != 1 || watcher.backlog[0].Data != "said before anybody watched" {
+		t.Fatalf("watcher backlog = %v, want the one message", watcher.backlog)
+	}
+
+	// ...and is fed the live traffic.
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "live"})
+	alice.expectMsg("alice", "live")
+	watcher.expectMsg("alice", "live")
+
+	// What it cannot do is talk, in the channel or privately.
+	watcher.send(proto.Command{Verb: proto.VerbMsg, Data: "let me in"})
+	watcher.expectErr(proto.ErrNeedLogin)
+	watcher.send(proto.Command{Verb: proto.VerbPriv, Nick: "alice", Data: "let me in"})
+	watcher.expectErr(proto.ErrNeedLogin)
+
+	// A refusal is a refusal and not a disconnection: it is still in the room
+	// and still being fed. Anything that had escaped the filter would be the
+	// frame these two read instead.
+	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "still talking"})
+	alice.expectMsg("alice", "still talking")
+	watcher.expectMsg("alice", "still talking")
+}
+
+// Watching is more than receiving. The verbs that are not speech stay open,
+// or a read-only client cannot follow the conversation into another room or
+// see who is in it.
+func TestUnregisteredMayStillJoinAndSee(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Auth:   optionalAuth{"a": {ID: "u1", Nick: "alice"}},
+		Filter: registeredOnly{},
+	})
+
+	alice, err := ta.dialWith(t, "?token=a")
+	if err != nil {
+		t.Fatalf("dial alice: %v", err)
+	}
+	watcher, err := ta.dialWith(t, "")
+	if err != nil {
+		t.Fatalf("dial the watcher: %v", err)
+	}
+
+	watcher.send(proto.Command{Verb: proto.VerbJoin, Channel: "other"})
+	watcher.expectJoined("other")
+
+	alice.send(proto.Command{Verb: proto.VerbJoin, Channel: "other"})
+	alice.expectJoined("other")
+	watcher.expectJoin("other", "alice")
+
+	alice.send(proto.Command{Verb: proto.VerbMsg, Channel: "other", Data: "in here now"})
+	alice.expectMsg("alice", "in here now")
+	watcher.expectMsg("alice", "in here now")
+
+	watcher.send(proto.Command{Verb: proto.VerbNames, Channel: "other"})
+	if names := watcher.expectNames("other"); len(names.Nicks) != 2 {
+		t.Fatalf("NAMES = %v, want both of them", names.Nicks)
+	}
+}
+
 // --- moderation -------------------------------------------------------
 
 // fakeAuthz answers per scope: the "mod" role runs a channel, and only

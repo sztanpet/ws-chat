@@ -95,6 +95,15 @@ const (
 	ErrForbidden   = "forbidden"
 	ErrBadDuration = "badduration"
 
+	// ErrNeedLogin refuses somebody who has not logged in, on a server where
+	// speaking requires an account and watching does not.
+	//
+	// The core never sends it: who may talk at all is policy, and it comes
+	// from a Filter that refuses Identity.Anonymous. The code is named here
+	// anyway because a client has to switch on it, and a vocabulary every
+	// deployment invents for itself is not a protocol.
+	ErrNeedLogin = "needlogin"
+
 	// Channels.
 	ErrNoChannel     = "nosuchchannel" // not a usable channel name
 	ErrNotJoined     = "notjoined"     // you are not in that channel

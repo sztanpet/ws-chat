@@ -147,6 +147,40 @@ told who its moderators are has none, which is the only safe reading.
 `hooks.go` is the only place any hook is called, so the rules about which
 may block are in one file.
 
+### Letting people watch without letting them talk
+
+A common arrangement — anybody may read the chat, only logged-in users may
+post — is two small hooks and no server configuration. The `Authenticator`
+lets the unrecognised connection in as nobody:
+
+```go
+func (a myAuth) Authenticate(ctx context.Context, r hook.Request) (hook.Identity, error) {
+	id, ok := a.lookUp(r.Cookie("session"))
+	if !ok {
+		return hook.Identity{}, nil // anonymous, not refused
+	}
+	return id, nil
+}
+```
+
+and the `Filter` refuses anything they try to say:
+
+```go
+func (registeredOnly) Allow(ctx context.Context, from hook.Identity, data string) (bool, string) {
+	if from.Anonymous() {
+		return false, proto.ErrNeedLogin
+	}
+	return true, ""
+}
+```
+
+Returning `hook.ErrUnauthorized` from `Authenticate` instead would refuse
+the connection with a 401, which is the other deployment. The filter runs
+in front of both `MSG` and `PRIVMSG`, so there is no third place to
+remember; everything else a client sends — `JOIN`, `PART`, `NAMES`, the
+backlog it arrives with — keeps working, because none of it is speech. The
+client is told `{"description":"needlogin"}` and stays connected.
+
 ## Testing
 
 ```sh

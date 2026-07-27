@@ -6,7 +6,22 @@ only when you are touching that track.
 
 ## Latest
 
-Write deadlines. The server bounds every socket write with
+Read-only unregistered users, confirmed rather than built. "Anybody may
+watch, only logged-in users may talk" needed no core change: `Authenticate`
+hands back a zero `Identity` instead of `ErrUnauthorized` so the lurker is
+served, and a `Filter` refuses `from.Anonymous()` — the two hooks refuse
+different things (the connection, the message) and the read-only window is
+the gap between them. It works because `MSG` and `PRIVMSG` are the only
+verbs a filter sees; `JOIN`, `PART`, `NAMES` and the backlog are not speech
+and keep working, which is what makes it *watching*. Locked in by
+`TestUnregisteredMayWatchButNotTalk` and `TestUnregisteredMayStillJoinAndSee`
+in `features_test.go`, with the recipe in `README.md` under "Extending it".
+The one addition is `proto.ErrNeedLogin` ("needlogin"), a code the core
+never sends: clients switch on ERR codes, so the vocabulary belongs in
+`proto` rather than in each deployment's filter. Detail in
+`state/server.md`.
+
+Before that: write deadlines. The server bounds every socket write with
 `Conn.SetWriteDeadline` and hands `Write` a `context.Background()`, which
 takes the write path from ~700 bytes of garbage per delivered message —
 *per member* of the room, and 99% of everything the server allocated — to
@@ -208,6 +223,12 @@ _(none yet)_
   hand-rolled Prometheus-text registry; pprof and `/metrics` share a
   loopback-bound listener (`DebugAddr`). Policy is a hook; the server
   describing itself is not.
+- **Who may CONNECT and who may TALK are different questions, answered by
+  different hooks.** `Authenticator` refuses the connection; `Filter`
+  refuses the message. A server where anonymous visitors watch and only
+  registered users speak is the gap between them, and needs no core support
+  — a lurker is an ordinary connection whose `MSG` and `PRIVMSG` are
+  refused with `needlogin`.
 - **Everything that is not moving bytes between sockets is a hook.**
   `internal/hook` defines auth, chatter data, message filtering and
   persistence as interfaces; the core imports the interfaces and never an

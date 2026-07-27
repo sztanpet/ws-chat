@@ -181,6 +181,19 @@ extension points, and a single-channel WebSocket chat server.
   how it was found.
 - **A refused autojoin sends the client an ERR**, rather than leaving it
   to wonder why the room it was put in is empty.
+- **"Anybody may watch, only registered users may talk" is two hooks and no
+  core change**, and there are now tests saying so
+  (`TestUnregisteredMayWatchButNotTalk`,
+  `TestUnregisteredMayStillJoinAndSee`). `Authenticate` returns a zero
+  `Identity` rather than `ErrUnauthorized`, so the lurker is served; a
+  `Filter` refuses `from.Anonymous()` with `proto.ErrNeedLogin`. The two
+  hooks refuse different things — the connection and the message — and the
+  read-only window is the gap between them. It works because `MSG` and
+  `PRIVMSG` are the only verbs that reach a filter and everything else a
+  client sends is not speech, so nothing had to learn what a lurker is.
+  `needlogin` is a named code in `proto` even though the core never sends
+  it: a client has to switch on it, and a vocabulary every deployment
+  invents for itself is not a protocol.
 
 ## Gotchas
 

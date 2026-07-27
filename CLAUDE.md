@@ -281,6 +281,18 @@ persisted.
   front of every message, so it must be a lookup and not a round trip.
   Its refusal reason becomes the `ERR` code verbatim. It runs *last*, in a
   chain behind the built-in text filters in `internal/filter` — see below.
+
+  It is also where **who may talk at all** lives, which is not the same
+  question as who may connect. A server where anonymous visitors watch and
+  only logged-in users speak is an `Authenticator` that hands back a zero
+  `Identity` instead of `ErrUnauthorized`, and a filter that refuses
+  `from.Anonymous()` with `needlogin`. Both hooks, because they refuse
+  different things: one refuses the connection, the other refuses the
+  message, and a read-only window is exactly the gap between them. There is
+  nothing to switch on in the core — a lurker is a connection like any
+  other, with `MSG` and `PRIVMSG` the only two verbs a filter sees.
+  `TestUnregisteredMayWatchButNotTalk` in `features_test.go` is the whole
+  arrangement in one place.
 - **`Limiter`** supplies rate limits — `ClientLimits` per connection,
   `ChannelLimits` per channel. **Policy only**: the enforcing is the
   server's, on a token bucket in `internal/ratelimit`, so an

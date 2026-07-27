@@ -251,6 +251,16 @@ type Directory interface {
 //
 // A refusal's reason becomes the ERR code the client is sent, so it should
 // be a short machine-readable token ("muted", "slowdown"), not a sentence.
+//
+// It is also where "you have to be logged in to talk" lives. The identity
+// it is handed is the one Authenticate produced, so a server that lets
+// anybody watch and only registered users speak is a filter that refuses
+// from.Anonymous() with proto's "needlogin" code. The two hooks answer
+// different questions and both are needed for that: Authenticate decides
+// whether the CONNECTION is allowed — return a zero Identity rather than
+// ErrUnauthorized and the lurker is in — and this decides whether the
+// MESSAGE is. Refusing a message costs the sender nothing but the message,
+// which is what a read-only window is.
 type Filter interface {
 	Allow(ctx context.Context, from Identity, data string) (allowed bool, reason string)
 }
