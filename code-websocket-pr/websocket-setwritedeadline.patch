@@ -1,7 +1,14 @@
-diff -urN a/conn.go b/conn.go
---- a/conn.go	2026-07-27 07:59:51.128414035 +0000
-+++ b/conn.go	2026-07-27 07:59:51.129414045 +0000
-@@ -12,6 +12,7 @@
+diff --git a/conn.go b/conn.go
+index bfc78aa..0ea17ab 100644
+--- a/conn.go
++++ b/conn.go
+@@ -7,11 +7,13 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"io"
++	"math"
+ 	"net"
+ 	"runtime"
  	"strconv"
  	"sync"
  	"sync/atomic"
@@ -9,7 +16,7 @@ diff -urN a/conn.go b/conn.go
  )
  
  // MessageType represents the type of a WebSocket message.
-@@ -54,6 +55,20 @@
+@@ -54,6 +56,20 @@ type Conn struct {
  	readTimeoutStop  atomic.Pointer[func() bool]
  	writeTimeoutStop atomic.Pointer[func() bool]
  
@@ -30,13 +37,16 @@ diff -urN a/conn.go b/conn.go
  	// Read state.
  	readMu         *mu
  	readHeaderBuf  [8]byte
-@@ -135,6 +150,13 @@
+@@ -135,6 +151,16 @@ func newConn(cfg connConfig) *Conn {
  		}
  	}
  
-+	// Created stopped, and never recreated: Reset and Stop do not allocate,
-+	// which is what lets SetWriteDeadline be allocation-free.
-+	c.writeDeadlineTimer = time.AfterFunc(time.Duration(1<<62), func() {
++	// One timer for the life of the connection, so that arming a write
++	// deadline is a Reset and disarming it a Stop, neither of which
++	// allocates. The duration is irrelevant because it is stopped
++	// immediately: there is no constructor for a stopped timer, and this is
++	// how netconn.go makes one.
++	c.writeDeadlineTimer = time.AfterFunc(math.MaxInt64, func() {
 +		c.close()
 +	})
 +	c.writeDeadlineTimer.Stop()
@@ -44,7 +54,7 @@ diff -urN a/conn.go b/conn.go
  	runtime.SetFinalizer(c, func(c *Conn) {
  		c.close()
  	})
-@@ -181,6 +203,66 @@
+@@ -181,6 +207,66 @@ func (c *Conn) setupWriteTimeout(ctx context.Context) bool {
  	return true
  }
  
@@ -111,10 +121,11 @@ diff -urN a/conn.go b/conn.go
  func (c *Conn) clearWriteTimeout() {
  	swapTimeoutStop(&c.writeTimeoutStop, nil)
  }
-diff -urN a/write.go b/write.go
---- a/write.go	2026-07-27 07:59:51.131414065 +0000
-+++ b/write.go	2026-07-27 07:59:51.132414075 +0000
-@@ -12,6 +12,7 @@
+diff --git a/write.go b/write.go
+index 81bab4f..76d1230 100644
+--- a/write.go
++++ b/write.go
+@@ -12,6 +12,7 @@ import (
  	"fmt"
  	"io"
  	"net"
@@ -122,7 +133,7 @@ diff -urN a/write.go b/write.go
  	"time"
  
  	"github.com/coder/websocket/internal/bpool"
-@@ -322,6 +323,14 @@
+@@ -322,6 +323,14 @@ func (c *Conn) writeFrame(ctx context.Context, fin bool, flate bool, opcode opco
  		defer c.clearWriteTimeout()
  	}
  
@@ -137,9 +148,11 @@ diff -urN a/write.go b/write.go
  	c.writeHeader.fin = fin
  	c.writeHeader.opcode = opcode
  	c.writeHeader.payloadLength = int64(len(p))
-diff -urN a/writedeadline_test.go b/writedeadline_test.go
---- a/writedeadline_test.go	1970-01-01 00:00:00.000000000 +0000
-+++ b/writedeadline_test.go	2026-07-27 07:59:51.136414115 +0000
+diff --git a/writedeadline_test.go b/writedeadline_test.go
+new file mode 100644
+index 0000000..f637483
+--- /dev/null
++++ b/writedeadline_test.go
 @@ -0,0 +1,129 @@
 +//go:build !js
 +
@@ -270,10 +283,11 @@ diff -urN a/writedeadline_test.go b/writedeadline_test.go
 +	}
 +	t.Logf("allocations per write: %v without a deadline, %v with one", without, with)
 +}
-diff -urN a/ws_js.go b/ws_js.go
---- a/ws_js.go	2026-07-27 07:59:51.134414095 +0000
-+++ b/ws_js.go	2026-07-27 07:59:51.135414105 +0000
-@@ -8,12 +8,14 @@
+diff --git a/ws_js.go b/ws_js.go
+index 026b75f..ea7dd40 100644
+--- a/ws_js.go
++++ b/ws_js.go
+@@ -8,12 +8,14 @@ import (
  	"io"
  	"net"
  	"net/http"
@@ -288,7 +302,7 @@ diff -urN a/ws_js.go b/ws_js.go
  
  	"github.com/coder/websocket/internal/bpool"
  	"github.com/coder/websocket/internal/wsjs"
-@@ -64,6 +66,32 @@
+@@ -64,6 +66,32 @@ type Conn struct {
  	readSignal chan struct{}
  	readBufMu  sync.Mutex
  	readBuf    []wsjs.MessageEvent
@@ -321,7 +335,7 @@ diff -urN a/ws_js.go b/ws_js.go
  }
  
  func (c *Conn) close(err error, wasClean bool) {
-@@ -214,6 +242,9 @@
+@@ -214,6 +242,9 @@ func (c *Conn) write(typ MessageType, p []byte) error {
  	if c.isClosed() {
  		return net.ErrClosed
  	}

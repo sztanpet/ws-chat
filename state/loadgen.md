@@ -324,14 +324,25 @@ needs a fork, and forking drops the module out of `govulncheck`.** The
 difference is that this one is worth taking upstream on the strength of the
 numbers rather than filed as a curiosity.
 
-**Both halves of it, ready to submit, are in
-[`code-websocket-pr/`](../code-websocket-pr/README.md)** — the library patch
-against v1.8.15 (verified to apply to a clean checkout and to build on
-native and `GOOS=js`), the caller-side patch, a written PR message and the
-commands to reproduce every number above. The final version of the patch
-measured **zero sampled allocations** over a 20s window at 49.6k
-deliveries/s, mean latency 3.53ms against the baseline's 4.20ms, and 12.50s
-of CPU samples against 14.33s.
+**Both halves of it are in
+[`code-websocket-pr/`](../code-websocket-pr/README.md)**, and the library
+half is now a pushed branch — `feat/conn-set-write-deadline` at `9f84ce4`
+in the fork, off upstream `master` at `9c8faad`. That directory holds the
+patch, the caller-side patch, the PR description and the commands to
+reproduce every number. Measured against the pushed commit: **zero sampled
+allocations** (bytes and objects) over a 20s window at 49.6k deliveries/s,
+mean latency 3.55ms where every baseline run of this load sat at
+3.75-4.24ms, and 12.65s of CPU samples against 14.33s.
+
+`AUTOBAHN=1 go test` deserves a note, because it looked like a regression
+and was not. Its protocol cases pass, but `TestMain` asserts
+`runtime.NumGoroutine() == 1` at process exit, and one branch run tripped it
+while a `master` run and a second branch run were clean. **It is the check
+racing teardown**: the failing run reported 2 goroutines and then dumped
+only 1, so the second had already exited. The new code is inert under
+autobahn anyway — nothing there calls `SetWriteDeadline`, so the timer stays
+stopped from construction, and a stopped `time.AfterFunc` is in no timer
+heap and runs nothing.
 
 Two things found while making it submittable, both worth keeping:
 
