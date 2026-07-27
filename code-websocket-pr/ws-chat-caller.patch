@@ -1,0 +1,65 @@
+diff --git a/conn.go b/conn.go
+index 9c94d74..d6048d1 100644
+--- a/conn.go
++++ b/conn.go
+@@ -480,9 +480,24 @@ func (c *conn) send(ctx context.Context, frame []byte) {
+ // reporting whether it worked. A client that stops reading must not wedge
+ // the goroutine writing to it.
+ func (c *conn) write(ctx context.Context, frame []byte) bool {
+-	wctx, cancel := context.WithTimeout(ctx, c.app.cfg.WriteTimeout.Duration())
+-	defer cancel()
+-	return c.writeTo(wctx, frame)
++	c.armDeadline()
++	defer c.disarmDeadline()
++	return c.writeTo(frame)
++}
++
++// armDeadline bounds the frames written until disarmDeadline by
++// WriteTimeout, using the socket's own deadline rather than a context.
++//
++// EXPERIMENT (forked coder/websocket): an instant costs one atomic store
++// where a context costs a WithTimeout in here and an AfterFunc inside the
++// library, which together were ~700 bytes of garbage per frame — per
++// member, for a broadcast.
++func (c *conn) armDeadline() {
++	_ = c.ws.SetWriteDeadline(time.Now().Add(c.app.cfg.WriteTimeout.Duration()))
++}
++
++func (c *conn) disarmDeadline() {
++	_ = c.ws.SetWriteDeadline(time.Time{})
+ }
+ 
+ // writeBatch writes a wakeup's worth of frames under ONE deadline.
+@@ -504,11 +519,11 @@ func (c *conn) writeBatch(ctx context.Context, frames [][]byte) bool {
+ 		return true
+ 	}
+ 
+-	wctx, cancel := context.WithTimeout(ctx, c.app.cfg.WriteTimeout.Duration())
+-	defer cancel()
++	c.armDeadline()
++	defer c.disarmDeadline()
+ 
+ 	for _, frame := range frames {
+-		if !c.writeTo(wctx, frame) {
++		if !c.writeTo(frame) {
+ 			return false
+ 		}
+ 	}
+@@ -516,8 +531,15 @@ func (c *conn) writeBatch(ctx context.Context, frames [][]byte) bool {
+ }
+ 
+ // writeTo puts one frame on the socket under a deadline somebody else set.
+-func (c *conn) writeTo(ctx context.Context, frame []byte) bool {
+-	if err := c.ws.Write(ctx, c.msgType(), frame); err != nil {
++//
++// EXPERIMENT: the context is deliberately context.Background(). A
++// cancellable one makes the library arm a context.AfterFunc per frame,
++// which is the allocation this experiment removes; the write is bounded by
++// the socket deadline armDeadline set instead. Shutdown still unblocks a
++// stuck write, because it closes the connection and every wait in the
++// library selects on that.
++func (c *conn) writeTo(frame []byte) bool {
++	if err := c.ws.Write(context.Background(), c.msgType(), frame); err != nil {
+ 		c.log.Debug("write failed", "err", err)
+ 		_ = c.ws.CloseNow() // unblocks the read pump
+ 		return false

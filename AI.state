@@ -139,8 +139,9 @@ _(none yet)_
   A deadline is an instant, and an instant needs no allocation, where a
   context needs a `WithTimeout` in the caller and an `AfterFunc` in the
   library. Not adopted only because a fork leaves `govulncheck`'s view of
-  RFC 6455 parsing code. Both halves of the patch and the numbers are in
-  `state/loadgen.md`.
+  RFC 6455 parsing code. **The submittable PR — patch, tests, written
+  message, reproduction steps — is in `code-websocket-pr/`**; the numbers
+  and the two gotchas are in `state/loadgen.md`.
 - **The cheaper variant, memoising the armed context, is not worth it.**
   It removes the per-frame amplification under overload and changes
   nothing at steady load, where batches are one frame. Superseded by the

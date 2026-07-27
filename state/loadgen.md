@@ -322,11 +322,29 @@ does not matter here; a general API should say so plainly.
 **Not adopted, for the same reason as the memoize patch and no other: it
 needs a fork, and forking drops the module out of `govulncheck`.** The
 difference is that this one is worth taking upstream on the strength of the
-numbers rather than filed as a curiosity. Both halves of the patch are
-reproducible from this file; the library half is `SetWriteDeadline`,
-`armWriteDeadline`/`stopWriteDeadline` and two fields on `Conn`, and the
-server half is `armDeadline`/`disarmDeadline` around `writeBatch` plus
-`context.Background()` in `writeTo`.
+numbers rather than filed as a curiosity.
+
+**Both halves of it, ready to submit, are in
+[`code-websocket-pr/`](../code-websocket-pr/README.md)** — the library patch
+against v1.8.15 (verified to apply to a clean checkout and to build on
+native and `GOOS=js`), the caller-side patch, a written PR message and the
+commands to reproduce every number above. The final version of the patch
+measured **zero sampled allocations** over a 20s window at 49.6k
+deliveries/s, mean latency 3.53ms against the baseline's 4.20ms, and 12.50s
+of CPU samples against 14.33s.
+
+Two things found while making it submittable, both worth keeping:
+
+- **`armWriteDeadline` cannot close the connection inline.** `close` takes
+  `writeFrameMu` for a client connection via `msgWriter.close`, and
+  `armWriteDeadline` runs with that lock held, so an already-expired
+  deadline that closed inline **deadlocks**. Upstream's context path never
+  hits this because its `close` runs on the `AfterFunc` goroutine. The fix
+  is to refuse the frame with `os.ErrDeadlineExceeded` and leave the closing
+  to the timer. This was caught by the new test, not by reading the code.
+- **The API has to exist on `ws_js.go` too**, per the library's own
+  AGENTS.md. Writes there never block, so the deadline is checked when a
+  write is attempted rather than interrupting one.
 
 One trap worth repeating if anyone rebuilds it: the first version had
 `armWriteDeadline` return the `func()` that stops the timer, which is a

@@ -1,0 +1,333 @@
+diff -urN a/conn.go b/conn.go
+--- a/conn.go	2026-07-27 07:59:51.128414035 +0000
++++ b/conn.go	2026-07-27 07:59:51.129414045 +0000
+@@ -12,6 +12,7 @@
+ 	"strconv"
+ 	"sync"
+ 	"sync/atomic"
++	"time"
+ )
+ 
+ // MessageType represents the type of a WebSocket message.
+@@ -54,6 +55,20 @@
+ 	readTimeoutStop  atomic.Pointer[func() bool]
+ 	writeTimeoutStop atomic.Pointer[func() bool]
+ 
++	// writeDeadline is the deadline set by SetWriteDeadline as unix nanos,
++	// or 0 for none. writeDeadlineTimer is created once per connection and
++	// thereafter only Reset and Stopped, neither of which allocates — the
++	// same approach netconn.go takes for net.Conn deadlines.
++	//
++	// The timer is armed by writeFrame rather than by SetWriteDeadline, so
++	// that it is armed under writeFrameMu together with the frame it
++	// bounds. That keeps it safe when several goroutines write to one
++	// connection: setting a deadline cannot disturb a frame already in
++	// flight, and frames written under one deadline share it instead of
++	// restarting the clock per frame.
++	writeDeadline      atomic.Int64
++	writeDeadlineTimer *time.Timer
++
+ 	// Read state.
+ 	readMu         *mu
+ 	readHeaderBuf  [8]byte
+@@ -135,6 +150,13 @@
+ 		}
+ 	}
+ 
++	// Created stopped, and never recreated: Reset and Stop do not allocate,
++	// which is what lets SetWriteDeadline be allocation-free.
++	c.writeDeadlineTimer = time.AfterFunc(time.Duration(1<<62), func() {
++		c.close()
++	})
++	c.writeDeadlineTimer.Stop()
++
+ 	runtime.SetFinalizer(c, func(c *Conn) {
+ 		c.close()
+ 	})
+@@ -181,6 +203,66 @@
+ 	return true
+ }
+ 
++// SetWriteDeadline sets a deadline for writes on the connection. Writes
++// that pass it close the connection, as an expired context passed to Write
++// does. A zero t clears the deadline.
++//
++// It exists so that a deadline can be expressed without allocating.
++// Bounding a write with a context costs a context.WithTimeout in the caller
++// and a context.AfterFunc inside this package, per frame; a deadline is an
++// instant, and an instant is one atomic store against a timer that is
++// reused for the life of the connection. Callers that pass a
++// non-cancellable context to Write and set the deadline here allocate
++// nothing on the write path, which matters for a server fanning one message
++// out to many connections, where that per-frame cost is paid per recipient.
++//
++// The deadline belongs to the connection, not to a call, so where several
++// goroutines write to one connection the last to set it wins. Frames
++// written under one deadline all wait for that same instant rather than
++// restarting the clock, and setting a deadline never disturbs a frame
++// already in flight.
++func (c *Conn) SetWriteDeadline(t time.Time) error {
++	if t.IsZero() {
++		c.writeDeadline.Store(0)
++		return nil
++	}
++	c.writeDeadline.Store(t.UnixNano())
++	return nil
++}
++
++// armWriteDeadline prepares the write deadline for one frame. It reports
++// whether the deadline has already passed, and whether the timer was armed
++// and so needs stopping once the frame is done. The caller must hold
++// writeFrameMu.
++//
++// It must not close the connection itself, even though an expired deadline
++// means the connection is going away: close takes writeFrameMu for a client
++// connection, via msgWriter.close, and this runs with that lock held. That
++// is why expiry is reported back to the caller and the closing is left to
++// the timer's own goroutine, which holds nothing.
++//
++// It reports bools rather than returning the stop func it would rather
++// return, because a closure over c is a heap allocation on every frame,
++// which would defeat the point of the mechanism.
++func (c *Conn) armWriteDeadline() (expired, armed bool) {
++	deadline := c.writeDeadline.Load()
++	if deadline == 0 {
++		return false, false
++	}
++
++	d := time.Until(time.Unix(0, deadline))
++	if d <= 0 {
++		// Already past: refuse the frame, and let the timer do the closing
++		// from where that is safe. Deliberately left running.
++		c.writeDeadlineTimer.Reset(1)
++		return true, false
++	}
++	c.writeDeadlineTimer.Reset(d)
++	return false, true
++}
++
++func (c *Conn) stopWriteDeadline() { c.writeDeadlineTimer.Stop() }
++
+ func (c *Conn) clearWriteTimeout() {
+ 	swapTimeoutStop(&c.writeTimeoutStop, nil)
+ }
+diff -urN a/write.go b/write.go
+--- a/write.go	2026-07-27 07:59:51.131414065 +0000
++++ b/write.go	2026-07-27 07:59:51.132414075 +0000
+@@ -12,6 +12,7 @@
+ 	"fmt"
+ 	"io"
+ 	"net"
++	"os"
+ 	"time"
+ 
+ 	"github.com/coder/websocket/internal/bpool"
+@@ -322,6 +323,14 @@
+ 		defer c.clearWriteTimeout()
+ 	}
+ 
++	// Armed here rather than in SetWriteDeadline so that it is under
++	// writeFrameMu together with the frame it bounds.
++	if expired, armed := c.armWriteDeadline(); expired {
++		return 0, os.ErrDeadlineExceeded
++	} else if armed {
++		defer c.stopWriteDeadline()
++	}
++
+ 	c.writeHeader.fin = fin
+ 	c.writeHeader.opcode = opcode
+ 	c.writeHeader.payloadLength = int64(len(p))
+diff -urN a/writedeadline_test.go b/writedeadline_test.go
+--- a/writedeadline_test.go	1970-01-01 00:00:00.000000000 +0000
++++ b/writedeadline_test.go	2026-07-27 07:59:51.136414115 +0000
+@@ -0,0 +1,129 @@
++//go:build !js
++
++package websocket_test
++
++import (
++	"context"
++	"errors"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/coder/websocket"
++	"github.com/coder/websocket/internal/test/assert"
++	"github.com/coder/websocket/internal/test/wstest"
++)
++
++// drainWriteDeadline attaches a peer that consumes messages and returns a
++// function that stops it.
++//
++// CloseRead is not usable for these tests: it closes the connection when a
++// data message arrives, which is exactly what they send.
++func drainWriteDeadline(c *websocket.Conn) func() {
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		for {
++			if _, _, err := c.Read(context.Background()); err != nil {
++				return
++			}
++		}
++	}()
++	return func() {
++		c.CloseNow()
++		<-done
++	}
++}
++
++func TestSetWriteDeadline(t *testing.T) {
++	t.Parallel()
++
++	msg := []byte("hello")
++
++	// A deadline in the future does not get in the way, and clearing it with
++	// the zero time puts things back as they were.
++	t.Run("live and cleared", func(t *testing.T) {
++		t.Parallel()
++
++		c1, c2 := wstest.Pipe(nil, nil)
++		defer c1.CloseNow()
++		defer c2.CloseNow()
++		defer drainWriteDeadline(c2)()
++
++		assert.Success(t, c1.SetWriteDeadline(time.Now().Add(time.Minute)))
++		assert.Success(t, c1.Write(context.Background(), websocket.MessageText, msg))
++
++		assert.Success(t, c1.SetWriteDeadline(time.Time{}))
++		assert.Success(t, c1.Write(context.Background(), websocket.MessageText, msg))
++	})
++
++	// A deadline that has already passed closes the connection rather than
++	// writing, which is what an expired context passed to Write does.
++	t.Run("expired", func(t *testing.T) {
++		t.Parallel()
++
++		c1, c2 := wstest.Pipe(nil, nil)
++		defer c1.CloseNow()
++		defer c2.CloseNow()
++		defer drainWriteDeadline(c2)()
++
++		assert.Success(t, c1.SetWriteDeadline(time.Now().Add(-time.Second)))
++
++		err := c1.Write(context.Background(), websocket.MessageText, msg)
++		if err == nil {
++			t.Fatal("write succeeded past its deadline")
++		}
++		if !errors.Is(err, os.ErrDeadlineExceeded) {
++			t.Fatalf("write past its deadline failed with %v, want os.ErrDeadlineExceeded", err)
++		}
++
++		// And the connection goes away, as it does when a context passed to
++		// Write expires. That happens on the deadline timer's goroutine
++		// rather than inline, so give it a moment.
++		deadline := time.Now().Add(5 * time.Second)
++		for {
++			if _, _, err := c1.Read(context.Background()); err != nil {
++				break
++			}
++			if time.Now().After(deadline) {
++				t.Fatal("connection still alive after its write deadline passed")
++			}
++		}
++	})
++}
++
++// TestSetWriteDeadlineAllocs is the point of the method: a deadline set this
++// way costs nothing per frame, where bounding a write with a context
++// allocates one in the caller and a context.AfterFunc in here.
++//
++// It is deliberately not parallel — AllocsPerRun panics inside a parallel
++// test.
++func TestSetWriteDeadlineAllocs(t *testing.T) {
++	msg := []byte("hello")
++
++	c1, c2 := wstest.Pipe(nil, nil)
++	defer c1.CloseNow()
++	defer c2.CloseNow()
++	defer drainWriteDeadline(c2)()
++
++	write := func() {
++		if err := c1.Write(context.Background(), websocket.MessageText, msg); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	// Compared against the same write with no deadline set, so this asserts
++	// what the method claims — that a deadline is free — rather than that a
++	// write allocates nothing, which is not this method's business.
++	assert.Success(t, c1.SetWriteDeadline(time.Time{}))
++	write() // warm any one-off buffers before counting
++	without := testing.AllocsPerRun(200, write)
++
++	assert.Success(t, c1.SetWriteDeadline(time.Now().Add(time.Hour)))
++	with := testing.AllocsPerRun(200, write)
++
++	if with > without {
++		t.Fatalf("write with a deadline allocated %v, without a deadline %v; a deadline should be free", with, without)
++	}
++	t.Logf("allocations per write: %v without a deadline, %v with one", without, with)
++}
+diff -urN a/ws_js.go b/ws_js.go
+--- a/ws_js.go	2026-07-27 07:59:51.134414095 +0000
++++ b/ws_js.go	2026-07-27 07:59:51.135414105 +0000
+@@ -8,12 +8,14 @@
+ 	"io"
+ 	"net"
+ 	"net/http"
++	"os"
+ 	"reflect"
+ 	"runtime"
+ 	"strings"
+ 	"sync"
+ 	"sync/atomic"
+ 	"syscall/js"
++	"time"
+ 
+ 	"github.com/coder/websocket/internal/bpool"
+ 	"github.com/coder/websocket/internal/wsjs"
+@@ -64,6 +66,32 @@
+ 	readSignal chan struct{}
+ 	readBufMu  sync.Mutex
+ 	readBuf    []wsjs.MessageEvent
++
++	// writeDeadline is the deadline set by SetWriteDeadline as unix nanos,
++	// or 0 for none.
++	writeDeadline atomic.Int64
++}
++
++// SetWriteDeadline sets a deadline for writes on the connection. Writes
++// that pass it close the connection. A zero t clears the deadline.
++//
++// Writes here are handed to the browser and never block, so unlike the
++// native implementation there is nothing to interrupt: the deadline is
++// checked when a write is attempted, and a write attempted after it has
++// passed closes the connection instead of sending.
++func (c *Conn) SetWriteDeadline(t time.Time) error {
++	if t.IsZero() {
++		c.writeDeadline.Store(0)
++		return nil
++	}
++	c.writeDeadline.Store(t.UnixNano())
++	return nil
++}
++
++// writeDeadlineExceeded reports whether a deadline is set and has passed.
++func (c *Conn) writeDeadlineExceeded() bool {
++	deadline := c.writeDeadline.Load()
++	return deadline != 0 && !time.Now().Before(time.Unix(0, deadline))
+ }
+ 
+ func (c *Conn) close(err error, wasClean bool) {
+@@ -214,6 +242,9 @@
+ 	if c.isClosed() {
+ 		return net.ErrClosed
+ 	}
++	if c.writeDeadlineExceeded() {
++		return os.ErrDeadlineExceeded
++	}
+ 	switch typ {
+ 	case MessageBinary:
+ 		return c.ws.SendBytes(p)
