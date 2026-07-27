@@ -78,13 +78,18 @@ the output.
 
 ### Body
 
-`Write` bounds a write with a context, so a caller wanting a write deadline
-allocates one per frame: a `context.WithTimeout` on its side and, for a
-cancelable context, a `context.AfterFunc` here. A server fanning one message
-out to many connections pays that per recipient rather than per message.
-Profiling a chat server at ~49,600 deliveries/s across 500 connections: about
-**700 bytes of garbage per delivered message**, none of it the message, and
-99% of everything the server allocated.
+A server writing to many connections needs every write bounded, so that one
+client which has stopped reading cannot wedge the goroutine writing to it.
+The only way to express that bound today is a context, and a context costs an
+allocation per frame — which, for one message fanned out to a room, is an
+allocation per recipient. This adds a way to say the same thing with a
+deadline, which costs nothing.
+
+Concretely: `Write` takes a context, so the bound is a `context.WithTimeout`
+in the caller plus, for any cancelable context, a `context.AfterFunc` here.
+Profiling a chat server at ~49,600 deliveries/s across 500 connections put
+that at about **700 bytes of garbage per delivered message**, none of it the
+message, and 99% of everything the server allocated.
 
 A deadline is an instant, and an instant needs no allocation to express:
 
