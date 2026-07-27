@@ -363,6 +363,48 @@ closure over the connection and therefore a heap allocation on every
 frame. It cost 7.7MB per 20s and was the entire remaining allocation on
 that path. Returning a bool and calling a method took it to zero.
 
+## Confirmed after adoption, and two knobs that do nothing (27 Jul 2026)
+
+Re-run against `b895888`, the committed deadline version, 500 connections at
+2/s in one channel. The numbers hold, and 4x on either buffer changes
+nothing:
+
+| config | delivered | mean | p50 | p99 | alloc/20s | CPU/20s | `write(2)` |
+|---|---|---|---|---|---|---|---|
+| defaults (`Capacity` 4096, `WriteBatch` 16) | 99.98% | 3.38ms | 3.33ms | 9.22ms | 9.0MB | 12.36s | 72.3% |
+| `Capacity` 16384 | 99.99% | 3.59ms | 3.33ms | 9.22ms | 0 | 12.60s | 70.3% |
+| `WriteBatch` 64 | 99.99% | 3.54ms | 3.33ms | 10.24ms | 3.5MB | 12.63s | 70.6% |
+
+Against the context-per-frame baseline of 4.20ms mean, 689MB and 14.33s,
+all three sit in the same place. The three are indistinguishable from each
+other, and both null results were predictable:
+
+- **`Capacity` is inert here because nobody lags.** At 100 messages a second
+  into 500 members every pump keeps up, so the ring never approaches its
+  wrap limit and its size cannot matter. Capacity buys tolerance for the lag
+  *spread*, which only bites under overload — that is where
+  `state/broadcast.md` measured 256 collapsing at ten thousand subscribers
+  while 4096 held. It is not free: 16384 slots is ~393KB of slice headers per
+  ring per codec and pins up to 16384 message buffers from collection.
+- **`WriteBatch` is inert here because a batch is one frame.** A pump woken
+  at 100 messages a second has a single frame waiting, so a 64-slot batch
+  behaves exactly like a 16-slot one. It only bites when a pump is behind —
+  and note it is coupled to `WriteTimeout`, because `writeBatch` gives the
+  whole batch one deadline: at 64 a lagging client gets a quarter the time
+  per frame that it gets at 16. Raising one means thinking about the other.
+
+**The residual allocation is not the write path.** Zero write-path entries
+in two of three runs, and in the third the only two were the per-pump
+`batch` slice (`membership.go`, once per membership, not per frame) and one
+sampled `context.WithTimeout` from the **read** pump's `IdleTimeout`
+(`conn.go`), which this work never touched. The rest is connection setup:
+`bufio` buffers, the per-connection cancel context, HTTP request parsing.
+The 0-to-9MB spread across runs is just which setup happened to land inside
+the 20s window.
+
+If anyone wants the next slice of this, it is the read pump's per-read
+`context.WithTimeout`, not anything on the write side.
+
 ## Pending
 
 - Two machines. Everything above shares a laptop with the server, so the
