@@ -152,12 +152,10 @@ it is a real narrowing against a per-call context.
 
 #### Not in this PR
 
-- No `SetReadDeadline`; the symmetric change wants its own thought about
+- No `SetReadDeadline`. The symmetric change wants its own thought about
   `CloseRead` and ping handling.
-- No `net.Conn` on `Conn` — `NetConn` stays the way to get that.
-- No change to existing behaviour, signatures or defaults, and nothing in the
-  library calls `SetWriteDeadline` itself.
-- No framing, masking or compression changes, so no wire bytes move.
+- No `net.Conn` on `Conn`. This is one method, not a step toward that;
+  `NetConn` stays the way to get it.
 
 Refs #565, #566
 
