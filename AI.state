@@ -130,6 +130,15 @@ _(none yet)_
   library has no `SetWriteDeadline`, so that allocation needs the library
   changed, not the server. Spend optimisation effort there or on a second
   machine, not here.
+- **Do not fork `coder/websocket` for the write-deadline allocation.**
+  Tried: memoising the armed context removes the per-frame amplification
+  completely (overload allocation per context 28.0 → 7.69, the same figure
+  as a server at rest) and about five points of CPU. It changes nothing at
+  steady load, changes no outcome under overload — both collapse — and a
+  fork drops the module out of `govulncheck` for RFC 6455 parsing code.
+  The route worth taking is upstream `SetWriteDeadline` on `Conn`, whose
+  allocation-free timer already exists in the library's `netconn.go`.
+  Measured in `state/loadgen.md`.
 - **A drop happens at exactly the promised slack, in every
   implementation.** Survive at `size` behind, die at `size+1`, asserted
   deterministically rather than inferred from delivery ratios — which is

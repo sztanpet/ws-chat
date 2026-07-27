@@ -210,6 +210,66 @@ the population collapse (2962 lag drops server-side,
 `wschat_fanout_drops_total`, against loadgen's 2958) is the drop policy
 working as designed rather than a CPU wall.
 
+## The setupWriteTimeout patch (tried, measured, not adopted)
+
+The profile above says `coder/websocket`'s `setupWriteTimeout` is 87% of
+the garbage under overload. It arms a fresh `context.AfterFunc` on every
+frame and disarms it when that frame completes, so `writeBatch` — one
+context, up to `WriteBatch`=16 frames — arms the same deadline on the same
+context sixteen times, each arming cancelling the last. Fifteen of sixteen
+are waste.
+
+Patched in a local fork (`replace` directive, ~50 lines in `conn.go`):
+remember the context whose deadline is armed, skip re-arming for the same
+one, and return false so `writeFrame`'s deferred disarm never runs. The
+library's own suite passes under `-race`, and so does this one.
+
+**It works, and it is not worth taking.** Allocation normalised by
+`time.newTimer` bytes, which counts contexts created and so is stable
+across runs that collapse differently:
+
+| run | total/ctx | AfterFunc/ctx |
+|---|---|---|
+| baseline steady | 7.83 | 3.96 |
+| patched steady | 7.45 | 3.57 |
+| baseline overload | **28.00** | **21.15** |
+| patched overload | **7.69** | **3.34** |
+
+The amplification is gone: a patched server under overload allocates the
+same per context as one at rest, where the baseline allocated 3.6x more.
+That is 6.3x less `AfterFunc` garbage, and CPU follows —
+`setupWriteTimeout` 7.62% → 2.63%, `mallocgc` 5.59% → 3.15%,
+`gcBgMarkWorker` 2.15% → 0.98%.
+
+Why it is not worth taking anyway:
+
+- **Steady load is unchanged** (730MB against 689MB over 20s, noise, and
+  the wrong direction). A pump woken with one frame arms once per batch
+  either way. The same non-result `conn.writeBatch` itself has.
+- **Overload behaviour is unchanged.** 2845 of 3000 connections dropped
+  patched against 2958 baseline; both collapse. Five points of CPU in a
+  regime where the server is blocked in `write(2)` at 1.74 of 4 cores
+  changes no outcome, which is what the earlier profile predicted.
+- **It is a behaviour change, not purely an optimisation.** The deadline
+  stays live between frames and after the last one until the context is
+  cancelled or superseded, so a caller holding a live cancellable context
+  and not writing would lose its connection at the deadline. Fine for a
+  pump that cancels via defer; not something upstream should take as-is.
+- **Forking costs the vuln feed.** `govulncheck` tracks
+  `github.com/coder/websocket` and the module is current (v1.8.15, the
+  latest). A fork under another path drops out of that for single-digit
+  CPU in a regime that is already lost. Bad trade for RFC 6455 parsing
+  code.
+
+If anyone wants the win properly, the route is upstream, and the better
+proposal is not this patch but `SetWriteDeadline` on `Conn` — the library
+already has the allocation-free timer pattern in `netconn.go` (one
+`time.AfterFunc` per conn at construction, `Reset` per deadline). With
+that, the server passes a non-cancellable context, `setupWriteTimeout`
+returns at its first line, and *both* this garbage and our own
+per-batch `context.WithTimeout` disappear rather than just the
+amplification.
+
 ## Pending
 
 - Two machines. Everything above shares a laptop with the server, so the
