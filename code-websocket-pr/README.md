@@ -101,9 +101,12 @@ It stores the instant in an `atomic.Int64`, and `writeFrame` arms a
 `*time.Timer` created once per connection, using only `Reset` and `Stop` —
 `netconn.go` already makes stopped timers this way for `net.Conn` deadlines.
 Combined with a non-cancelable context on `Write`, which #566 made free, the
-write path allocates nothing. The deadline is unset by default, so existing
-callers are unaffected: with none set, `writeFrame` does one more atomic load
-than before.
+write path allocates nothing.
+
+**It is opt-in and fully backwards compatible.** Nothing in the library calls
+`SetWriteDeadline`; no existing signature, default or behaviour changes; and
+with no deadline set `writeFrame` does one atomic load more than before.
+Callers that never touch it cannot tell the difference.
 
 An expired deadline closes the connection, as an expired context does, and
 refuses that frame with `os.ErrDeadlineExceeded`. A zero `t` clears it. The
