@@ -153,10 +153,70 @@ pumps drain sixteen frames a wakeup.
 No leaks: in-use heap 16MB, and after 2950 connections over the session
 the process is back to 8 goroutines.
 
+## Profiled again with SeqRing (27 Jul 2026, same box, `91c50de`)
+
+Server built without `-race`, `DebugAddr` on the loopback, 20s CPU profile
+and a 20s allocation delta bracketing it. Both regimes, to answer one
+question: now that the fan-out is twice as fast, does the server notice?
+
+**It does not, and the profiles say why.**
+
+| | steady (500 conns, 10% at 2/s) | overload (3000 conns, 90% at 1/s) |
+|---|---|---|
+| delivered | 49.6k/s, 100.00%, p50 3.84ms p99 13.3ms | 199k/s, 7.57%, p50 10.5s, 2958 of 3000 dropped |
+| `conn.channelPump` | 96.16% cum | 95.99% cum |
+| `Syscall6` (write) | 63.01% flat | 65.43% flat |
+| **fan-out total** | **~4.5% cum** | **<1% cum** |
+| `context.WithDeadlineCause` | 7.19% cum | 1.32% cum |
+| `setupWriteTimeout` | 54% of allocation | 86.7% of allocation |
+| allocated in 20s | 689MB | 1.61GB |
+| **fan-out allocation** | **none attributable** | **none attributable** |
+| heap in use / goroutines | 11MB / 1508 | 71MB / 161 |
+
+The fan-out is `seqSub.Recv` at 3.91% and `SeqRing.Broadcast` at 0.56%
+cumulative when the room is healthy, and `broadcastTo` 0.43% plus
+`Recv` 0.26% when it is collapsing. **SeqRing's 24-byte publication does
+not appear in the allocation profile at either load** — at 100 broadcasts a
+second it is tens of kilobytes against 689MB of context machinery.
+
+That is the honest frame for yesterday's fan-out work: a 2x improvement in
+a primitive that is 4.5% of the profile is worth ~2% of the server, which
+is precisely why the wire measurements showed a wash in a quiet room and a
+modest tail improvement in a busy one. **The fan-out was not the
+bottleneck, and now it is even less of one.** The primitive is still worth
+having — the churn win is structural and the paced numbers are real — but
+nobody should expect the next fan-out rewrite to move the server.
+
+`conn.writeBatch` is still holding: `WithDeadlineCause` is 1.32% of CPU
+under overload where the pre-fix profile had it at 11.0%. At steady load it
+is 7.19%, because a pump woken with one frame gets one deadline either way
+— the same non-result recorded above, reproduced.
+
+**The remaining target is not ours.** `coder/websocket`'s
+`setupWriteTimeout` allocates a `context.AfterFunc` per `Write` and is
+86.7% of all garbage under overload; the whole context/timer complex is
+99.1% of it at steady load, about 700 bytes per delivered message and none
+of it the message. That matches the ~740 bytes already recorded. The
+library has no `SetWriteDeadline`, so bounding a write means a cancellable
+context, so the allocation is unavoidable without changing or forking the
+library. Anything spent on allocation here should be spent there.
+
+**Caveat on reading the overload column.** The server used 1.74 of 4 cores
+(34.89s of samples in 20s) and the steady run 0.72 — it is not CPU bound in
+either. Under overload it is blocked in `write(2)` against clients that are
+not draining, while the generator on the same box competes for the cores.
+So "the server is behind" here means socket backpressure, not compute, and
+the population collapse (2962 lag drops server-side,
+`wschat_fanout_drops_total`, against loadgen's 2958) is the drop policy
+working as designed rather than a CPU wall.
+
 ## Pending
 
 - Two machines. Everything above shares a laptop with the server, so the
   numbers say more about the box than the code past ~100k deliveries/s.
+  This is now the blocking limitation for fan-out work specifically: the
+  primitive is under 5% of the profile, so anything further needs a box
+  where the server is actually the bottleneck.
 - Nothing exercises `PRIVMSG`, moderation or reconnect churn — the
   generator connects, joins, talks and listens, and that is all.
 - No CSV/JSON output. The report is for reading.

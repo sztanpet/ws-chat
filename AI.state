@@ -24,6 +24,16 @@ between messages has none. Costs 28ns against 8ns on the send path and one
 race-free. Detail, the regimes and three new harness gotchas in
 `state/broadcast.md`.
 
+Then profiled at both loads to see whether the server notices, and **it
+does not**: the fan-out is ~4.5% of CPU at 500 connections and under 1% at
+3000 with 90% talking, with no allocation attributable to it at either.
+96% of CPU is `conn.channelPump` and two thirds of it is `write(2)`, which
+is the right shape for a fan-out server; 87% of the garbage under overload
+is `coder/websocket`'s per-`Write` `context.AfterFunc`, which needs the
+library changed rather than the server. A 2x faster primitive that is 4.5%
+of the profile is worth ~2% — which is exactly why the wire runs showed a
+wash in a quiet room. Numbers in `state/loadgen.md`.
+
 Before that: CI. `.woodpecker.yaml` runs `make test-race`, `make lint` and the
 production build on every push and pull request, and `make vulncheck` on
 a cron; `make init` sets a clone up (linters + the git pre-commit hook)
@@ -112,6 +122,14 @@ _(none yet)_
   proportional to reader contention**, so busy rooms and join/part gain and
   quiet rooms are a wash — worth knowing before optimising this again.
   `Ring` stays as the reference implementation.
+- **The fan-out is not the bottleneck and further fan-out work will not
+  move the server.** Profiled at both loads: under 5% of CPU healthy, under
+  1% collapsing, no attributable allocation. The server is `write(2)` (two
+  thirds of CPU) and `coder/websocket`'s per-`Write` deadline context
+  (~700 bytes per delivered message, 87% of garbage under overload). The
+  library has no `SetWriteDeadline`, so that allocation needs the library
+  changed, not the server. Spend optimisation effort there or on a second
+  machine, not here.
 - **A drop happens at exactly the promised slack, in every
   implementation.** Survive at `size` behind, die at `size+1`, asserted
   deterministically rather than inferred from delivery ratios — which is

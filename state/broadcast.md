@@ -369,6 +369,13 @@ and why it has further to fall when it does not.
 
 - **Settled: `SeqRing` is what `channel.go` builds** (`04f0e8a`). The
   shared-history fairness property never turned out to matter.
+- **Read this before optimising the fan-out again.** Profiled at the wire
+  (`state/loadgen.md`, 27 Jul 2026), the fan-out is ~4.5% of the server's
+  CPU with a healthy room and under 1% with a collapsing one, and no
+  allocation is attributable to it at either. The server is `write(2)` and
+  the websocket library's per-`Write` deadline context. Another 2x here
+  buys ~2% there; the numbers below are real and no longer where the time
+  goes.
 - The per-broadcast allocations are the remaining known cost: the
   replacement notify channel (both implementations, whenever anybody is
   asleep) and `SeqRing`'s 24-byte header publication. Worth attacking only
