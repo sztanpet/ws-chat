@@ -78,6 +78,44 @@ func TestMetricsCountRefusalsByCode(t *testing.T) {
 	requireMetric(t, out, `wschat_refusals_total{code="unknown"} 1`)
 }
 
+// A refusal a hook decided on is counted like any other, on both message
+// paths, because it is sent like any other: the reason becomes the ERR code
+// and conn.reply counts what it sends.
+//
+// It is also the case where the label set leaves the core's hands. It stays
+// closed only as long as a filter returns codes rather than prose, which is
+// why the reason is documented as a short token and why a filter that
+// builds one per message would be a memory leak with a network interface.
+func TestMetricsCountHookRefusals(t *testing.T) {
+	ta := newTestAppWith(t, hook.Hooks{
+		Auth:   optionalAuth{"a": {ID: "u1", Nick: "alice"}},
+		Filter: registeredOnly{},
+	})
+
+	alice, err := ta.dialWith(t, "?token=a")
+	if err != nil {
+		t.Fatalf("dial alice: %v", err)
+	}
+	watcher, err := ta.dialWith(t, "")
+	if err != nil {
+		t.Fatalf("dial the watcher: %v", err)
+	}
+
+	watcher.send(proto.Command{Verb: proto.VerbMsg, Data: "let me in"})
+	watcher.expectErr(proto.ErrNeedLogin)
+	watcher.send(proto.Command{Verb: proto.VerbPriv, Nick: alice.nick, Data: "let me in"})
+	watcher.expectErr(proto.ErrNeedLogin)
+
+	out := ta.scrape(t)
+	requireMetric(t, out, `wschat_refusals_total{code="needlogin"} 2`)
+
+	// Commands are counted as received whether or not they were acted on,
+	// which is what makes the pair worth reading together: a PRIVMSG arrived
+	// and nothing was delivered for it.
+	requireMetric(t, out, `wschat_commands_total{verb="PRIVMSG"} 1`)
+	requireMetric(t, out, "wschat_private_messages_total 0")
+}
+
 func TestMetricsCountRefusedConnections(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth: fakeAuth{byToken: map[string]hook.Identity{"good": {ID: "u1"}}},
