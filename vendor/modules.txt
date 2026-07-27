@@ -1,4 +1,4 @@
-# github.com/coder/websocket v1.8.15
+# github.com/coder/websocket v1.8.15 => ../coder-websocket
 ## explicit; go 1.23
 github.com/coder/websocket
 github.com/coder/websocket/internal/bpool
@@ -17,3 +17,4 @@ github.com/vmihailenco/msgpack/v5/msgpcode
 github.com/vmihailenco/tagparser/v2
 github.com/vmihailenco/tagparser/v2/internal
 github.com/vmihailenco/tagparser/v2/internal/parser
+# github.com/coder/websocket => ../coder-websocket

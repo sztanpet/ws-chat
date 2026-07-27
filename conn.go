@@ -479,45 +479,73 @@ func (c *conn) send(ctx context.Context, frame []byte) {
 // write puts one frame on the socket under a deadline of its own,
 // reporting whether it worked. A client that stops reading must not wedge
 // the goroutine writing to it.
+//
+// ctx is deliberately unused while a deadline does the bounding. It stays in
+// the signature because putting the context back is what reverting to the
+// released coder/websocket means — see the TODO in go.mod.
 func (c *conn) write(ctx context.Context, frame []byte) bool {
-	wctx, cancel := context.WithTimeout(ctx, c.app.cfg.WriteTimeout.Duration())
-	defer cancel()
-	return c.writeTo(wctx, frame)
+	c.armDeadline()
+	defer c.disarmDeadline()
+	return c.writeTo(frame)
+}
+
+// armDeadline bounds every frame written until disarmDeadline by
+// WriteTimeout, using the connection's own deadline rather than a context.
+//
+// An instant costs one atomic store. A context costs a WithTimeout here and
+// a context.AfterFunc inside the library, per frame — which for a broadcast
+// is per member, and measured at ~700 bytes of garbage per delivered
+// message, none of it the message. See state/loadgen.md.
+//
+// TODO: Conn.SetWriteDeadline is not in a released coder/websocket yet, so
+// go.mod pins a fork. The revert instructions are the TODO beside that
+// replace directive.
+func (c *conn) armDeadline() {
+	_ = c.ws.SetWriteDeadline(time.Now().Add(c.app.cfg.WriteTimeout.Duration()))
+}
+
+func (c *conn) disarmDeadline() {
+	_ = c.ws.SetWriteDeadline(time.Time{})
 }
 
 // writeBatch writes a wakeup's worth of frames under ONE deadline.
 //
-// One deadline per batch rather than one per frame, because a deadline
-// costs a context, a timer and three allocations, and a broadcast pays for
-// it once per member. Measured with cmd/loadgen at 49k deliveries a second
-// on a room of 500: building one per frame was 9% of the server's CPU and
-// 99% of everything it allocated — about 740 bytes of garbage per delivered
-// message, none of which was the message. See state/loadgen.md.
-//
 // It bounds a wakeup rather than a write, which is the stricter of the two
-// where it matters. A batch of sixteen frames used to be allowed sixteen
-// times WriteTimeout to drain; now the whole batch gets one, so a client
-// that reads just fast enough to keep restarting the clock no longer holds
-// its pump indefinitely.
+// where it matters. A batch of sixteen frames would otherwise be allowed
+// sixteen times WriteTimeout to drain, so a client that reads just fast
+// enough to keep restarting the clock could hold its pump indefinitely.
+//
+// What originally forced one deadline per batch was its cost — a context, a
+// timer and three allocations, paid once per member of the room. That cost
+// is gone now that a deadline is an instant (see armDeadline), so this is
+// kept for the stricter bound alone, which is the better reason anyway.
+//
+// ctx is unused here for the same reason it is unused in write.
 func (c *conn) writeBatch(ctx context.Context, frames [][]byte) bool {
 	if len(frames) == 0 {
 		return true
 	}
 
-	wctx, cancel := context.WithTimeout(ctx, c.app.cfg.WriteTimeout.Duration())
-	defer cancel()
+	c.armDeadline()
+	defer c.disarmDeadline()
 
 	for _, frame := range frames {
-		if !c.writeTo(wctx, frame) {
+		if !c.writeTo(frame) {
 			return false
 		}
 	}
 	return true
 }
 
-// writeTo puts one frame on the socket under a deadline somebody else set.
-func (c *conn) writeTo(ctx context.Context, frame []byte) bool {
-	if err := c.ws.Write(ctx, c.msgType(), frame); err != nil {
+// writeTo puts one frame on the socket under the deadline armDeadline set.
+//
+// The context is deliberately context.Background(). A cancellable one makes
+// the library arm a context.AfterFunc per frame, which is the allocation the
+// deadline exists to avoid. Nothing is lost: the write is bounded by the
+// deadline instead, and shutdown still unblocks a stuck write, because it
+// closes the connection and every wait inside the library selects on that.
+func (c *conn) writeTo(frame []byte) bool {
+	if err := c.ws.Write(context.Background(), c.msgType(), frame); err != nil {
 		c.log.Debug("write failed", "err", err)
 		_ = c.ws.CloseNow() // unblocks the read pump
 		return false

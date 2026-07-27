@@ -60,12 +60,22 @@ the work in `internal/broadcast`.
 up is dropped (`ErrLagged`) rather than waited on, a private message to
 somebody whose queue is full is refused (`ERR recipientbusy`) rather than
 blocked on, and every socket write is bounded by `WriteTimeout` — one
-deadline per wakeup, covering the whole batch a pump drains, because a
-deadline per frame was 9% of the server's CPU and almost all of what it
-allocated. A
+deadline per wakeup, covering the whole batch a pump drains, because
+bounding a wakeup is stricter than bounding a frame: sixteen frames would
+otherwise get sixteen times the timeout to drain. A
 private message arrives on *somebody else's* read pump, so this is not
 theoretical: without it, one person who stopped reading would stall
 everyone who messages them.
+
+The deadline is set with `Conn.SetWriteDeadline` and the write itself gets
+`context.Background()`, because a context per frame cost a `WithTimeout`
+here and a `context.AfterFunc` in the library — ~700 bytes of garbage per
+delivered message, *per member* of the room, and 99% of everything the
+server allocated. An instant costs one atomic store.
+**`SetWriteDeadline` is not in a released `coder/websocket`**: `go.mod`
+pins a fork of it pending the PR in `code-websocket-pr/`, and the revert
+instructions live beside that `replace` directive. The code is vendored, so
+only `make vendor` needs the fork checked out beside this repo.
 
 Fan-out is `internal/broadcast`. The shape is a shared buffer with each
 subscriber reading at its own position, so a broadcast is O(1) in the

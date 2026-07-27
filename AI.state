@@ -6,7 +6,19 @@ only when you are touching that track.
 
 ## Latest
 
-Fan-out, second iteration. `SeqRing` (`internal/broadcast/seqring.go`) is
+Write deadlines. The server bounds every socket write with
+`Conn.SetWriteDeadline` and hands `Write` a `context.Background()`, which
+takes the write path from ~700 bytes of garbage per delivered message —
+*per member* of the room, and 99% of everything the server allocated — to
+**zero sampled allocations**, with 12% less CPU for identical delivered work
+and mean latency 4.20ms → 3.55ms at 500 connections. `SetWriteDeadline` does
+not exist in a released `coder/websocket`, so `go.mod` pins a fork
+(`feat/conn-set-write-deadline`, `9f84ce4`) **with a TODO to revert once the
+PR lands**; the vendored copy means CI and fresh clones build without the
+fork present. PR, patches and description in `code-websocket-pr/`; numbers
+and the autobahn flake in `state/loadgen.md`.
+
+Before that: fan-out, second iteration. `SeqRing` (`internal/broadcast/seqring.go`) is
 `Ring` with the lock taken off the read path — a pointer per slot so the
 writer never mutates what a reader holds (RCU-shaped, GC as the grace
 period), and a seqlock validated once per batch instead of per message, so
@@ -130,6 +142,13 @@ _(none yet)_
   library has no `SetWriteDeadline`, so that allocation needs the library
   changed, not the server. Spend optimisation effort there or on a second
   machine, not here.
+- **The server now bounds writes with `Conn.SetWriteDeadline`, on a pinned
+  fork of `coder/websocket`, and that pin is temporary.** `go.mod` carries a
+  directory `replace` to the fork with the revert instructions beside it;
+  the code is vendored, so CI and a fresh clone build without the fork and
+  only `make vendor` needs it. This is the one place the repo knowingly
+  depends on unreleased upstream code — revert it the moment
+  `SetWriteDeadline` is in a release. Why it was worth doing:
 - **`SetWriteDeadline` on `coder/websocket`'s `Conn` is the one
   optimisation left that is worth real effort — upstream, not as a fork.**
   Built and measured: garbage per delivered message goes from 729 bytes to
