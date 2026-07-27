@@ -130,15 +130,21 @@ _(none yet)_
   library has no `SetWriteDeadline`, so that allocation needs the library
   changed, not the server. Spend optimisation effort there or on a second
   machine, not here.
-- **Do not fork `coder/websocket` for the write-deadline allocation.**
-  Tried: memoising the armed context removes the per-frame amplification
-  completely (overload allocation per context 28.0 → 7.69, the same figure
-  as a server at rest) and about five points of CPU. It changes nothing at
-  steady load, changes no outcome under overload — both collapse — and a
-  fork drops the module out of `govulncheck` for RFC 6455 parsing code.
-  The route worth taking is upstream `SetWriteDeadline` on `Conn`, whose
-  allocation-free timer already exists in the library's `netconn.go`.
-  Measured in `state/loadgen.md`.
+- **`SetWriteDeadline` on `coder/websocket`'s `Conn` is the one
+  optimisation left that is worth real effort — upstream, not as a fork.**
+  Built and measured: garbage per delivered message goes from 729 bytes to
+  **4.9**, CPU for identical work drops 12%, and mean latency 15%, at the
+  STEADY load where every other change in this repo has been a wash. The
+  write path ends up allocating nothing; what is left is connection setup.
+  A deadline is an instant, and an instant needs no allocation, where a
+  context needs a `WithTimeout` in the caller and an `AfterFunc` in the
+  library. Not adopted only because a fork leaves `govulncheck`'s view of
+  RFC 6455 parsing code. Both halves of the patch and the numbers are in
+  `state/loadgen.md`.
+- **The cheaper variant, memoising the armed context, is not worth it.**
+  It removes the per-frame amplification under overload and changes
+  nothing at steady load, where batches are one frame. Superseded by the
+  above.
 - **A drop happens at exactly the promised slack, in every
   implementation.** Survive at `size` behind, die at `size+1`, asserted
   deterministically rather than inferred from delivery ratios — which is

@@ -261,14 +261,78 @@ Why it is not worth taking anyway:
   CPU in a regime that is already lost. Bad trade for RFC 6455 parsing
   code.
 
-If anyone wants the win properly, the route is upstream, and the better
-proposal is not this patch but `SetWriteDeadline` on `Conn` — the library
-already has the allocation-free timer pattern in `netconn.go` (one
-`time.AfterFunc` per conn at construction, `Reset` per deadline). With
-that, the server passes a non-cancellable context, `setupWriteTimeout`
-returns at its first line, and *both* this garbage and our own
-per-batch `context.WithTimeout` disappear rather than just the
-amplification.
+The better proposal was `SetWriteDeadline` on `Conn`, and it was then
+built and measured. See below — it is a different order of result.
+
+## SetWriteDeadline on Conn (tried, measured, worth upstreaming)
+
+Same fork, 88 lines. `Conn.SetWriteDeadline(t time.Time)` stores an
+instant in an atomic; `writeFrame` arms a per-connection `time.Timer`
+from it — the `netconn.go` pattern, one `time.AfterFunc` per connection at
+construction and nothing but `Reset`/`Stop` thereafter, neither of which
+allocates. The server (31 lines) drops its per-batch
+`context.WithTimeout`, arms the deadline instead, and passes
+`context.Background()` to `Write`, so `setupWriteTimeout` returns at its
+first line and allocates nothing either.
+
+**Garbage per delivered message**, the steady column being the rigorous one
+(deterministic load, 100% delivered, 49.6k/s both times):
+
+| | steady | overload |
+|---|---|---|
+| baseline | 729 B/msg | 424 B/msg |
+| memoize patch | 773 B/msg | 353 B/msg |
+| **SetWriteDeadline** | **4.9 B/msg** | **15.3 B/msg** |
+
+689MB per 20s becomes 4.6MB, and what remains is not the write path at all
+— it is `bufio` buffers for connections being set up, `slog` args and
+`net/http` header parsing. The write path allocates **nothing**.
+
+It is not only garbage. At steady load, where every other change in this
+file was a wash:
+
+| | baseline | SetWriteDeadline |
+|---|---|---|
+| CPU samples per 20s | 14.33s | 12.58s |
+| `write(2)` share | 63.0% | 73.6% |
+| `mallocgc` | 4.82% | 0.24% |
+| `gcBgMarkWorker` | 0.84% | below threshold |
+| mean latency | 4.20ms | 3.56ms |
+| p50 | 3.84ms | 3.33ms |
+
+**12% less CPU for identical delivered work, and 15% off mean latency.**
+Both deadline runs came in at 3.56-3.63ms mean, below every run of every
+other variant measured on this box (the previous best spread was
+3.75-4.24). The profile is now very nearly the syscall and nothing else,
+which is what this server should look like.
+
+Behaviour is preserved where it matters: the overload run still drops slow
+clients by the same mechanism and in the same numbers (2829 lag drops
+against the baseline's 2962), so the deadline is really firing.
+
+The one semantic difference to weigh before proposing it: a deadline on the
+connection is shared by every goroutine writing to it, where a context is
+per call. Arming inside `writeFrame` under `writeFrameMu` means it cannot
+disturb a frame already in flight, and a batch written under one stored
+instant still shares that instant rather than restarting the clock per
+frame — but with several pumps per connection, the last one to set it
+wins. For this server every writer sets the same `WriteTimeout`, so it
+does not matter here; a general API should say so plainly.
+
+**Not adopted, for the same reason as the memoize patch and no other: it
+needs a fork, and forking drops the module out of `govulncheck`.** The
+difference is that this one is worth taking upstream on the strength of the
+numbers rather than filed as a curiosity. Both halves of the patch are
+reproducible from this file; the library half is `SetWriteDeadline`,
+`armWriteDeadline`/`stopWriteDeadline` and two fields on `Conn`, and the
+server half is `armDeadline`/`disarmDeadline` around `writeBatch` plus
+`context.Background()` in `writeTo`.
+
+One trap worth repeating if anyone rebuilds it: the first version had
+`armWriteDeadline` return the `func()` that stops the timer, which is a
+closure over the connection and therefore a heap allocation on every
+frame. It cost 7.7MB per 20s and was the entire remaining allocation on
+that path. Returning a bool and calling a method took it to zero.
 
 ## Pending
 
