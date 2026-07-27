@@ -405,6 +405,39 @@ the 20s window.
 If anyone wants the next slice of this, it is the read pump's per-read
 `context.WithTimeout`, not anything on the write side.
 
+### Raising the Capacity default to 16384
+
+A deployment expecting ~3k users, spiking to multiples of that and rarely to
+100k, wanted more tolerance for the lag spread. The default moved 4096 →
+16384. What the runs say about the cost, interleaved pairs at 500
+connections and 2/s:
+
+```
+        cap 4096            cap 16384
+r1      mean 3.71ms         mean 3.95ms
+r2      mean 3.56ms         mean 3.62ms
+singles mean 3.38, 3.55     mean 3.59, 3.89
+```
+
+Four pairs, all with 16384 the higher of the two, by 0.06-0.24ms — but p50
+was identical in three of four, **no CPU or GC difference is measurable at
+all** (`gcBgMarkWorker`, `gcDrain` and `scanobject` are all below the
+profile's reporting threshold at both capacities, and total CPU samples
+differ by 1.9%), and the histogram's buckets are ~9% wide at 3.5ms. So: a
+consistently signed difference at or below the resolution of the instrument.
+Do not treat it as an established 6% cost, and do not treat it as free
+either.
+
+Heap in use at the new default with one channel live is 6.08MB total, of
+which `NewSeqRing` is ~579kB — consistent with two rings of 128KB (one per
+codec) once heap-profile sampling error on 128KB objects is allowed for.
+
+Worth knowing for anyone tempted to go further: the slot array is
+`[]atomic.Pointer[[]byte]`, allocated eagerly per channel per codec at
+channel creation, so `MaxChannels` sets the worst case — 1024 channels on
+both codecs is 256MB at this capacity and 1GB at 65536. That, rather than
+the latency, is what bounds the default.
+
 ## Pending
 
 - Two machines. Everything above shares a laptop with the server, so the

@@ -57,9 +57,25 @@ type Config struct {
 	// tenth of them talking, 256 collapses to almost no delivery at all and
 	// 4096 delivers 99.8% — see state/broadcast.md.
 	//
-	// The buffer is shared, so this costs 16 bytes a slot for the whole
-	// server rather than per client: 4096 is 64KB however many people are
-	// connected.
+	// Read it as a time window rather than a size: slots divided by the
+	// channel's message rate. The window gets LONGER as a room grows rather
+	// than shorter, because a big room is bound by delivery bandwidth —
+	// members times message rate — and so cannot carry many messages a
+	// second to begin with. At ~350k deliveries/s on four cores, a
+	// hundred-thousand-member channel sustains three or four messages a
+	// second, where this default is over an hour of history. A room that
+	// size sheds clients because the server cannot deliver, and no capacity
+	// fixes that: ChannelLimits on the Limiter hook is the lever.
+	//
+	// Memory is per channel and per codec, not per server, and the slot
+	// array is allocated when the channel is created — 8 bytes a slot, so
+	// 16384 slots is 128KB a ring and 256KB for a channel carrying both
+	// codecs. MaxChannels bounds the worst case: 1024 channels on both
+	// codecs is 256MB of slot arrays, which is why raising this much
+	// further wants MaxChannels lowered or channel creation gated in
+	// CanJoin. A ring also pins the last Capacity encoded frames from
+	// collection, and for a busy channel that is the bigger number — 16384
+	// frames of 150 bytes is ~2.5MB.
 	Capacity int
 
 	// WriteBatch is how many frames a connection's write pump takes per
@@ -127,7 +143,7 @@ type Config struct {
 func Default() Config {
 	return Config{
 		Addr:               ":8080",
-		Capacity:           4096,
+		Capacity:           16384,
 		WriteBatch:         16,
 		MaxFrameSize:       32 << 10,
 		MaxMessage:         512,

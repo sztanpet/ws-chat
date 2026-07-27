@@ -391,6 +391,10 @@ and why it has further to fall when it does not.
   anything else.
 - Untried alternatives, now probably not worth it: slice-based member set,
   sharded map, single owner goroutine.
-- Capacity for a real channel is now measured, not guessed: 256 is too
-  small for a large busy room and 4096 costs 64KB. The server default moved
-  accordingly.
+- Capacity for a real channel is measured, not guessed: 256 is too small
+  for a large busy room, and 4096 was the default until a deployment
+  expecting 3k users with spikes to 100k moved it to **16384**. Read it as a
+  time window (slots over the channel's message rate), which grows with the
+  room since a big room is delivery-bandwidth-bound. The ceiling is
+  `MaxChannels`: slots are 8 bytes and allocated per channel per codec at
+  creation, so 16384 x 2 codecs x 1024 channels is 256MB.

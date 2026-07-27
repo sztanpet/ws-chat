@@ -95,7 +95,7 @@ The keys that matter, with their defaults:
 | key | default | what |
 |---|---|---|
 | `Addr` | `:8080` | listen address |
-| `Capacity` | `4096` | fan-out ring slots, shared by all subscribers |
+| `Capacity` | `16384` | fan-out ring slots per channel per codec, shared by that channel's subscribers |
 | `WriteBatch` | `16` | frames a write pump drains per wakeup |
 | `MaxFrameSize` | `32768` | largest inbound frame |
 | `MaxMessage` | `512` | largest message body |
@@ -110,8 +110,16 @@ The keys that matter, with their defaults:
 | `DebugAddr` | `127.0.0.1:6060` | pprof + `/metrics`; empty binds nothing |
 | `LogLevel` | `info` | `debug`, `info`, `warn`, `error` |
 
-`Capacity` is sized for the lag *spread*, not the average — 4096 slots
-is 64KB in total, because the ring's storage is shared. See
+`Capacity` is sized for the lag *spread*, not the average, and is best read
+as a time window: slots over the channel's message rate. The window grows
+with the room, because a big room is bound by delivery bandwidth and cannot
+carry many messages a second in the first place — so a room that sheds
+clients at that size needs a channel rate limit, not a bigger buffer.
+
+Storage is shared by a channel's subscribers, but it is per channel and per
+codec, and the slots are allocated when the channel is created: 8 bytes a
+slot, so 16384 is 256KB for a channel carrying both codecs, and `MaxChannels`
+bounds the worst case at 256MB. See
 [`state/broadcast.md`](state/broadcast.md) for the measurements.
 
 Rate limits are **not** config: they come from the `Limiter` hook, and

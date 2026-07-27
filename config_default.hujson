@@ -18,10 +18,19 @@
 	// rather than waited on.
 	//
 	// Size it for the lag spread, not the average: one straggler thousands
-	// of messages behind is what decides whether anything is dropped. The
-	// buffer is shared, so this is 16 bytes a slot for the whole server,
-	// not per client — 4096 slots is 64KB however many people are here.
-	// "Capacity": 4096,
+	// of messages behind is what decides whether anything is dropped.
+	//
+	// Read it as a time window — slots over the channel's message rate —
+	// which gets longer as a room grows, since a big room is bound by
+	// delivery bandwidth and cannot carry many messages a second anyway. A
+	// room that sheds clients at this size is bandwidth-bound, and the lever
+	// for that is a channel rate limit, not a bigger buffer.
+	//
+	// Costs 8 bytes a slot per channel per codec, allocated when the channel
+	// is created, plus the last Capacity frames held from collection. 16384
+	// is 256KB of slots for a channel on both codecs, and MaxChannels bounds
+	// the worst case at 256MB.
+	// "Capacity": 16384,
 
 	// How many frames a connection's write pump takes per wakeup. Larger
 	// means fewer wakeups for a client that has fallen behind.
