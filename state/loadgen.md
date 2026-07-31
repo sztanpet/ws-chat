@@ -403,7 +403,10 @@ The 0-to-9MB spread across runs is just which setup happened to land inside
 the 20s window.
 
 If anyone wants the next slice of this, it is the read pump's per-read
-`context.WithTimeout`, not anything on the write side.
+`context.WithTimeout`, not anything on the write side. **Do not get excited
+about it**: once labels could separate the read pump from the write pumps it
+measured at 1.42% of CPU *in total*, everything it does included. See
+"Profiled by label" below.
 
 ### Raising the Capacity default to 16384
 
@@ -437,6 +440,67 @@ Worth knowing for anyone tempted to go further: the slot array is
 channel creation, so `MaxChannels` sets the worst case — 1024 channels on
 both codecs is 256MB at this capacity and 1GB at 65536. That, rather than
 the latency, is what bounds the default.
+
+## Profiled by label (31 Jul 2026, same box, `056503d`)
+
+First run since every goroutine got a `pprof.Do` label. The totals were not
+the question — they were settled at `b895888` and are unchanged. The question
+was what the labels answer that the call graph could not, and it is two
+things: the whole partition in one command, and a **per-codec** split, which
+no call graph can produce because both codecs run the same functions.
+
+So the load was deliberately mixed: two generators at once, 250 connections
+each on `chat.json` and `chat.msgpack`, 10% speaking at 2/s, one room. That
+is the same 500-connection / 100 msg/s shape as every steady run above, so
+the totals stay comparable, and the halves are symmetric — each codec's ring
+encodes all 100 msg/s and feeds 250 subscribers.
+
+| | JSON half | msgpack half |
+|---|---|---|
+| delivered | 24.8k/s, 0 dropped, 0 lagged | 24.8k/s, 0 dropped, 0 lagged |
+| mean | 3.57ms | 3.42ms |
+| p50 / p99 | 3.33ms / 11.26ms | 3.07ms / 11.26ms |
+
+The report says **199.95% delivered, and that is not a bug**: `Expected`
+counts a generator's own 250 members, and every message reaches all 500. Two
+generators pointed at one room each see double their denominator. Worth
+knowing before someone reads it as a duplicate-delivery bug.
+
+`go tool pprof -tags` on a 20s CPU profile, which is the whole exercise:
+
+```
+ task: 12.33s (97.16%) channel-pump    codec: 6.39s (50.35%) chat.json
+        180ms ( 1.42%) conn                   6.12s (48.23%) chat.msgpack
+```
+
+- **The read pump and everything behind it is 1.42% of CPU.** 0.79% of that
+  is `handleMsg` — filter, rate limit, encode once per codec, publish to
+  both rings — and 0.55% is the websocket read. That is the ceiling on the
+  read-side optimisation this file has been pointing at since the deadline
+  work, and it is not worth taking.
+- **msgpack costs the server 4.2% less CPU than JSON for identical delivered
+  work**, and 3.2% of it is `write(2)` itself (4.48s flat against 4.63s) —
+  the ~20% smaller frame showing up exactly where it should, in the syscall.
+  This is the first server-side number for the codec choice; everything
+  before it was a claim about the wire.
+- The missing 1.4% is unlabelled, and is the runtime's own goroutines.
+
+The goroutine profile under the same command is a census of the connection
+model: 1500 goroutines, exactly 500 each of `conn`, `priv-pump` and
+`channel-pump`, 750 per codec, plus one `listener`, one `janitor` and three
+`debug-listener`. Back to 8 after the run.
+
+`priv-pump` takes no CPU because the generator never sends a `PRIVMSG`, and
+`record-worker` does not appear at all because no hooks are installed. Those
+two labels are exercised by `TestGoroutinesAreLabelled` and by nothing here.
+
+Nothing regressed: `Syscall6` is 71.87% flat against the 72.3% recorded at
+`b895888`, and the 20s allocation delta is 6.5MB — all connection setup
+(`bufio` buffers, HTTP header parsing, `websocket.Accept`), one sampled
+`context.WithTimeout` from the read pump, and one sampled
+`runtime/pprof.mergeLabelSets`, which is the labelling paying for itself
+once per join rather than per message. The write path still allocates
+nothing.
 
 ## Pending
 

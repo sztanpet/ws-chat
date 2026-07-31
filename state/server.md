@@ -243,6 +243,10 @@ extension points, and a single-channel WebSocket chat server.
 10. **`debug.go` imports `net/http/pprof` as `httppprof`.** `pprof` means
     `runtime/pprof` everywhere else in the package, and only the five mount
     lines want the HTTP end.
+11. **The allocation profile carries no labels.** Only the CPU and goroutine
+    profiles do, so `-tagfocus=task=…` on `/debug/pprof/allocs` silently
+    selects nothing and `-tags` on one prints size classes rather than
+    tasks. "Which goroutine allocated this" is still a call-graph question.
 
 ## Pending
 

@@ -152,6 +152,9 @@ and a client picks one with a WebSocket subprotocol:
 
 - `chat.msgpack` — MessagePack. Offered first and the one to prefer: ~20%
   smaller frames on a typical message and no number-to-string round trip.
+  Measured against JSON on the same room and the same traffic, it costs the
+  server **4.2% less CPU**, three quarters of which is `write(2)` moving
+  fewer bytes (`state/loadgen.md`).
 - `chat.json` — the same document as JSON. The default for a client that
   negotiates nothing, because a client that did not ask is one being
   written by hand against a console.
@@ -557,6 +560,12 @@ nothing. Values must stay a closed set for the same reason metric labels
 must: the profiler keeps a map of every label set it has seen.
 `TestGoroutinesAreLabelled` reads the labels back out of a real goroutine
 profile, since a label nobody can see is not worth the line.
+
+`go tool pprof -tags` prints the whole partition — under load it is 97%
+`channel-pump`, 1.4% `conn` and the rest the runtime — and `codec` splits a
+profile the call graph cannot, since both codecs run the same functions.
+**Labels reach the CPU and goroutine profiles and not the allocation
+profile**, so `-tagfocus` on `allocs` selects nothing.
 
 `internal/loadgen` labels its own goroutines the same way — `barrier`,
 `dialer`, `client`, `reader`, `progress` — which is how "some of the

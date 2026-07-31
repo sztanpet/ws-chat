@@ -6,25 +6,23 @@ only when you are touching that track.
 
 ## Latest
 
-Goroutine labels. Every goroutine the server starts now runs inside
-`pprof.Do` with one key (`task`) and a closed set of values — `listener`,
-`debug-listener`, `conn`, `priv-pump`, `channel-pump`, `janitor`,
-`record-worker` — plus `codec` on the per-connection ones, since that is the
-one thing that varies between two connections doing identical work. It is
-worth the lines because this server's profile is goroutine-shaped:
-`channelPump` is 96% of CPU and there is one per membership, so what the
-time is *for* is the question and the call graph cannot separate a pump from
-the connection that started it. Labels are inherited, so labelling the
-listener labels every net/http handler goroutine and a connection relabels
-the one it borrows for as long as it holds it; `pprof.Do` is called once per
-connection and once per join, never per message. `internal/loadgen` is
-labelled the same way (`barrier`, `dialer`, `client`, `reader`, `progress`),
-though `cmd/loadgen` has no way to take a profile yet. Two traps, both in
-`state/server.md`: labels exist only in the protobuf profile — `?debug=1`
-drops them — and `debug.go` now imports `net/http/pprof` as `httppprof`
-because `pprof` means `runtime/pprof` everywhere else. Verified by
-`TestGoroutinesAreLabelled`, which reads them back out of a real goroutine
-profile. Detail in `state/server.md`.
+Profiled by label, and it paid for itself. A mixed-codec run — two
+generators, 250 connections each on JSON and msgpack, 10% at 2/s into one
+room, the same 500-connection shape as every steady run in
+`state/loadgen.md` — says `go tool pprof -tags`: 97.16% `channel-pump`,
+1.42% `conn`, the rest the runtime, and 50.35% JSON against 48.23% msgpack.
+Two findings. **msgpack costs the server 4.2% less CPU than JSON for
+identical delivered work**, three quarters of it `write(2)` moving fewer
+bytes — the first server-side number for a codec choice that had only ever
+been argued from frame size, and something no call graph can produce because
+both codecs run the same functions. And **the entire read path is 1.42% of
+CPU**, which retires the standing "the next slice is the read pump's
+per-read `context.WithTimeout`" note: the ceiling on it is under 1.4%.
+Nothing regressed (`Syscall6` 71.87% flat against 72.3% recorded), the write
+path still allocates nothing, and the goroutine profile is a census of the
+connection model — 1500 goroutines, 500 each of `conn`, `priv-pump` and
+`channel-pump`. One trap: **labels are in the CPU and goroutine profiles and
+not the allocation profile**. Detail in `state/loadgen.md`.
 
 ## State file index
 
@@ -175,7 +173,9 @@ _(none yet)_
 - **The wire format is negotiated, not configured.** `proto.Codec` is an
   interface over bytes, selected by WebSocket subprotocol. MessagePack
   preferred, JSON the default for anything that did not ask. A ring holds
-  encoded bytes, so there is one broadcaster per codec.
+  encoded bytes, so there is one broadcaster per codec. Preferring msgpack
+  is now measured rather than assumed: 4.2% less server CPU for identical
+  delivered traffic, mostly `write(2)` moving fewer bytes.
 - **The verb lives inside the encoded document**, so an inbound frame costs
   one decode. `proto.Command` is a flat union of every inbound field; one
   struct per verb would reintroduce the second parse. This left the codecs
