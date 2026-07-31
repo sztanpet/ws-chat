@@ -448,3 +448,10 @@ the latency, is what bounds the default.
 - Nothing exercises `PRIVMSG`, moderation or reconnect churn — the
   generator connects, joins, talks and listens, and that is all.
 - No CSV/JSON output. The report is for reading.
+- **The generator's goroutines are labelled (`task=barrier|dialer|client|
+  reader|progress`) but the binary cannot be profiled.** `cmd/loadgen` has
+  no `-cpuprofile` flag and no debug listener, so the labels are only
+  reachable by profiling `internal/loadgen` under test. They exist because
+  "some of the latency being measured is the measuring" is a standing
+  question here and the labels are what would answer it; the flag is two
+  lines whenever somebody wants the answer.

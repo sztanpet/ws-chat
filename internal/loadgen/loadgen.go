@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,24 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/sztanpet/ws-chat/internal/proto"
+)
+
+// The generator labels its goroutines for the same reason the server does,
+// and for one of its own: it shares a machine with the thing it is
+// measuring, and "some of the latency is the measuring" is a claim a
+// profile of this process should be able to settle. A run is a handful of
+// roles — dialing, reading, speaking, printing — and which of them is
+// burning the CPU is the question worth asking.
+//
+// Same convention as the server: one key, values from a closed set.
+const labelTask = "task"
+
+const (
+	taskBarrier  = "barrier"
+	taskDialer   = "dialer"
+	taskClient   = "client"
+	taskReader   = "reader"
+	taskProgress = "progress"
 )
 
 // Config is a run.
@@ -162,11 +181,17 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	var settling sync.WaitGroup
 	settling.Add(cfg.Conns)
 	start := make(chan struct{})
-	go func() { settling.Wait(); close(start) }()
+	go pprof.Do(runCtx, pprof.Labels(labelTask, taskBarrier), func(context.Context) {
+		settling.Wait()
+		close(start)
+	})
 
 	var wg sync.WaitGroup
 	wg.Add(cfg.Conns)
-	go func() {
+	// The labelled context shadows runCtx deliberately: it is the same
+	// cancellation with the labels attached, and every connection dialed
+	// below has to inherit them.
+	go pprof.Do(runCtx, pprof.Labels(labelTask, taskDialer), func(runCtx context.Context) {
 		pause := time.Duration(0)
 		if cfg.Ramp > 0 {
 			pause = cfg.Ramp / time.Duration(cfg.Conns)
@@ -185,10 +210,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			}
 			go func() {
 				defer wg.Done()
-				c.run(runCtx, &settling, start)
+				pprof.Do(runCtx, pprof.Labels(labelTask, taskClient), func(ctx context.Context) {
+					c.run(ctx, &settling, start)
+				})
 			}()
 		}
-	}()
+	})
 
 	select {
 	case <-start:
@@ -197,7 +224,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	begin := time.Now()
 	if cfg.Progress > 0 && cfg.Out != nil {
-		go progress(runCtx, cfg, st, begin)
+		go pprof.Do(runCtx, pprof.Labels(labelTask, taskProgress), func(ctx context.Context) {
+			progress(ctx, cfg, st, begin)
+		})
 	}
 
 	if cfg.Duration > 0 {
@@ -286,7 +315,7 @@ func (c *client) run(ctx context.Context, settling *sync.WaitGroup, start <-chan
 	go func() {
 		defer close(done)
 		defer dead()
-		c.read(connCtx)
+		pprof.Do(connCtx, pprof.Labels(labelTask, taskReader), c.read)
 	}()
 
 	// Registered in this order so they run in the other one: cancel the
