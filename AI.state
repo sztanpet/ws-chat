@@ -6,95 +6,25 @@ only when you are touching that track.
 
 ## Latest
 
-Read-only unregistered users, confirmed rather than built. "Anybody may
-watch, only logged-in users may talk" needed no core change: `Authenticate`
-hands back a zero `Identity` instead of `ErrUnauthorized` so the lurker is
-served, and a `Filter` refuses `from.Anonymous()` — the two hooks refuse
-different things (the connection, the message) and the read-only window is
-the gap between them. It works because `MSG` and `PRIVMSG` are the only
-verbs a filter sees; `JOIN`, `PART`, `NAMES` and the backlog are not speech
-and keep working, which is what makes it *watching*. Locked in by
-`TestUnregisteredMayWatchButNotTalk` and `TestUnregisteredMayStillJoinAndSee`
-in `features_test.go`, with the recipe in `README.md` under "Extending it".
-The one addition is `proto.ErrNeedLogin` ("needlogin"), a code the core
-never sends: clients switch on ERR codes, so the vocabulary belongs in
-`proto` rather than in each deployment's filter. Detail in
-`state/server.md`.
-
-Before that: write deadlines. The server bounds every socket write with
-`Conn.SetWriteDeadline` and hands `Write` a `context.Background()`, which
-takes the write path from ~700 bytes of garbage per delivered message —
-*per member* of the room, and 99% of everything the server allocated — to
-**zero sampled allocations**, with 12% less CPU for identical delivered work
-and mean latency 4.20ms → 3.55ms at 500 connections. `SetWriteDeadline` does
-not exist in a released `coder/websocket`, so `go.mod` pins a fork
-(`feat/conn-set-write-deadline`, `9f84ce4`) **with a TODO to revert once the
-PR lands**; the vendored copy means CI and fresh clones build without the
-fork present. PR, patches and description in `code-websocket-pr/`; numbers
-and the autobahn flake in `state/loadgen.md`.
-
-Before that: fan-out, second iteration. `SeqRing` (`internal/broadcast/seqring.go`) is
-`Ring` with the lock taken off the read path — a pointer per slot so the
-writer never mutates what a reader holds (RCU-shaped, GC as the grace
-period), and a seqlock validated once per batch instead of per message, so
-a `Recv` is atomic loads with no read-modify-write anywhere. `channel.go`
-builds these now. Paced fan-out is 8.15 ns/msg against Ring's 17.50 at a
-thousand subscribers and 8.22 against 15.12 at ten thousand (medians of
-eight); churn under load is 219ns against 586 with one sender and 236ns
-against 1476 with four, and **flat in the sender count** because
-`Subscribe` takes no lock to queue behind. At the wire a busy room (700
-conns, 195k deliveries/s) improves mean and tail on both interleaved
-rounds; a quiet room is a wash, which is the design being honest — what it
-removes is reader contention, and a room where every write pump sleeps
-between messages has none. Costs 28ns against 8ns on the send path and one
-24-byte allocation per broadcast, which the indirection needs to stay
-race-free. Detail, the regimes and three new harness gotchas in
-`state/broadcast.md`.
-
-Then profiled at both loads to see whether the server notices, and **it
-does not**: the fan-out is ~4.5% of CPU at 500 connections and under 1% at
-3000 with 90% talking, with no allocation attributable to it at either.
-96% of CPU is `conn.channelPump` and two thirds of it is `write(2)`, which
-is the right shape for a fan-out server; 87% of the garbage under overload
-is `coder/websocket`'s per-`Write` `context.AfterFunc`, which needs the
-library changed rather than the server. A 2x faster primitive that is 4.5%
-of the profile is worth ~2% — which is exactly why the wire runs showed a
-wash in a quiet room. Numbers in `state/loadgen.md`.
-
-Before that: CI. `.woodpecker.yaml` runs `make test-race`, `make lint` and the
-production build on every push and pull request, and `make vulncheck` on
-a cron; `make init` sets a clone up (linters + the git pre-commit hook)
-and `make lint` now refuses to run without the tools instead of dying
-halfway through. Getting there meant clearing the 19 findings `make lint`
-had accumulated, none of them a bug. Every Go cache lives on the agent's
-persistent `/cache` volume, the same convention as `kikapcsologo/backend`.
-`make update-deps` moved no module — they were all current — but
-govulncheck caught the toolchain pin at go1.26.4 with a `crypto/tls` CVE
-fixed in go1.26.5, so the pin is bumped and `update-deps` now updates it
-too. Detail, the step table and the rough edges — still on the v1
-golangci-lint module path, no cron created yet — in `state/ci.md`.
-
-Before that: the load generator. `cmd/loadgen` is a separate process holding N
-connections open, a configurable percentage of which talk, reporting
-delivery ratio, latency percentiles, refusals by `ERR` code and
-disconnections by close reason. Mechanics in `internal/loadgen`, detail
-and measurements in `state/loadgen.md`.
-
-First numbers on one laptop with the server beside it: 500 connections
-with 10% speaking is 47k deliveries/s at 99.8% and p99 20ms; 1500
-connections with 20% speaking at 20/s is where the server starts dropping
-people for lag, which the report names (`StatusPolicyViolation: too
-slow`). Anything past ~100k deliveries/s on one box is measuring the box.
-
-Profiling under that load found one thing worth fixing, and it is fixed:
-`conn.write` built a `context.WithTimeout` per delivered frame, which was
-99% of everything the server allocated. A write pump now drains its whole
-batch under one deadline (`conn.writeBatch`), so `WriteTimeout` bounds a
-wakeup rather than a single frame — the stricter reading where it matters.
-At a quiet 49k deliveries/s it changes nothing, because a batch is one
-frame; at 3000 connections with 90% speaking it takes `WithTimeout` from
-11% of CPU to 1.7% and garbage from 9.95GB per 20s to 1.24GB. Numbers in
-`state/loadgen.md`.
+Goroutine labels. Every goroutine the server starts now runs inside
+`pprof.Do` with one key (`task`) and a closed set of values — `listener`,
+`debug-listener`, `conn`, `priv-pump`, `channel-pump`, `janitor`,
+`record-worker` — plus `codec` on the per-connection ones, since that is the
+one thing that varies between two connections doing identical work. It is
+worth the lines because this server's profile is goroutine-shaped:
+`channelPump` is 96% of CPU and there is one per membership, so what the
+time is *for* is the question and the call graph cannot separate a pump from
+the connection that started it. Labels are inherited, so labelling the
+listener labels every net/http handler goroutine and a connection relabels
+the one it borrows for as long as it holds it; `pprof.Do` is called once per
+connection and once per join, never per message. `internal/loadgen` is
+labelled the same way (`barrier`, `dialer`, `client`, `reader`, `progress`),
+though `cmd/loadgen` has no way to take a profile yet. Two traps, both in
+`state/server.md`: labels exist only in the protobuf profile — `?debug=1`
+drops them — and `debug.go` now imports `net/http/pprof` as `httppprof`
+because `pprof` means `runtime/pprof` everywhere else. Verified by
+`TestGoroutinesAreLabelled`, which reads them back out of a real goroutine
+profile. Detail in `state/server.md`.
 
 ## State file index
 
@@ -263,6 +193,11 @@ _(none yet)_
   slice, so one wakeup drains everything pending and can coalesce it into a
   single socket write. This is what makes shared-storage fan-out possible
   at all.
+- **Every goroutine is started inside `pprof.Do`**, labelled `task=<role>`
+  from a closed set. A new long-lived goroutine gets a label and a name in
+  the `debug.go` const block, in the same commit — an unlabelled one is
+  invisible in a profile that everything around it is visible in. Values
+  stay closed for the same reason metric labels do.
 
 ## Removed
 

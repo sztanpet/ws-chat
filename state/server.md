@@ -194,6 +194,16 @@ extension points, and a single-channel WebSocket chat server.
   `needlogin` is a named code in `proto` even though the core never sends
   it: a client has to switch on it, and a vocabulary every deployment
   invents for itself is not a protocol.
+- **Every goroutine is labelled with `pprof.Do`** — one key (`task`), a
+  closed set of values in `debug.go`, plus `codec` on the per-connection
+  ones. It is worth the lines because the profile of this server is
+  goroutine-shaped: `channelPump` is 96% of CPU and there is one per
+  membership, so what the time is *for* is the question, and the call graph
+  cannot separate a pump from the connection that started it. Labels are
+  inherited, so labelling the listener labels every handler goroutine, and
+  a connection relabels the one it borrows for as long as it holds it.
+  `pprof.Do` is called once per connection and once per join, never per
+  message.
 
 ## Gotchas
 
@@ -224,6 +234,15 @@ extension points, and a single-channel WebSocket chat server.
 8. **A moderation target may be offline, so `target *conn` can be nil.**
    Everything after the lookup has to cope: there is nobody to part from a
    channel, and a server-wide action has no room to be announced in.
+9. **Goroutine labels are only in the protobuf profile.** `?debug=1` prints
+   the text form and drops them, which makes it look like the labelling is
+   not working. `TestGoroutinesAreLabelled` therefore reads the binary
+   form, and matches the pprof string-table framing rather than the bare
+   text — a search for `conn` in a profile of this package matches
+   `(*conn).serve` whether anything is labelled or not.
+10. **`debug.go` imports `net/http/pprof` as `httppprof`.** `pprof` means
+    `runtime/pprof` everywhere else in the package, and only the five mount
+    lines want the HTTP end.
 
 ## Pending
 

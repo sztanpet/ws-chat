@@ -5,7 +5,8 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"net/http/pprof"
+	httppprof "net/http/pprof"
+	"runtime/pprof"
 	"time"
 )
 
@@ -24,6 +25,34 @@ import (
 // being refused, which is operational detail that does not belong on a
 // public endpoint. Point the scraper at this address, and bind it to an
 // interface the scraper can reach if that is not the loopback.
+
+// Every goroutine the server starts is labelled with pprof.Do, so a
+// profile says which of them the time went to rather than which function.
+// That is the distinction that matters here: conn.channelPump is 96% of
+// CPU under load and there is one of it per membership, so "where is the
+// time" is answered by what a goroutine is *for* — feeding a room, writing
+// a private message, draining the record queue — and the call graph alone
+// cannot separate a pump from the connection that started it.
+//
+// Labels are inherited by whatever a labelled goroutine starts, which is
+// most of the arrangement: net/http's handler goroutines come out of the
+// listener already labelled, and a connection's pumps come out of the
+// connection. Each then labels itself over the top, since the same key
+// wins the closest binding.
+//
+// One key, and values from a closed set, for the same reason metric labels
+// are. Filter a profile with `-tagfocus=task=channel-pump`.
+const labelTask = "task"
+
+const (
+	taskListener = "listener"
+	taskDebug    = "debug-listener"
+	taskConn     = "conn"
+	taskPrivPump = "priv-pump"
+	taskChanPump = "channel-pump"
+	taskJanitor  = "janitor"
+	taskRecord   = "record-worker"
+)
 
 // debugShutdownGrace bounds how long the debug server gets to finish
 // in-flight requests. A CPU profile takes thirty seconds and nobody should
@@ -44,11 +73,15 @@ func (a *app) serveDebug(ctx context.Context) error {
 	// The stdlib registers these on DefaultServeMux as a side effect of
 	// being imported, which is exactly the accident this avoids: they are
 	// mounted here, deliberately, on a mux that is not the public one.
-	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
-	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+	//
+	// Aliased because runtime/pprof is the one the rest of this package
+	// means by "pprof": every goroutine is labelled with it, and only these
+	// five lines want the HTTP end.
+	mux.HandleFunc("GET /debug/pprof/", httppprof.Index)
+	mux.HandleFunc("GET /debug/pprof/cmdline", httppprof.Cmdline)
+	mux.HandleFunc("GET /debug/pprof/profile", httppprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", httppprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", httppprof.Trace)
 
 	listener, err := net.Listen("tcp", a.cfg.DebugAddr)
 	if err != nil {
@@ -65,12 +98,15 @@ func (a *app) serveDebug(ctx context.Context) error {
 	}
 	a.log.Info("debug listener", "addr", a.debugAddr)
 
-	go func() {
+	// Labelled, and so are the handler goroutines it spawns: a CPU profile
+	// includes the work of serving that profile, and it should be possible
+	// to see that is what it is.
+	go pprof.Do(ctx, pprof.Labels(labelTask, taskDebug), func(context.Context) {
 		err := a.debug.Serve(listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			a.log.Error("debug listener stopped", "err", err)
 		}
-	}()
+	})
 	return nil
 }
 

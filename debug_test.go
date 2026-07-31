@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"io"
 	"net/http"
+	"runtime/pprof"
 	"strings"
 	"testing"
 	"time"
@@ -192,6 +195,68 @@ func TestDebugListener(t *testing.T) {
 			t.Errorf("the heap profile looks wrong:\n%.200s", body)
 		}
 	})
+}
+
+// Every goroutine is labelled, and a label is worth exactly nothing unless
+// it reaches a profile. So this asks the runtime for the goroutine profile
+// the way pprof does and looks for the labels in it.
+//
+// The one label not checked here is taskListener: these tests serve over
+// httptest, whose listener goroutine is not ours to label. It is the same
+// two lines as the debug listener, which is checked.
+func TestGoroutinesAreLabelled(t *testing.T) {
+	ta := newTestApp(t, func(c *config.Config) { c.DebugAddr = "127.0.0.1:0" })
+	if err := ta.app.serveDebug(t.Context()); err != nil {
+		t.Fatalf("serveDebug: %v", err)
+	}
+	t.Cleanup(ta.app.closeDebug)
+
+	// A connection is a serve goroutine, a private pump and — once it has
+	// landed in the default channel — a channel pump.
+	c := ta.dial(t)
+	c.send(proto.Command{Verb: proto.VerbMsg, Data: "hello"})
+	c.expectMsg("", "hello")
+
+	profile := goroutineProfile(t)
+	for _, task := range []string{taskConn, taskPrivPump, taskChanPump, taskJanitor, taskDebug} {
+		if !bytes.Contains(profile, stringEntry(task)) {
+			t.Errorf("no goroutine is labelled %s=%q", labelTask, task)
+		}
+	}
+	if !bytes.Contains(profile, stringEntry(labelTask)) {
+		t.Errorf("the label key %q is not in the profile", labelTask)
+	}
+}
+
+// goroutineProfile is the goroutine profile in its protobuf form, which is
+// the only form that carries labels: the text form (?debug=1) drops them.
+func goroutineProfile(t *testing.T) []byte {
+	t.Helper()
+
+	var gz bytes.Buffer
+	if err := pprof.Lookup("goroutine").WriteTo(&gz, 0); err != nil {
+		t.Fatalf("goroutine profile: %v", err)
+	}
+	zr, err := gzip.NewReader(&gz)
+	if err != nil {
+		t.Fatalf("the profile is not gzipped: %v", err)
+	}
+	raw, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("reading the profile: %v", err)
+	}
+	return raw
+}
+
+// stringEntry is how one entry of a pprof string table appears on the wire:
+// field 6, length-delimited. Everything a profile names goes through that
+// table, labels included.
+//
+// Matching the framing rather than the bare text is the point. A profile of
+// this package mentions (*conn).serve either way, so a search for "conn"
+// alone would pass whether or not anything is labelled with it.
+func stringEntry(s string) []byte {
+	return append([]byte{6<<3 | 2, byte(len(s))}, s...)
 }
 
 // An empty DebugAddr binds nothing at all.

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"runtime/pprof"
 
 	"github.com/coder/websocket"
 
@@ -114,7 +115,9 @@ func (c *conn) join(ctx context.Context, name string, force bool) string {
 		c.log.Error("cannot encode JOIN", "channel", name, "err", err)
 	}
 
-	go c.channelPump(ctx, m)
+	go pprof.Do(ctx, c.labels(taskChanPump), func(ctx context.Context) {
+		c.channelPump(ctx, m)
+	})
 
 	c.app.metrics.joinsTotal.Inc()
 	c.log.Debug("joined", "channel", name)

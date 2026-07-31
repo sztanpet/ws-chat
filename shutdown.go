@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os/signal"
+	"runtime/pprof"
 	"syscall"
 	"time"
 
@@ -24,15 +25,19 @@ func (a *app) run(ctx context.Context) error {
 		return err
 	}
 
+	// Labelling the listener labels every handler goroutine it starts,
+	// which is what puts /health and a rejected upgrade somewhere sensible
+	// in a profile. A connection that survives the upgrade relabels itself
+	// as taskConn and keeps that goroutine for its whole life.
 	serving := make(chan error, 1)
-	go func() {
+	go pprof.Do(ctx, pprof.Labels(labelTask, taskListener), func(context.Context) {
 		a.log.Info("listening", "addr", a.cfg.Addr)
 		err := a.srv.ListenAndServe()
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}
 		serving <- err
-	}()
+	})
 
 	select {
 	case err := <-serving:

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -156,9 +157,9 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 	}
 
 	a.ctx, a.stopConn = context.WithCancel(context.Background())
-	go a.janitor(a.ctx)
+	go pprof.Do(a.ctx, pprof.Labels(labelTask, taskJanitor), a.janitor)
 	if hooks.Recorder != nil || hooks.Sanctions != nil {
-		go a.recordWorker(a.ctx)
+		go pprof.Do(a.ctx, pprof.Labels(labelTask, taskRecord), a.recordWorker)
 	} else {
 		close(a.recordsDone)
 	}

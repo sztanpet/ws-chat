@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"runtime/pprof"
 	"sync"
 	"time"
 
@@ -59,6 +60,19 @@ type conn struct {
 	releaseLimit func()
 
 	log *slog.Logger
+}
+
+// labels names one of this connection's goroutines for the profiler. The
+// codec goes on every one of them because it is the one thing that varies
+// between two connections doing identical work — a msgpack client and a
+// JSON one encode and decode differently, and a profile that cannot tell
+// them apart cannot say which.
+//
+// Both values come from a closed set, for the reason metric labels do: a
+// nick or a channel name is client-controlled, and the profiler keeps a
+// map of every label set it has seen.
+func (c *conn) labels(task string) pprof.LabelSet {
+	return pprof.Labels(labelTask, task, "codec", c.codec.Name())
 }
 
 // msgType is the WebSocket message type this connection's codec speaks.
@@ -138,7 +152,12 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Deliberately not r.Context(): the connection is hijacked, and its
 	// lifetime is now the server's shutdown, not the request's.
-	c.serve(a.ctx)
+	//
+	// This goroutine is net/http's, borrowed for as long as the connection
+	// lasts, so the label replaces the listener's for that whole time. The
+	// pumps started inside inherit it through the context and label
+	// themselves over the top.
+	pprof.Do(a.ctx, c.labels(taskConn), c.serve)
 }
 
 // serve runs the connection until either side gives up.
@@ -172,7 +191,10 @@ func (c *conn) serve(parent context.Context) {
 
 	var pumps sync.WaitGroup
 	pumps.Add(1)
-	go func() { defer pumps.Done(); c.privPump(ctx) }()
+	go func() {
+		defer pumps.Done()
+		pprof.Do(ctx, c.labels(taskPrivPump), c.privPump)
+	}()
 
 	// Then wherever the connection belongs. Each join announces itself and
 	// replays that channel's history, so a client's first frames are READY,

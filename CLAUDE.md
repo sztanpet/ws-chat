@@ -540,6 +540,30 @@ and anyone who can reach `/debug/pprof/profile` can pin a core for thirty
 seconds as often as they like. Move the bind address only to an interface
 that only a scraper can reach.
 
+**Every goroutine is labelled** with `pprof.Do`, so a profile can be asked
+what the time went to rather than only which function it was in. The
+vocabulary is in `debug.go`: one key, `task`, and a closed set of values —
+`listener`, `debug-listener`, `conn`, `priv-pump`, `channel-pump`,
+`janitor`, `record-worker`. Connection goroutines carry a second label,
+`codec`, because that is the one thing that varies between two connections
+doing identical work. Filter with `-tagfocus=task=channel-pump`.
+
+The nesting does most of the work: labels are inherited, so net/http's
+handler goroutines come out of the listener already labelled and a
+connection's pumps come out of the connection, each relabelling itself over
+the top. Nothing here is on the message path — a `pprof.Do` is once per
+connection and once per join — so the label set is built where it costs
+nothing. Values must stay a closed set for the same reason metric labels
+must: the profiler keeps a map of every label set it has seen.
+`TestGoroutinesAreLabelled` reads the labels back out of a real goroutine
+profile, since a label nobody can see is not worth the line.
+
+`internal/loadgen` labels its own goroutines the same way — `barrier`,
+`dialer`, `client`, `reader`, `progress` — which is how "some of the
+latency is the measuring" stops being a guess. The binary has no profiling
+endpoint of its own yet, so today they are read by profiling the package
+under test.
+
 `/metrics` is the Prometheus text format, written by `internal/metrics` —
 a hand-rolled registry rather than the client library, because what the
 server needs is a few atomic counters and a way to print them. The
