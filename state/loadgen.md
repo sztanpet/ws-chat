@@ -639,6 +639,68 @@ could be anything). It does not record which, so this one cannot be chased
 without splitting that counter — a few lines, and worth doing before anyone
 next runs a big networked test.
 
+## How much can it actually serve (31 Jul 2026)
+
+Everything above measures one load or the shape of a collapse. This is the
+sweep that answers "what is the ceiling": 500 connections in one room, the
+generators on the 12-thread host so the client side is never the limit, the
+server on this 4-vCPU guest, and the message rate raised until it broke.
+Server CPU is the process's own `utime+stime` over the run.
+
+| deliveries/s | delivered | p50 | mean | server cores | µs CPU/delivery |
+|---|---|---|---|---|---|
+| 49.4k | 100.00% | 2.56ms | 2.62ms | 0.65 | 13.2 |
+| 98.7k | 100.00% | 2.56ms | 2.81ms | 1.15 | 11.6 |
+| 197k | 99.97% | 3.58ms | 4.28ms | 1.89 | 9.6 |
+| 296k | 99.98% | 5.63ms | 6.70ms | 2.32 | 7.8 |
+| 394k | 99.83% | 9.22ms | 14.2ms | 2.53 | 6.4 |
+| 494k | 99.98% | 11.3ms | 19.4ms | 2.75 | 5.6 |
+| **595k** | **99.97%** | **18.4ms** | **28.8ms** | **2.90** | **4.9** |
+| 693k | 99.76% | 49.2ms | 82.7ms | — | — |
+| 773k | 97.29% | 393ms | 514ms | 2.96 | 3.8 |
+
+**~600k deliveries/s is the knee on this box**, at 99.97% and p50 18ms.
+Past it latency goes up 20x for 30% more traffic and that is the whole
+story of the last two rows.
+
+Three things in that table are worth more than the headline number.
+
+**Nothing was ever dropped.** There is no `losses` line anywhere in the
+sweep, at any rate, including the row delivering 97%. The ring absorbed the
+backlog and the shortfall is messages still in flight when the run stopped.
+Degradation here is latency, not shedding — which is the opposite of the
+3000-connection runs, and the difference is *fan-out per message*, not
+aggregate throughput. 2700 senders into a 3000-member room is 8.1M
+deliveries/s asked for, more than ten times this ceiling; 500 members at
+1200 msg/s is inside it.
+
+**CPU per delivery improves 3.5x as load rises** — 13.2µs at 50k/s down to
+3.8µs at 773k/s. That is `WriteBatch` doing exactly what it was for: at low
+rates a pump wakes with one frame and pays a full wakeup for it, and under
+load it drains a batch under one deadline and one lock acquisition. The
+"`WriteBatch` is inert" null result recorded earlier is only true at the
+steady load it was measured at.
+
+**The limit is the kernel, not this code.** At the knee the VM is at **0%
+idle with 69% system against 31% user**, ~54k interrupts/s, while the server
+process accounts for only 2.9 of 4 cores. The missing core is softirq and
+virtio handling that is not charged to the process. So the ceiling here is
+the network path, which is consistent with every profile in this file
+saying `write(2)` and with the 3x virtualisation tax measured above.
+
+For sizing, the number that matters is the product, not the connection
+count: **deliveries/s = senders × rate × room size**. At 600k/s that is a
+500-person room at 1200 msg/s, a 3000-person room at 200 msg/s, or a
+10000-person room at 60 msg/s. Connection count is the soft limit by
+comparison — 3000 connections were 71MB of heap and three goroutines each,
+and none of them was ever the thing that gave out.
+
+Bandwidth arrives at almost exactly the same place. A `MSG` with a 64-byte
+body encodes to **163 bytes as JSON and 140 as MessagePack** (envelope 99
+and 76), so 600k deliveries/s is ~99MB/s or ~790Mbit/s: **a 1GbE link is
+the wall within a few percent of where this VM's CPU is**. On better
+hardware the NIC is what needs sizing first.
+
 ## Pending
 
 - Two machines, and **`proxmox.lan` is not one** — this box is a guest on

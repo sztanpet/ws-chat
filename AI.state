@@ -47,7 +47,21 @@ VM loopback, 16.5µs from the VM over virtio — which is the real reason the
 two-machines item stays open. One loose end: a single undecodable msgpack
 frame in 8.78M, only in a networked run, which cannot be attributed because
 loadgen's `garbage` counter does not separate a framing mismatch (a server
-bug) from a decode failure. Detail in `state/loadgen.md`.
+bug) from a decode failure.
+
+Then the capacity question, swept properly with the clients on 12 threads:
+**~600k deliveries/s is the knee** on a 4-vCPU guest — 99.97% delivered at
+p50 18ms, and 30% more traffic costs 20x the latency. **Nothing is ever
+dropped in that sweep**, at any rate: degradation is latency, and shedding
+only happens when fan-out *per message* is the problem, which is what the
+3000-connection collapse was (8.1M deliveries/s asked for). CPU per delivery
+**improves 3.5x with load**, 13.2µs to 3.8µs, which is `WriteBatch` paying
+off and qualifies the earlier "WriteBatch is inert" null result. At the knee
+the VM is at 0% idle with **69% system against 31% user** while the process
+accounts for 2.9 of 4 cores, so the ceiling is the kernel's network path
+rather than this code. Size by the product — senders × rate × room size —
+and note a `MSG` is 163 bytes as JSON, so 1GbE is the wall within a few
+percent of where this box's CPU is. Detail in `state/loadgen.md`.
 
 ## State file index
 
@@ -217,7 +231,13 @@ _(none yet)_
 - **The write pump takes batches, not single messages.** `Sub.Recv` fills a
   slice, so one wakeup drains everything pending and can coalesce it into a
   single socket write. This is what makes shared-storage fan-out possible
-  at all.
+  at all — and it is why cost per delivery *falls* 3.5x as load rises,
+  measured 13.2µs at 50k deliveries/s down to 3.8µs at 773k.
+- **The capacity limit is the kernel's network path, and it is a product.**
+  ~600k deliveries/s on a 4-vCPU guest at p50 18ms, where the box is 0% idle
+  with 69% of it system time and the process itself is 2.9 of 4 cores. Size
+  a deployment by senders × rate × room size, not by connection count, and
+  check the NIC first: 1GbE runs out within a few percent of the same place.
 - **Every goroutine is started inside `pprof.Do`**, labelled `task=<role>`
   from a closed set. A new long-lived goroutine gets a label and a name in
   the `debug.go` const block, in the same commit — an unlabelled one is
