@@ -29,8 +29,25 @@ collapsing populations do not deliver the same number of messages, so quote
 the steady run for the codec. Two traps: **labels are in the CPU and
 goroutine profiles and not the allocation profile**, and an overload profile
 has to be aimed at the twenty seconds after the barrier, or it profiles an
-idle server that has already dropped everybody. Detail in
-`state/loadgen.md`.
+idle server that has already dropped everybody.
+
+Then the same loads over a real network path, which turned up more than the
+labels did. **`proxmox.lan` is not a second machine** — this box is a 4-vCPU
+guest on it — but running the server on the host and the generators in the
+guest still buys separate kernels and a virtio NIC, and there: **msgpack's
+advantage over JSON goes from 4.2% to ~20%** of server CPU, reproduced
+twice and corroborated by client latency, because a real path pays per byte
+on both ends. Bracketed by a third topology where the clients have 12
+threads and cannot be the limit, which puts the codec's own share at 6.5%.
+The overload collapse is **not** the generator and **not** CPU: with clients
+that drain as fast as they can, the server still sheds 2940 of 3000 at 1.78
+of 4 cores, every loss `too slow`, blocked in `write(2)`. And the
+virtualisation tax is 3x — 5.8µs of CPU per delivery on the host, 8.4µs on
+VM loopback, 16.5µs from the VM over virtio — which is the real reason the
+two-machines item stays open. One loose end: a single undecodable msgpack
+frame in 8.78M, only in a networked run, which cannot be attributed because
+loadgen's `garbage` counter does not separate a framing mismatch (a server
+bug) from a decode failure. Detail in `state/loadgen.md`.
 
 ## State file index
 

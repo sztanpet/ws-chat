@@ -554,13 +554,104 @@ client had been dropped and it was profiling an idle process. The
 interesting window is roughly the twenty seconds after the barrier releases;
 after that there is nobody left to be slow.
 
+## Over a real network path (31 Jul 2026)
+
+An attempt at the "two machines" item below, which found out something
+first: **`proxmox.lan` is not a second machine.** This dev box is a 4-vCPU
+KVM guest *on* it — `ens18`'s MAC is the `net0` of the host's `ubuntu-server`
+guest — so the host is 6 cores / 12 threads of the same silicon and the
+"network" is virtio over `vmbr0`. Anyone reaching for that box to settle a
+fan-out question should know that before reading the numbers.
+
+It is still a better experiment than loopback: separate kernels, separate
+schedulers, a real NIC driver path, and the server no longer sharing a core
+budget with its own instrument. Three topologies, same loads as everything
+above:
+
+- **A** — server and generators in the VM, loopback. Everything above.
+- **B** — server on the host, generators in the VM.
+- **C** — server in the VM, generators on the host (so the client side is
+  the one with room to spare).
+
+### Steady, 500 connections, 49.6k deliveries/s, 100% delivered
+
+| | A loopback | B server on host |
+|---|---|---|
+| CPU samples / 20s | 12.69s | 12.38s, 13.31s |
+| `Syscall6` flat | 71.87% | 57.92% |
+| JSON mean latency | 3.57ms | 3.70ms, 3.03ms |
+| msgpack mean latency | 3.42ms | 2.99ms, 2.36ms |
+| **codec CPU split** | **4.2%** | **24.7%, 18.6%** |
+
+**The codec gap is four to five times bigger over a real NIC than on
+loopback**, and it reproduced: two runs at 24.7% and 18.6% of server CPU,
+with client-side latency agreeing independently at 19% and 22%. Loopback
+hands the frame to the peer socket inline and the byte count barely matters;
+a virtio path pays per byte, on both ends. `Syscall6` falling from 72% to
+58% while total CPU stays the same is the same story from the other side —
+the work moved out of the write syscall and into scheduling and locking.
+
+**Do not read the 20% as "the codec costs the server 20% less" though.** In
+topology B the clients are the constrained side, and a msgpack client also
+decodes faster, so it drains sooner and the server's write completes sooner.
+That feedback is real — it is what a production client does too — but it is
+not the codec's server-side cost on its own. Three measurements bracket it:
+4.2% on loopback with both sides constrained, **6.5% per delivery in
+topology C where the clients have 12 threads and are never the limit**, and
+~20% in B where the whole system is allowed to benefit.
+
+### Overload, 3000 connections, 90% speaking
+
+| | A loopback | B server on host | C generators on host |
+|---|---|---|---|
+| delivered | 204k/s, 19.5% | 233k/s, 29.4% | 108k/s, 19.7% |
+| p50 latency | 11.5s | 5.8s | 3.2s |
+| dropped `too slow` | 2957 | 2681 | 2940 |
+| server CPU | 1.72 of 4 | 1.35 of 12 | 1.78 of 4 |
+| `task` split | 99.27 / 0.53 | 94.24 / 2.90 | 97.55 / 1.88 |
+
+**The collapse is not the generator, and it is not CPU.** Topology C is the
+case the "two machines" caveat was worried about — the clients have 12
+threads, drain as fast as they can, and every single loss is
+`StatusPolicyViolation: too slow` with no resets or EOFs anywhere. The server
+still sheds 2940 of 3000, at 1.78 of 4 cores. It is blocked in `write(2)`,
+which is what the earlier profiles said and what the label split says again.
+3000 members at 2700 msg/s is 8.1M deliveries/s asked for; nothing here was
+ever going to serve that.
+
+**The virtualisation tax is the surprise, and it is large.** CPU per
+delivery: **5.8µs on the host, 8.4µs on VM loopback, 16.5µs from inside the
+VM over virtio.** Same silicon, same binary, ~3x. It says nothing about this
+server's code and everything about where these numbers have been measured —
+which is the real reason the two-machines item stays open.
+
+### One anomaly, unexplained
+
+The msgpack half of topology B's overload run reported **1 frame the client
+could not decode**, out of 8.78M. It has not appeared in any loopback run.
+The server's log is clean — no encode failure, no framing error — and the
+run was otherwise normal.
+
+It is not dismissable, because `garbage` covers two different things:
+`readFrame` bumps it both when the WebSocket message type does not match the
+codec (which would be a **server** bug) and when `Unmarshal` fails (which
+could be anything). It does not record which, so this one cannot be chased
+without splitting that counter — a few lines, and worth doing before anyone
+next runs a big networked test.
+
 ## Pending
 
-- Two machines. Everything above shares a laptop with the server, so the
-  numbers say more about the box than the code past ~100k deliveries/s.
-  This is now the blocking limitation for fan-out work specifically: the
-  primitive is under 5% of the profile, so anything further needs a box
-  where the server is actually the bottleneck.
+- Two machines, and **`proxmox.lan` is not one** — this box is a guest on
+  it, so that topology is the same silicon with a virtio hop (see above).
+  Everything measured so far therefore says more about the box than the code
+  past ~100k deliveries/s. Still the blocking limitation for fan-out work
+  specifically: the primitive is under 5% of the profile, so anything
+  further needs hardware where the server is actually the bottleneck — and
+  the runs above show it is `write(2)`, not CPU, that gives out first.
+- **Split the `garbage` counter** into "wrong frame type for the codec" and
+  "did not decode". The first would be a server bug and the second would
+  not, and one networked run has already produced a single unexplained
+  frame that cannot be attributed to either.
 - Nothing exercises `PRIVMSG`, moderation or reconnect churn — the
   generator connects, joins, talks and listens, and that is all.
 - No CSV/JSON output. The report is for reading.

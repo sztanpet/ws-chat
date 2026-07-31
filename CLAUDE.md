@@ -153,8 +153,9 @@ and a client picks one with a WebSocket subprotocol:
 - `chat.msgpack` — MessagePack. Offered first and the one to prefer: ~20%
   smaller frames on a typical message and no number-to-string round trip.
   Measured against JSON on the same room and the same traffic, it costs the
-  server **4.2% less CPU**, three quarters of which is `write(2)` moving
-  fewer bytes (`state/loadgen.md`).
+  server **4.2% less CPU** over loopback and **~20% less over a real network
+  path**, where the byte count is paid for on both ends and a client that
+  decodes sooner drains sooner (`state/loadgen.md`).
 - `chat.json` — the same document as JSON. The default for a client that
   negotiates nothing, because a client that did not ask is one being
   written by hand against a console.
