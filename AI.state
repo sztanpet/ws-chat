@@ -21,8 +21,16 @@ per-read `context.WithTimeout`" note: the ceiling on it is under 1.4%.
 Nothing regressed (`Syscall6` 71.87% flat against 72.3% recorded), the write
 path still allocates nothing, and the goroutine profile is a census of the
 connection model — 1500 goroutines, 500 each of `conn`, `priv-pump` and
-`channel-pump`. One trap: **labels are in the CPU and goroutine profiles and
-not the allocation profile**. Detail in `state/loadgen.md`.
+`channel-pump`. The overload regime (3000 connections, 90% at 1/s, 204k
+deliveries/s, 2957 dropped) moves the split to 99.27% / 0.53%: the read path
+shrinks in absolute terms as well, because the senders are being
+disconnected. Its codec split is 50/50, which is an **artifact** — two
+collapsing populations do not deliver the same number of messages, so quote
+the steady run for the codec. Two traps: **labels are in the CPU and
+goroutine profiles and not the allocation profile**, and an overload profile
+has to be aimed at the twenty seconds after the barrier, or it profiles an
+idle server that has already dropped everybody. Detail in
+`state/loadgen.md`.
 
 ## State file index
 

@@ -502,6 +502,58 @@ Nothing regressed: `Syscall6` is 71.87% flat against the 72.3% recorded at
 once per join rather than per message. The write path still allocates
 nothing.
 
+### The same split under overload
+
+3000 connections, 1500 per codec, 90% speaking at 1/s into one room — the
+overload shape from the runs above. 204k deliveries/s combined, 19% of what
+was asked for, 2957 of 3000 dropped `too slow`, p50 11.5s. 35.59s of CPU
+samples in a 20.66s window, or 1.72 of 4 cores, against the 1.74 recorded at
+`91c50de`: the same regime, reproduced.
+
+| | steady | overload |
+|---|---|---|
+| `task=channel-pump` | 97.16% | **99.27%** |
+| `task=conn` | 1.42% | **0.53%** |
+| `codec=chat.json` | 50.35% | 49.76% |
+| `codec=chat.msgpack` | 48.23% | 50.04% |
+| `Syscall6` flat | 71.87% | 70.19% |
+| alloc per 20s | 6.5MB | 23.6MB |
+
+**The read path halves as a share and shrinks in absolute terms too** — 190ms
+against 180ms for six times the connections and five times the senders,
+because the senders are being disconnected as fast as they arrive. Under
+collapse this server is doing one thing, and the labels say so without
+having to read a call graph.
+
+**The codec advantage disappears from the raw split, and that is an artifact,
+not a result.** The two halves collapse independently and so do not deliver
+the same number of messages: msgpack's half delivered 104.7k/s against JSON's
+98.9k/s over the run. Normalised by deliveries the ~5% gap is still there,
+pointing the same way as the steady measurement — but two collapsing
+populations are not comparable, which this file already says about overload
+runs generally. **The steady run is the one to quote for the codec.**
+
+Allocation is 23.6MB over the window, and the shape is worth noting: it is
+connection setup and *churn* — `bufio` buffers, `websocket.newConn`,
+`conn.join` at 3.5MB as dropped clients are replaced, `slog` args for the
+disconnect lines — plus the per-pump `batch` slice at 1MB, which is once per
+membership. Still nothing per frame on the write path, in the regime that
+used to be 1.61GB before `SetWriteDeadline`.
+
+The goroutine census is the other thing labels give here, because it makes
+connection setup observable. Mid-ramp: 2879 `conn`, 2856 `channel-pump`,
+2835 `priv-pump` — the pipeline caught in the act, since a connection exists
+before its pumps do — and **137 `listener`**, which is 137 sockets inside the
+HTTP upgrade, not yet relabelled `conn`. That is a queue depth nothing else
+reports. Twenty seconds later it is 1 `listener` and the three counts have
+converged.
+
+**Aim the window at the collapse.** The first attempt profiled t=40-60s and
+got 1.95s of samples — 0.098 of a core, 46% syscall — because by then every
+client had been dropped and it was profiling an idle process. The
+interesting window is roughly the twenty seconds after the barrier releases;
+after that there is nobody left to be slow.
+
 ## Pending
 
 - Two machines. Everything above shares a laptop with the server, so the
