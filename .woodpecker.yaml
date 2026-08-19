@@ -1,11 +1,9 @@
 # CI runs what `make pre-commit` runs, and nothing it does not.
 #
-# Everything goes through the Makefile on purpose. The Makefile is the
-# only place that knows this module does not compile without
-# GOEXPERIMENT=jsonv2 -- go vet, staticcheck and golangci-lint included,
-# since they are compilers with opinions. A pipeline spelling the flags
-# out itself would be a second copy of that to keep in sync, and the
-# copy that is wrong is always the one nobody runs by hand.
+# Everything goes through the Makefile on purpose: the flags a step needs
+# are written down once, where somebody running it by hand gets them too.
+# A pipeline spelling them out itself is a second copy to keep in sync,
+# and the copy that is wrong is always the one nobody runs by hand.
 #
 # `make vendor` is the one pre-commit step left out: it rewrites go.mod
 # and vendor/, and a CI run must check the tree it was given rather than
@@ -18,7 +16,7 @@ variables:
   # Debian-based, not alpine: `go test -race` needs cgo and a C
   # toolchain, and alpine ships neither. The race detector is the point
   # of this repository's test suite, so this is not negotiable.
-  - &golang 'golang:1.26'
+  - &golang 'golang:1.27'
   # The homelab agent mounts a persistent /cache into every step. Every
   # cache Go has goes there, or each run recompiles every vendored
   # dependency and rebuilds the linters from source -- which is most of

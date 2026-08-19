@@ -22,18 +22,11 @@ this file is the how-to for building, running and hacking on it.
 
 ## Prerequisites
 
-- **Go 1.26+** (the module pins toolchain `go1.26.5`; the `go` command
-  fetches it automatically).
-- **`GOEXPERIMENT=jsonv2`** — the JSON codec is `encoding/json/v2`, so
-  nothing in the module compiles without it. The Makefile exports it, so
-  use `make`; anything run by hand needs it set:
-
-  ```sh
-  GOEXPERIMENT=jsonv2 go test ./...
-  ```
-
-  Without it the build fails with "build constraints exclude all Go
-  files in .../encoding/json/v2".
+- **Go 1.27+** (the module pins toolchain `go1.27.0`; the `go` command
+  fetches it automatically). Not optional: the JSON codec is
+  `encoding/json/v2`, which shipped in 1.27, and the module's `go`
+  directive is what unlocks it. On anything older the build fails with
+  "json.Marshal requires go1.27 or later".
 
 Dependencies are vendored, so builds never touch the network.
 
@@ -255,9 +248,9 @@ to an interface a scraper alone can reach. Empty disables both.
 [`.woodpecker.yaml`](.woodpecker.yaml) runs `make test-race`, `make lint`
 and the production build on every push and pull request, and
 `make vulncheck` on a cron. Every step shells out to the Makefile, so
-`GOEXPERIMENT=jsonv2` is stated in exactly one place. Go's caches live on
-the agent's persistent `/cache` volume, which is what keeps the lint step
-from rebuilding the linters from source every run.
+the flags a step needs are stated in exactly one place. Go's caches live
+on the agent's persistent `/cache` volume, which is what keeps the lint
+step from rebuilding the linters from source every run.
 
 ## Layout
 

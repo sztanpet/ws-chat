@@ -173,22 +173,23 @@ Both codecs are held to the same test table in `codec_test.go`; if one
 needs its own test to pass they are not interchangeable. Struct fields
 carry both `json:` and `msgpack:` tags so the two agree on names.
 
-**The JSON codec is `encoding/json/v2`, which is experimental**, so the
-whole module builds with `GOEXPERIMENT=jsonv2` — the Makefile exports it,
-and anything run by hand needs it or the build fails with "build
-constraints exclude all Go files in .../encoding/json/v2". That is the
-price; what it buys, measured in `internal/proto/bench_test.go` on a
-message with roles and attrs:
+**The JSON codec is `encoding/json/v2`**, which shipped in Go 1.27. It
+used to be `GOEXPERIMENT=jsonv2` and is now gated on the `go` directive
+instead, which is the reason go.mod says `go 1.27`: on anything older the
+build fails with "json.Marshal requires go1.27 or later". Measured in
+`internal/proto/bench_test.go` on a message with roles and attrs:
 
-| chat.json | v1, no experiment | v1 API on the v2 engine | v2 API |
+| chat.json | v1 engine (pre-1.27) | v1 API on the v2 engine | v2 API |
 |---|---|---|---|
 | Encode | 660ns, 5 allocs | 950ns, 5 allocs | 978ns, 5 allocs |
 | Decode | 795ns, 8 allocs | 422ns, 1 alloc | 354ns, 1 alloc |
 
-Read the middle column first: **encoding is slower because of the engine,
-not the API.** Turning the experiment on costs it whether the code calls
-v1 or v2, so with it on, calling v2 directly is strictly the better of the
-two. A message costs one decode and one encode per codec, neither of which
+The first column is history now — 1.27 puts `encoding/json` on the v2
+engine whatever the code calls — but it is what the middle column is only
+meaningful against: **encoding got slower because of the engine, not the
+API**, and no longer opting into it is not on the table. Given the engine,
+calling v2 directly is strictly the better of the two remaining columns.
+A message costs one decode and one encode per codec, neither of which
 scales with room size, so the net is about 8% less CPU and half the
 allocations per message — a small win, and the correctness is the larger
 part of it: invalid UTF-8 and duplicate object members are refused rather
@@ -609,19 +610,24 @@ has to get right or the numbers lie — is in
 
 ### Makefile
 
-All tooling lives in the `Makefile` (`make help` lists targets). It
-exports `GOEXPERIMENT=jsonv2`, which the module does not compile without —
-`go vet`, staticcheck and golangci-lint included, since they are compilers
-with opinions. Use `make`, or set it yourself:
-
-```
-GOEXPERIMENT=jsonv2 go test ./...
-```
-
+All tooling lives in the `Makefile` (`make help` lists targets). There is
+nothing a plain `go test ./...` needs any more — the `GOEXPERIMENT=jsonv2`
+this used to export died with Go 1.27, which ships `encoding/json/v2` and
+gates it on the `go` directive instead.
 
 - `make init` — what a fresh clone runs once: installs the linters and
   the git pre-commit hook. `make lint` refuses to run without them and
   says so rather than skipping them quietly.
+- `make tools` — the linters, and **not all at `@latest`**. Go releases
+  ahead of the linters' own, and both ways that bites are quiet.
+  staticcheck's release cannot decode a newer toolchain's export data,
+  prints a few "internal error in importing" lines and **exits 0** — so
+  `make lint` turns that string into a failure rather than trusting the
+  status. golangci-lint's module path gained a `/v2`, and without it
+  `@latest` silently resolves against v1. It also compiles in its own copy
+  of staticcheck, which `.golangci.yml` disables: it is an older one that
+  panics on 1.27 stdlib source, and a panicking analyser aborts the whole
+  run.
 - `make soak` — the long-running connection soak tests, gated behind the
   `soak` build tag so they stay out of `make test`.
 - `make vulncheck` — `govulncheck ./...` (kept out of pre-commit: it
@@ -637,8 +643,8 @@ GOEXPERIMENT=jsonv2 go test ./...
 
 `.woodpecker.yaml` runs on every push and pull request: `make test-race`,
 `make lint`, then the production build, with `make vulncheck` on a cron.
-Every step shells out to the Makefile rather than to `go`, so the
-`GOEXPERIMENT=jsonv2` the module needs is stated in exactly one place.
+Every step shells out to the Makefile rather than to `go`, so whatever
+flags a step needs are stated in exactly one place.
 
 CI does **not** run `make vendor`, the one thing `make pre-commit` does
 that it skips: a CI run checks the tree it was handed instead of

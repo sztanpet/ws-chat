@@ -179,7 +179,7 @@ go mod edit -replace github.com/coder/websocket=../coder-websocket
 make vendor && make test-race
 
 # 3. steady load. Build WITHOUT -race, and enable DebugAddr in the config.
-GOEXPERIMENT=jsonv2 go build -o ws-chat-patched .
+go build -o ws-chat-patched .
 ./ws-chat-patched -config bench.hujson &
 make loadgen
 ./loadgen -url ws://127.0.0.1:8080/ws -conns 500 -speak 10 -rate 2 -for 60s

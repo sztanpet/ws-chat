@@ -8,8 +8,9 @@ import (
 // JSON is the text wire format. It is the fallback every client can speak,
 // and the one you can type by hand into a console.
 //
-// It is encoding/json/v2, which is why the whole module builds with
-// GOEXPERIMENT=jsonv2 (see the Makefile). What that buys, on the frames in
+// It is encoding/json/v2, which shipped in Go 1.27 and is why go.mod says
+// go 1.27 — the language version is what makes the package visible now
+// that it is no longer behind a build tag. What it buys, on the frames in
 // bench_test.go: decoding a command is about twice as fast and allocates
 // half of what it did, which matters because it happens once per frame
 // anybody sends.

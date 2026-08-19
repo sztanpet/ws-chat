@@ -6,19 +6,6 @@ GO := go
 # when GOPATH/bin is not on the user's PATH
 export PATH := $(shell $(GO) env GOPATH)/bin:$(PATH)
 
-# encoding/json/v2 only exists when the toolchain is built with its
-# experiment enabled, and the JSON wire codec uses it, so NOTHING in this
-# module compiles without this — including go vet, staticcheck and
-# golangci-lint, which are compilers with opinions. Anything run by hand
-# needs it too:
-#
-#	GOEXPERIMENT=jsonv2 go test ./...
-#
-# Appended to whatever is already set rather than replacing it, since the
-# variable is a list and somebody may have their own reasons.
-comma := ,
-export GOEXPERIMENT := jsonv2$(if $(GOEXPERIMENT),$(comma)$(GOEXPERIMENT))
-
 .PHONY: help
 help: ## list available targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "%-13s %s\n", $$1, $$2}'
@@ -76,10 +63,21 @@ check-tools:
 		command -v $$t >/dev/null || { echo "$$t is not installed; run: make init"; exit 1; }; \
 	done
 
+# staticcheck reports a toolchain whose export data it cannot read as a
+# handful of "internal error in importing" lines and an exit status of 0:
+# it checks nothing and calls it a pass. That is how a Go release ahead of
+# staticcheck's own shows up, and a linter that silently checks nothing is
+# worse than one that is not installed, so turn it into a failure.
 .PHONY: lint
 lint: check-tools ## go vet, staticcheck, golangci-lint
 	$(GO) vet ./...
-	staticcheck ./...
+	@out=$$(staticcheck ./... 2>&1); rc=$$?; \
+		[ -z "$$out" ] || printf '%s\n' "$$out"; \
+		case "$$out" in *"internal error in importing"*) \
+			echo "staticcheck cannot read this toolchain, so it checked nothing; run: make tools" >&2; \
+			exit 1;; \
+		esac; \
+		exit $$rc
 	golangci-lint run
 
 .PHONY: pre-commit

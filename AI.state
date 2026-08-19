@@ -200,12 +200,13 @@ _(none yet)_
   `internal/hook` defines auth, chatter data, message filtering and
   persistence as interfaces; the core imports the interfaces and never an
   implementation. The zero `Hooks` is a working server.
-- **The JSON codec is `encoding/json/v2`, so the module needs
-  `GOEXPERIMENT=jsonv2` to build at all.** The Makefile exports it. Decode
-  is 2.2x faster with one allocation instead of eight; encode is ~45%
-  slower, and that belongs to the engine rather than the API — v1 called
-  with the experiment on is just as slow, which is what makes calling v2
-  directly the right choice once it is on. Net per message is about 8% and
+- **The JSON codec is `encoding/json/v2`, so the module needs `go 1.27`
+  to build at all.** It shipped in 1.27 and is gated on the `go` directive
+  rather than the old `GOEXPERIMENT=jsonv2`. Decode is 2.2x faster with
+  one allocation instead of eight; encode is ~45% slower, and that belongs
+  to the engine rather than the API — v1 on the same engine is just as
+  slow, and since 1.27 there is no other engine — which is what makes
+  calling v2 directly the right choice. Net per message is about 8% and
   half the garbage; the strictness (invalid UTF-8, duplicate members) is
   the better half of the deal. Optional scalars are tagged `omitzero`
   because v2's `omitempty` would put `"sent":false` on the wire.
@@ -225,8 +226,8 @@ _(none yet)_
   shares its scheduler, allocator and GC and then reports on them as the
   server's — and cannot be aimed at another machine.
 - **CI runs the Makefile, not `go`.** `.woodpecker.yaml` shells out to
-  `make` for every step so `GOEXPERIMENT=jsonv2` is stated in exactly one
-  place. It skips `make vendor`: a CI run checks the tree it was handed
+  `make` for every step so whatever flags a step needs are stated in
+  exactly one place. It skips `make vendor`: a CI run checks the tree it was handed
   rather than rewriting it.
 - **The write pump takes batches, not single messages.** `Sub.Recv` fills a
   slice, so one wakeup drains everything pending and can coalesce it into a

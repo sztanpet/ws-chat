@@ -48,12 +48,12 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
 ## Decisions
 
 - **Every step shells out to the Makefile, never to `go` directly.** The
-  Makefile is the only place that knows about `GOEXPERIMENT=jsonv2`, and a
-  pipeline that spelled the flags out would be the copy that goes stale.
+  Makefile is the only place that knows what flags a step needs, and a
+  pipeline that spelled them out would be the copy that goes stale.
 - **CI does not run `make vendor`.** It is the one `pre-commit` step left
   out: a CI run checks the tree it was handed rather than rewriting it. A
   stale `vendor/` fails the next step anyway.
-- **Debian image (`golang:1.26`), not alpine.** `go test -race` needs cgo
+- **Debian image (`golang:1.27`), not alpine.** `go test -race` needs cgo
   and a C toolchain; the race tests are the point of this suite.
 - **Every Go cache lives on the agent's `/cache` volume**, the same
   convention as `kikapcsologo/backend`: `GOCACHE=/cache/go-build`,
