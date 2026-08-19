@@ -36,6 +36,59 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   `update-deps` now runs `go get toolchain@latest` itself so the pin
   cannot be the thing nobody updates. Scan is clean.
 
+- **Go 1.27, and the linters that were not ready for it** (`9da2e13`,
+  `cd4fe43`, `f580f95`, `88f5557`, `dcc35d8`). `encoding/json/v2` shipped
+  in 1.27 and is gated on the `go` directive rather than
+  `GOEXPERIMENT=jsonv2`, so the module simply stopped compiling on a 1.27
+  toolchain until go.mod moved. That deleted the Makefile export, the CI
+  comment justifying it, and the README's build-constraint warning; the
+  image moved to `golang:1.27`.
+
+  The tooling was the real work. Three separate failures, none of which
+  announces itself as a version problem:
+
+  | tool | on 1.27 | done |
+  |---|---|---|
+  | golangci-lint | bundles honnef.co/go/tools v0.7.0, whose IR builder panics building `internal/poll`; the panic aborts the entire run | `.golangci.yml` disables `staticcheck` and `unused` |
+  | staticcheck (2026.1) | cannot decode 1.27 export data, prints "internal error in importing" and **exits 0** | `tools` installs `@master`; `make lint` greps for that string and fails |
+  | golangci-lint `@latest` | resolves against the v1 module path, downgrading an installed v2.12.2 to v1.64.8 | `tools` uses the `/v2` path |
+
+  Neither golangci-lint v2.12.2 nor its `main` as of 2026-08-19 has the
+  honnef bump, so the disable is not a preference and cannot be tested
+  away; drop it when a release bundles something newer than v0.7.0. The
+  exclusion preset added at the same time is not new policy -- it is what
+  golangci-lint v1 excluded by default and v2 made opt-in, and its eight
+  errcheck reports only became visible once a run got far enough to report
+  anything.
+
+  The silent-pass guard in `make lint` is the part worth keeping past this
+  upgrade. A linter that exits 0 having checked nothing is worse than one
+  that is missing, and `check-tools` cannot catch it: the binary is right
+  there and runs.
+
+- **Modernized against the current stdlib** (`dcc35d8`). gopls'
+  `modernize` analyser, which now reports nothing: `WaitGroup.Go` for the
+  private pump and seven concurrency tests, `errors.AsType[T]` for the
+  declare-then-`errors.As` pair, plus `slices.Contains`, `reflect.TypeFor`
+  and range-over-int. None of it is on the message path. The one
+  non-mechanical change is `leaveAll`, which copied the membership map to
+  clear the field -- every reader takes `membersMu`, so swapping the field
+  under the lock already leaves the caller sole owner of the old map.
+
+  **`httptest.NewTestServer` was tried and rejected.** It is 1.27's
+  t.Cleanup-registering constructor, and it also returns an *unstarted*
+  server backed by an *in-memory* network. The loadgen tests dial it as an
+  ordinary network client -- which is the whole premise of the generator --
+  so every dial failed with `unexpected url scheme: ""`. It suits a test
+  driving a handler through `srv.Client()`, not one that needs a socket.
+
+- **`make update-deps` run 2026-08-19** (`88f5557`). Only hujson moved
+  (U+2028/U+2029 in a line comment is now an error rather than silently
+  ending it). msgpack/v5 is at v5.4.1, the toolchain pin at go1.27.0, and
+  **coder/websocket upstream is still v1.8.15** -- `SetWriteDeadline` has
+  not landed in a release, so the fork replace in go.mod stays. govulncheck
+  clean.
+
 - **One flake fixed on the way** (`3c85675`). `make test` in that run hit
   "unexpected PART frame during connect" in
   `TestAccountLimitSurvivesReconnection`: a dropped connection's PART is
@@ -75,11 +128,10 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
 - **The first run after `/cache` is cleared is cold**: every vendored
   dependency recompiles and the linters are built from source, minutes of
   it. Nothing to do about it beyond not clearing the cache.
-- **`make tools` installs golangci-lint from the v1 module path**, which
-  `@latest` now pins to v1.64.8 forever (v2 lives at
-  `github.com/golangci/golangci-lint/v2/cmd/golangci-lint`). v1.64.8 still
-  builds and runs clean under Go 1.26; moving to v2 means a `.golangci.yml`
-  in the v2 format and re-triaging its default linter set.
+- **The linters lag the Go release, and `make tools` cannot fix that by
+  itself.** staticcheck is pinned to `@master` and golangci-lint has two
+  of its analysers switched off; both go back to normal when releases
+  catch up. See the Go 1.27 entry under Done.
 - **No cron exists yet.** The vulncheck step needs one adding in the
   repository's Woodpecker settings or it never runs.
 - **Nothing checks that `vendor/` is in sync** beyond the build failing.

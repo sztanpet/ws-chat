@@ -467,6 +467,10 @@ BLOB), `*_at`/`*_until` → `*dbtime.Time`, enum types defined by hand in
 `internal/model/*.go`. Query methods return the bare `sql.ErrNoRows`
 sentinel — callers compare with `==`, never wrap it.
 
+Go 1.27 ships a `uuid` package with `uuid.NewV7()`, so `crypto.ID` is a
+named `uuid.UUID` and its `[16]byte` goes to a BLOB as it stands. There is
+no reason to hand-roll the layout or to take a dependency for it.
+
 Migrations: plain SQL in `data/migration/` (rubenv/sql-migrate format,
 `-- +migrate Up`), run automatically at startup. Tables are `STRICT`.
 

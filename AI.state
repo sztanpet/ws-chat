@@ -6,62 +6,39 @@ only when you are touching that track.
 
 ## Latest
 
-Profiled by label, and it paid for itself. A mixed-codec run — two
-generators, 250 connections each on JSON and msgpack, 10% at 2/s into one
-room, the same 500-connection shape as every steady run in
-`state/loadgen.md` — says `go tool pprof -tags`: 97.16% `channel-pump`,
-1.42% `conn`, the rest the runtime, and 50.35% JSON against 48.23% msgpack.
-Two findings. **msgpack costs the server 4.2% less CPU than JSON for
-identical delivered work**, three quarters of it `write(2)` moving fewer
-bytes — the first server-side number for a codec choice that had only ever
-been argued from frame size, and something no call graph can produce because
-both codecs run the same functions. And **the entire read path is 1.42% of
-CPU**, which retires the standing "the next slice is the read pump's
-per-read `context.WithTimeout`" note: the ceiling on it is under 1.4%.
-Nothing regressed (`Syscall6` 71.87% flat against 72.3% recorded), the write
-path still allocates nothing, and the goroutine profile is a census of the
-connection model — 1500 goroutines, 500 each of `conn`, `priv-pump` and
-`channel-pump`. The overload regime (3000 connections, 90% at 1/s, 204k
-deliveries/s, 2957 dropped) moves the split to 99.27% / 0.53%: the read path
-shrinks in absolute terms as well, because the senders are being
-disconnected. Its codec split is 50/50, which is an **artifact** — two
-collapsing populations do not deliver the same number of messages, so quote
-the steady run for the codec. Two traps: **labels are in the CPU and
-goroutine profiles and not the allocation profile**, and an overload profile
-has to be aimed at the twenty seconds after the barrier, or it profiles an
-idle server that has already dropped everybody.
+Moved to **Go 1.27**, which was not optional: `encoding/json/v2` shipped
+in it and is gated on the module's `go` directive instead of the old
+`GOEXPERIMENT=jsonv2`, so on a 1.27 toolchain this module stopped
+compiling at all ("json.Marshal requires go1.27 or later"). Bumping the
+directive fixed that and deleted the whole experiment scaffolding — the
+Makefile export, the CI comment justifying it, the README warning. The
+benchmark table in CLAUDE.md keeps its three columns but is reframed: its
+first, v1 on the pre-1.27 engine, is now unreachable, because 1.27 puts
+`encoding/json` on the v2 engine whichever API the code calls. Re-measured
+and the v2 column holds (encode 1014ns/5 allocs, decode 346ns/1 alloc).
 
-Then the same loads over a real network path, which turned up more than the
-labels did. **`proxmox.lan` is not a second machine** — this box is a 4-vCPU
-guest on it — but running the server on the host and the generators in the
-guest still buys separate kernels and a virtio NIC, and there: **msgpack's
-advantage over JSON goes from 4.2% to ~20%** of server CPU, reproduced
-twice and corroborated by client latency, because a real path pays per byte
-on both ends. Bracketed by a third topology where the clients have 12
-threads and cannot be the limit, which puts the codec's own share at 6.5%.
-The overload collapse is **not** the generator and **not** CPU: with clients
-that drain as fast as they can, the server still sheds 2940 of 3000 at 1.78
-of 4 cores, every loss `too slow`, blocked in `write(2)`. And the
-virtualisation tax is 3x — 5.8µs of CPU per delivery on the host, 8.4µs on
-VM loopback, 16.5µs from the VM over virtio — which is the real reason the
-two-machines item stays open. One loose end: a single undecodable msgpack
-frame in 8.78M, only in a networked run, which cannot be attributed because
-loadgen's `garbage` counter does not separate a framing mismatch (a server
-bug) from a decode failure.
+**The linters were the real work, and all three failures are quiet.**
+golangci-lint bundles honnef.co/go/tools v0.7.0, whose IR builder *panics*
+on 1.27 stdlib source, and a panicking analyser aborts the whole run —
+neither v2.12.2 nor `main` has the fix, so `staticcheck` and `unused` are
+off in `.golangci.yml`. staticcheck's own 2026.1 release is worse: it
+cannot decode 1.27 export data, says so in a few lines nobody reads, and
+**exits 0** — a linter checking nothing while reporting success. `make
+tools` installs it from `@master`, and `make lint` now greps for that
+string and fails on it, which is the part worth keeping past this upgrade.
+`make tools` was also resolving golangci-lint `@latest` against the v1
+module path, silently downgrading v2.12.2 to v1.64.8.
 
-Then the capacity question, swept properly with the clients on 12 threads:
-**~600k deliveries/s is the knee** on a 4-vCPU guest — 99.97% delivered at
-p50 18ms, and 30% more traffic costs 20x the latency. **Nothing is ever
-dropped in that sweep**, at any rate: degradation is latency, and shedding
-only happens when fan-out *per message* is the problem, which is what the
-3000-connection collapse was (8.1M deliveries/s asked for). CPU per delivery
-**improves 3.5x with load**, 13.2µs to 3.8µs, which is `WriteBatch` paying
-off and qualifies the earlier "WriteBatch is inert" null result. At the knee
-the VM is at 0% idle with **69% system against 31% user** while the process
-accounts for 2.9 of 4 cores, so the ceiling is the kernel's network path
-rather than this code. Size by the product — senders × rate × room size —
-and note a `MSG` is 163 bytes as JSON, so 1GbE is the wall within a few
-percent of where this box's CPU is. Detail in `state/loadgen.md`.
+Then a modernization pass (gopls `modernize`, now clean): `WaitGroup.Go`,
+`errors.AsType[T]`, `slices.Contains`, `reflect.TypeFor`, range-over-int.
+Nothing on the message path. `leaveAll` stopped copying the membership map
+to clear the field — every reader takes `membersMu`, so swapping the field
+under the lock already makes the caller sole owner. **1.27's
+`httptest.NewTestServer` was tried and rejected**: it returns an unstarted
+server on an *in-memory* network, and the loadgen tests have to dial a real
+socket. `make update-deps` moved only hujson; coder/websocket upstream is
+still v1.8.15, so the `SetWriteDeadline` fork replace stays. govulncheck
+clean. Detail in `state/ci.md`.
 
 ## State file index
 
@@ -76,7 +53,9 @@ percent of where this box's CPU is. Detail in `state/loadgen.md`.
 
 ## Release log
 
-_(none yet)_
+- **2026-08-19** — Go 1.27; `GOEXPERIMENT=jsonv2` retired; linters pinned
+  around a toolchain they do not yet support; stdlib modernization pass;
+  hujson updated.
 
 ## Key decisions
 
@@ -210,6 +189,11 @@ _(none yet)_
   half the garbage; the strictness (invalid UTF-8, duplicate members) is
   the better half of the deal. Optional scalars are tagged `omitzero`
   because v2's `omitempty` would put `"sent":false` on the wire.
+- **A linter that exits 0 is not the same as a clean tree.** `make lint`
+  fails on staticcheck's "internal error in importing", because that is
+  what a staticcheck too old for the toolchain prints before reporting
+  success. Go releases run ahead of the linters, so `make tools` pins
+  around them rather than trusting `@latest`.
 - **The wire format is negotiated, not configured.** `proto.Codec` is an
   interface over bytes, selected by WebSocket subprotocol. MessagePack
   preferred, JSON the default for anything that did not ask. A ring holds
