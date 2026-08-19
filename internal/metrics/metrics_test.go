@@ -165,9 +165,7 @@ func TestConcurrentUse(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for i := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := range 1000 {
 				c.Inc()
 				g.Inc()
@@ -177,7 +175,7 @@ func TestConcurrentUse(t *testing.T) {
 					scrape(t, r) // scraping races the writers too
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

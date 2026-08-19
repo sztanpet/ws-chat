@@ -171,11 +171,10 @@ func (c *conn) leave(m *membership) {
 // The PART frames go out because the room is entitled to know somebody
 // left, whether they asked to or their socket did.
 func (c *conn) leaveAll(ctx context.Context) {
+	// Hand the map over rather than copy it: replacing the field under the
+	// lock leaves this goroutine the only one holding the old one.
 	c.membersMu.Lock()
-	memberships := make(map[string]*membership, len(c.memberships))
-	for name, m := range c.memberships {
-		memberships[name] = m
-	}
+	memberships := c.memberships
 	c.memberships = make(map[string]*membership)
 	c.membersMu.Unlock()
 

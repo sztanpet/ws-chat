@@ -190,11 +190,9 @@ func (c *conn) serve(parent context.Context) {
 	}
 
 	var pumps sync.WaitGroup
-	pumps.Add(1)
-	go func() {
-		defer pumps.Done()
+	pumps.Go(func() {
 		pprof.Do(ctx, c.labels(taskPrivPump), c.privPump)
-	}()
+	})
 
 	// Then wherever the connection belongs. Each join announces itself and
 	// replays that channel's history, so a client's first frames are READY,

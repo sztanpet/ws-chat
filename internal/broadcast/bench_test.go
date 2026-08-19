@@ -500,9 +500,7 @@ func BenchmarkChurnUnderLoad(b *testing.B) {
 				var wg sync.WaitGroup
 				quit := make(chan struct{})
 				for range senders {
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
+					wg.Go(func() {
 						for {
 							select {
 							case <-quit:
@@ -511,7 +509,7 @@ func BenchmarkChurnUnderLoad(b *testing.B) {
 							}
 							r.bc.Broadcast(benchMsg)
 						}
-					}()
+					})
 				}
 
 				b.ReportAllocs()

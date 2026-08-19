@@ -97,7 +97,7 @@ func TestCommittedDefaultFileDocumentsTheRealDefaults(t *testing.T) {
 
 	// Every field should be documented, or the file is not the reference it
 	// claims to be.
-	if want := reflect.TypeOf(Config{}).NumField(); settings != want {
+	if want := reflect.TypeFor[Config]().NumField(); settings != want {
 		t.Errorf("the file documents %d settings, but Config has %d fields", settings, want)
 	}
 }

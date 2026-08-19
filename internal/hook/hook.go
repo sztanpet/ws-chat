@@ -48,6 +48,7 @@ package hook
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 )
 
@@ -102,12 +103,7 @@ func (i Identity) Key() string {
 
 // Has reports whether the identity carries a role.
 func (i Identity) Has(role string) bool {
-	for _, r := range i.Roles {
-		if r == role {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(i.Roles, role)
 }
 
 // Limits is a rate limit: burst messages allowed at once, then one more

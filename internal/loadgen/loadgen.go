@@ -595,8 +595,7 @@ func (c *client) send(ctx context.Context, cmd proto.Command) bool {
 // dropped socket, each with a port number in it. The error inside the
 // OpError says what happened without saying to whom.
 func reasonOf(err error) string {
-	var ce websocket.CloseError
-	if errors.As(err, &ce) {
+	if ce, ok := errors.AsType[websocket.CloseError](err); ok {
 		if ce.Reason == "" {
 			return ce.Code.String()
 		}

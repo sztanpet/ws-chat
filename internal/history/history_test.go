@@ -148,15 +148,13 @@ func TestConcurrentUse(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for w := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range 500 {
 				m.Append(context.Background(), "main", msg(uint64(i), fmt.Sprintf("w%d-%d", w, i)))
 				_, _ = m.Recent(context.Background(), "main", 16)
 				m.Len("main")
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

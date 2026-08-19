@@ -346,8 +346,7 @@ func (c *client) expectClosed() websocket.StatusCode {
 		if err == nil {
 			continue // drain whatever was already in flight
 		}
-		var ce websocket.CloseError
-		if errors.As(err, &ce) {
+		if ce, ok := errors.AsType[websocket.CloseError](err); ok {
 			return ce.Code
 		}
 		c.t.Fatalf("connection ended with %v, want a close frame", err)

@@ -187,9 +187,7 @@ func TestConcurrentUse(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range 500 {
 				scope := []string{Global, "main", "other"}[i%3]
 				s.Mute(scope, "id:u1", time.Now().Add(time.Hour))
@@ -198,7 +196,7 @@ func TestConcurrentUse(t *testing.T) {
 				s.Unmute(scope, "id:u1")
 				s.Sweep()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

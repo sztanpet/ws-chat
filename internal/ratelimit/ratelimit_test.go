@@ -150,9 +150,7 @@ func TestConcurrentAllowIsExact(t *testing.T) {
 	allowed := 0
 
 	for range callers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			local := 0
 			for range each {
 				if b.AllowAt(epoch) {
@@ -162,7 +160,7 @@ func TestConcurrentAllowIsExact(t *testing.T) {
 			mu.Lock()
 			allowed += local
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 

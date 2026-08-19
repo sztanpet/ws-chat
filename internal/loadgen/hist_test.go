@@ -29,7 +29,7 @@ func TestHistogramResolution(t *testing.T) {
 // number of samples.
 func TestHistogramBucketsAreContiguous(t *testing.T) {
 	prev := -1
-	for us := uint64(0); us < 1<<20; us++ {
+	for us := range uint64(1 << 20) {
 		i := bucketOf(us)
 		if i != prev && i != prev+1 {
 			t.Fatalf("%dus jumped from bucket %d to %d", us, prev, i)

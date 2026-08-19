@@ -408,36 +408,30 @@ func TestConcurrentChurn(t *testing.T) {
 		// Close ends their subscriptions.
 		for range subscribed {
 			s := b.Subscribe()
-			drainWG.Add(1)
-			go func() {
-				defer drainWG.Done()
+			drainWG.Go(func() {
 				dst := make([][]byte, 16)
 				for {
 					if _, err := s.Recv(dst); err != nil {
 						return
 					}
 				}
-			}()
+			})
 		}
 
 		for range senders {
-			sendWG.Add(1)
-			go func() {
-				defer sendWG.Done()
+			sendWG.Go(func() {
 				msg := []byte("hello")
 				for range perGoro {
 					b.Broadcast(msg)
 				}
-			}()
+			})
 		}
 
 		// Subscribe/close churn against the same state the senders are
 		// walking. These subscribers are never read, so some get dropped
 		// mid-broadcast, which is exactly the race worth hunting.
 		for range churners {
-			churnWG.Add(1)
-			go func() {
-				defer churnWG.Done()
+			churnWG.Go(func() {
 				for {
 					select {
 					case <-stop:
@@ -448,7 +442,7 @@ func TestConcurrentChurn(t *testing.T) {
 					b.Broadcast([]byte("churn"))
 					s.Close()
 				}
-			}()
+			})
 		}
 
 		// Shut down in dependency order, no sleeps: the senders bound
