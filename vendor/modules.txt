@@ -5,7 +5,7 @@ github.com/coder/websocket/internal/bpool
 github.com/coder/websocket/internal/errd
 github.com/coder/websocket/internal/util
 github.com/coder/websocket/internal/wsjs
-# github.com/tailscale/hujson v0.0.0-20260722022634-78b5b162ee49
+# github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 ## explicit; go 1.26
 github.com/tailscale/hujson
 # github.com/vmihailenco/msgpack/v5 v5.4.1

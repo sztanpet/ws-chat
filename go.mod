@@ -6,7 +6,7 @@ toolchain go1.27.0
 
 require (
 	github.com/coder/websocket v1.8.15
-	github.com/tailscale/hujson v0.0.0-20260722022634-78b5b162ee49
+	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
 
