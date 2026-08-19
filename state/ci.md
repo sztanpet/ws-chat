@@ -89,6 +89,18 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   not landed in a release, so the fork replace in go.mod stays. govulncheck
   clean.
 
+- **A second flake of the same family** (`TestUnbanSomebodyWhoIsGone`).
+  `expectClosed` proves only that the *client* saw the close frame; the
+  server tears the connection down afterwards on its own goroutine. Until
+  that finishes the banned user is still in the directory and still in
+  main, so the server-wide unban that follows found a target to announce
+  and broadcast a MOD into the room — the admin's next `sync()` got that
+  instead of its PONG. The same window produced "unexpected PART frame
+  during connect" on the reconnect. Fixed the way `3c85675` fixed the
+  first one: wait for the departing PART, which teardown broadcasts after
+  leaving the directory, so it orders everything after it. Three of four
+  concurrent 300-run loops failed before, 1800 runs clean after.
+
 - **One flake fixed on the way** (`3c85675`). `make test` in that run hit
   "unexpected PART frame during connect" in
   `TestAccountLimitSurvivesReconnection`: a dropped connection's PART is

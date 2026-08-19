@@ -670,6 +670,16 @@ func TestUnbanSomebodyWhoIsGone(t *testing.T) {
 	admin.expectMod(proto.ActionBan, "auser")
 	user.expectClosed()
 
+	// expectClosed only proves the CLIENT saw the close frame. The server
+	// tears the connection down afterwards on its own goroutine, and until
+	// that finishes the banned user is still in the directory and still a
+	// member of main — which would make the unban below a server-wide
+	// action with a target to announce, and it would be broadcast into
+	// main. Its own PART is the last thing that teardown does, and it is
+	// broadcast after the connection has left the directory, so waiting for
+	// it here is what makes everything below deterministic.
+	admin.expectPart("main", "auser")
+
 	if _, err = ta.dialWith(t, "?token=user"); err == nil {
 		t.Fatal("a banned user reconnected")
 	}
