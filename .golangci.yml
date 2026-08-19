@@ -1,0 +1,30 @@
+# golangci-lint's own config. `make lint` also runs go vet and staticcheck
+# as their own binaries; what is left for golangci-lint is errcheck and
+# ineffassign.
+
+version: "2"
+
+linters:
+  # Both of these are honnef.co/go/tools analysers that golangci-lint
+  # compiles in, and as of v2.12.3 it still bundles honnef.co/go/tools
+  # v0.7.0 -- whose IR builder panics outright on Go 1.27 stdlib source:
+  #
+  #	buildir: package "poll": unexpected expr: *ast.KeyValueExpr
+  #
+  # A panic in one analyser aborts the whole run, so with these on
+  # nothing gets linted at all. `make lint` runs staticcheck as its own
+  # binary from a tree that has the fix, so this costs no coverage; it
+  # only stops a second, older copy of the same two checks from crashing
+  # the run. Drop this block once a golangci-lint release bundles
+  # honnef.co/go/tools newer than v0.7.0.
+  disable:
+    - staticcheck
+    - unused
+
+  exclusions:
+    # What golangci-lint v1 excluded by default and v2 made opt-in:
+    # unchecked Fprintf to a ResponseWriter, deferred Close, and the
+    # rest of the errors that have nowhere to go. Without it errcheck
+    # reports eight of them here, none actionable.
+    presets:
+      - std-error-handling
