@@ -30,6 +30,7 @@ go get github.com/coder/websocket
 - [Ping pong](https://pkg.go.dev/github.com/coder/websocket#Conn.Ping) API
 - [RFC 7692](https://tools.ietf.org/html/rfc7692) permessage-deflate compression
 - [CloseRead](https://pkg.go.dev/github.com/coder/websocket#Conn.CloseRead) helper for write only connections
+- [SetWriteDeadline](https://pkg.go.dev/github.com/coder/websocket#Conn.SetWriteDeadline) to bound writes without allocating a context
 - Compile to [Wasm](https://pkg.go.dev/github.com/coder/websocket#hdr-Wasm)
 
 ## Roadmap

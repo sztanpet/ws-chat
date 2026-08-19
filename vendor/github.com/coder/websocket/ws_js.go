@@ -68,30 +68,37 @@ type Conn struct {
 	readBuf    []wsjs.MessageEvent
 
 	// writeDeadline is the deadline set by SetWriteDeadline as unix nanos,
-	// or 0 for none.
+	// or noDeadline.
 	writeDeadline atomic.Int64
 }
 
-// SetWriteDeadline sets a deadline for writes on the connection. Writes
-// that pass it close the connection. A zero t clears the deadline.
+// SetWriteDeadline sets a deadline for writes on the connection, as
+// net.Conn.SetWriteDeadline does. A zero t clears the deadline. The returned
+// error is always nil.
+//
+// A write started after the deadline has passed fails with
+// os.ErrDeadlineExceeded and leaves the connection open, so a later
+// SetWriteDeadline puts the connection back to work.
 //
 // Writes here are handed to the browser and never block, so unlike the
-// native implementation there is nothing to interrupt: the deadline is
-// checked when a write is attempted, and a write attempted after it has
-// passed closes the connection instead of sending.
+// native implementation there is nothing to interrupt once a write is
+// underway: the deadline is checked when a write is attempted, and a
+// deadline can never pass mid-write. That is the only way in which this
+// differs from the native implementation, which closes the connection in
+// that case.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	if t.IsZero() {
-		c.writeDeadline.Store(0)
+		c.writeDeadline.Store(noDeadline)
 		return nil
 	}
-	c.writeDeadline.Store(t.UnixNano())
+	c.writeDeadline.Store(deadlineNanos(t))
 	return nil
 }
 
 // writeDeadlineExceeded reports whether a deadline is set and has passed.
 func (c *Conn) writeDeadlineExceeded() bool {
 	deadline := c.writeDeadline.Load()
-	return deadline != 0 && !time.Now().Before(time.Unix(0, deadline))
+	return deadline != noDeadline && !time.Now().Before(time.Unix(0, deadline))
 }
 
 func (c *Conn) close(err error, wasClean bool) {
