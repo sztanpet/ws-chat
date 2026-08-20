@@ -5,18 +5,21 @@
 version: "2"
 
 linters:
-  # Both of these are honnef.co/go/tools analysers that golangci-lint
-  # compiles in, and as of v2.12.3 it still bundles honnef.co/go/tools
-  # v0.7.0 -- whose IR builder panics outright on Go 1.27 stdlib source:
+  # Not because they are broken -- golangci-lint v2.13.0 fixed the
+  # honnef.co/go/tools panic that made this block mandatory on Go 1.27 --
+  # but because `make lint` already runs staticcheck as its own binary,
+  # and `unused` is part of it. Two copies of the same analyser is
+  # duplicate work whose only interesting property is that the copies
+  # DISAGREE: golangci-lint turns on the QF* quickfix checks that
+  # staticcheck itself leaves off, which here means five reports, none of
+  # them a bug and none worth taking (unembedding `ta.app.autojoin` into
+  # `ta.autojoin` hides which object is being addressed; De Morgan on
+  # `!(alpha < middle && middle < zebra)` reads worse than "not sorted").
   #
-  #	buildir: package "poll": unexpected expr: *ast.KeyValueExpr
-  #
-  # A panic in one analyser aborts the whole run, so with these on
-  # nothing gets linted at all. `make lint` runs staticcheck as its own
-  # binary from a tree that has the fix, so this costs no coverage; it
-  # only stops a second, older copy of the same two checks from crashing
-  # the run. Drop this block once a golangci-lint release bundles
-  # honnef.co/go/tools newer than v0.7.0.
+  # The standalone binary is the one to believe: it is honnef's own
+  # default check set rather than a redistributor's. If these are ever
+  # re-enabled, drop staticcheck from `make lint` in the same commit --
+  # running both is the thing to avoid.
   disable:
     - staticcheck
     - unused

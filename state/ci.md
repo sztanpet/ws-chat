@@ -50,21 +50,43 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   | tool | on 1.27 | done |
   |---|---|---|
   | golangci-lint | bundles honnef.co/go/tools v0.7.0, whose IR builder panics building `internal/poll`; the panic aborts the entire run | `.golangci.yml` disables `staticcheck` and `unused` |
-  | staticcheck (2026.1) | cannot decode 1.27 export data, prints "internal error in importing" and **exits 0** | `tools` installs `@master`; `make lint` greps for that string and fails |
+  | staticcheck (2026.1) | cannot decode 1.27 export data, prints "internal error in importing" and **exits 0** | `tools` pins 2026.2rc1; `make lint` greps for that string and fails |
   | golangci-lint `@latest` | resolves against the v1 module path, downgrading an installed v2.12.2 to v1.64.8 | `tools` uses the `/v2` path |
 
-  Neither golangci-lint v2.12.2 nor its `main` as of 2026-08-19 has the
-  honnef bump, so the disable is not a preference and cannot be tested
-  away; drop it when a release bundles something newer than v0.7.0. The
-  exclusion preset added at the same time is not new policy -- it is what
-  golangci-lint v1 excluded by default and v2 made opt-in, and its eight
-  errcheck reports only became visible once a run got far enough to report
-  anything.
+  The exclusion preset added at the same time is not new policy -- it is
+  what golangci-lint v1 excluded by default and v2 made opt-in, and its
+  eight errcheck reports only became visible once a run got far enough to
+  report anything.
 
   The silent-pass guard in `make lint` is the part worth keeping past this
   upgrade. A linter that exits 0 having checked nothing is worse than one
   that is missing, and `check-tools` cannot catch it: the binary is right
   there and runs.
+
+- **The lint step broke in CI on the 1.27 bump, and the guard is why it
+  was visible.** `/cache/gopath/bin` still held staticcheck 2026.1 from
+  before, and the step only ran `make tools` when the binaries were
+  *missing* -- so the stale one was never replaced and `make lint` failed
+  on its own "checked nothing" check. Reproduced exactly in a
+  `golang:1.27` container against a volume seeded with the old pair.
+
+  The conditional turned out to be guarding nothing: with GOPATH and
+  GOCACHE on `/cache`, a re-run of `make tools` **takes 1s** (58s only on
+  a genuinely cold cache), because `go install` relinks what is already
+  built. So it runs unconditionally now, in the vulncheck step too. Full
+  pipeline -- test, lint, build -- verified green in-container starting
+  from the stale cache.
+
+  Two things changed while looking: **golangci-lint v2.13.0 fixed the
+  honnef panic**, and staticcheck tagged **v0.8.0-rc.1 (2026.2rc1)**,
+  which reads 1.27 export data. The pin moved from `@master` to that RC --
+  a prerelease still beats a moving branch, since CI gets the same binary
+  twice -- and comes off when 2026.2 ships. `staticcheck`/`unused` stay
+  disabled in golangci-lint, but for a **different reason now**: not the
+  panic, but that `make lint` already runs staticcheck standalone. The two
+  copies disagree -- golangci-lint enables the QF* quickfix checks
+  staticcheck itself leaves off, which is 5 reports here, none a bug and
+  none worth taking.
 
 - **Modernized against the current stdlib** (`dcc35d8`). gopls'
   `modernize` analyser, which now reports nothing: `WaitGroup.Go` for the

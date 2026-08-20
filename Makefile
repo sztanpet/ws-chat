@@ -93,20 +93,23 @@ hook: ## install the pre-commit git hook
 	printf '#!/bin/sh\nexec make -C "$$(git rev-parse --show-toplevel)" pre-commit\n' > .git/hooks/pre-commit
 	chmod +x .git/hooks/pre-commit
 
-# Two of these are not @latest, and both for the same reason: Go 1.27 is
-# newer than the linters' releases.
+# Neither of the first two lines is spelled the obvious way.
 #
-# staticcheck's 2026.1 release cannot read 1.27 export data at all ("export
-# data version 4 is greater than maximum supported version 2"), which it
-# reports as a handful of compile errors and an exit status of 0 -- a linter
-# that silently checks nothing. Its master branch handles it.
+# staticcheck is pinned to a release CANDIDATE because @latest is worse
+# than useless here: it resolves to the 2026.1 release, which cannot read
+# Go 1.27 export data ("export data version 4 is greater than maximum
+# supported version 2"), reports that as a few compile errors, and exits
+# 0 -- a linter that silently checks nothing. 2026.2rc1 is the first
+# tagged version that handles 1.27. A prerelease is still better than the
+# moving branch this was first fixed with: CI gets the same binary twice.
+# Once 2026.2 is out, @latest resolves to it and the pin comes off.
 #
 # golangci-lint's module path gained a /v2 in v2.0; without it @latest
 # resolves against the v1 module and quietly installs v1.64.8 over a v2
 # that was already there.
 .PHONY: tools
 tools: ## install the linters and govulncheck
-	$(GO) install honnef.co/go/tools/cmd/staticcheck@master
+	$(GO) install honnef.co/go/tools/cmd/staticcheck@v0.8.0-rc.1
 	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 	$(GO) install golang.org/x/vuln/cmd/govulncheck@latest
 
