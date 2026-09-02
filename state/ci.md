@@ -132,6 +132,25 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   there before dialling again, which is what the moderation tests already
   do.
 
+- **`make update-deps` run 2026-09-02.** Nothing in `require` moved:
+  hujson and msgpack are at their latest, and coder/websocket upstream is
+  **still v1.8.15**, so the `SetWriteDeadline` fork replace stays for a
+  third run. The toolchain pin went go1.27.0 -> go1.27.1; the `go`
+  directive stays at `1.27`, which is the language version and has no
+  patch component to bump. `go fix ./...` -- the 1.27 tool, which is the
+  modernizers, not the old API rewriter -- reported nothing, which is what
+  `dcc35d8` having already run gopls `modernize` should look like.
+  govulncheck clean.
+
+  **The staticcheck pin came off, as its comment promised.** 2026.2 is
+  released (v0.8.1), so `@latest` resolves to something that reads 1.27
+  export data and `tools` no longer names a version. The grep in `make
+  lint` stays: the pin was the fix for one release, the guard is the fix
+  for the next toolchain that does this. golangci-lint is v2.13.2 and
+  bundles honnef.co/go/tools v0.8.1 itself now, but `staticcheck` and
+  `unused` stay off there for the reason already in `.golangci.yml` --
+  running two copies of an analyser that disagree, not the old panic.
+
 ## Decisions
 
 - **Every step shells out to the Makefile, never to `go` directly.** The
@@ -162,10 +181,12 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
 - **The first run after `/cache` is cleared is cold**: every vendored
   dependency recompiles and the linters are built from source, minutes of
   it. Nothing to do about it beyond not clearing the cache.
-- **The linters lag the Go release, and `make tools` cannot fix that by
-  itself.** staticcheck is pinned to `@master` and golangci-lint has two
-  of its analysers switched off; both go back to normal when releases
-  catch up. See the Go 1.27 entry under Done.
+- **The linters lag every Go release, and `make tools` cannot fix that by
+  itself.** Both have caught up with 1.27 and no version is pinned any
+  more, but the failure mode is not: a linter that cannot read the
+  toolchain's export data reports success. That is what the grep in `make
+  lint` is for, and it is the thing to reach for on the next bump. See
+  the Go 1.27 entry under Done.
 - **No cron exists yet.** The vulncheck step needs one adding in the
   repository's Woodpecker settings or it never runs.
 - **Nothing checks that `vendor/` is in sync** beyond the build failing.

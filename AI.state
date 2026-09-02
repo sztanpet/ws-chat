@@ -6,39 +6,23 @@ only when you are touching that track.
 
 ## Latest
 
-Moved to **Go 1.27**, which was not optional: `encoding/json/v2` shipped
-in it and is gated on the module's `go` directive instead of the old
-`GOEXPERIMENT=jsonv2`, so on a 1.27 toolchain this module stopped
-compiling at all ("json.Marshal requires go1.27 or later"). Bumping the
-directive fixed that and deleted the whole experiment scaffolding — the
-Makefile export, the CI comment justifying it, the README warning. The
-benchmark table in CLAUDE.md keeps its three columns but is reframed: its
-first, v1 on the pre-1.27 engine, is now unreachable, because 1.27 puts
-`encoding/json` on the v2 engine whichever API the code calls. Re-measured
-and the v2 column holds (encode 1014ns/5 allocs, decode 346ns/1 alloc).
+**Dependency and toolchain update, 2026-09-02.** Nothing in `require`
+moved: hujson and msgpack are current, and coder/websocket upstream is
+still v1.8.15, so the `SetWriteDeadline` fork replace in go.mod stays.
+The toolchain pin went go1.27.0 -> go1.27.1 — a patch release, and Go's
+patch releases are mostly security fixes, which is why `update-deps`
+bumps it at all. The `go` directive stays `1.27`: that is the language
+version and has no patch to move. `go fix ./...` reported nothing, which
+is the expected answer now that 1.27's fix tool *is* the modernizers and
+`dcc35d8` already ran them.
 
-**The linters were the real work, and all three failures are quiet.**
-golangci-lint bundles honnef.co/go/tools v0.7.0, whose IR builder *panics*
-on 1.27 stdlib source, and a panicking analyser aborts the whole run —
-neither v2.12.2 nor `main` has the fix, so `staticcheck` and `unused` are
-off in `.golangci.yml`. staticcheck's own 2026.1 release is worse: it
-cannot decode 1.27 export data, says so in a few lines nobody reads, and
-**exits 0** — a linter checking nothing while reporting success. `make
-tools` installs it from `@master`, and `make lint` now greps for that
-string and fails on it, which is the part worth keeping past this upgrade.
-`make tools` was also resolving golangci-lint `@latest` against the v1
-module path, silently downgrading v2.12.2 to v1.64.8.
-
-Then a modernization pass (gopls `modernize`, now clean): `WaitGroup.Go`,
-`errors.AsType[T]`, `slices.Contains`, `reflect.TypeFor`, range-over-int.
-Nothing on the message path. `leaveAll` stopped copying the membership map
-to clear the field — every reader takes `membersMu`, so swapping the field
-under the lock already makes the caller sole owner. **1.27's
-`httptest.NewTestServer` was tried and rejected**: it returns an unstarted
-server on an *in-memory* network, and the loadgen tests have to dial a real
-socket. `make update-deps` moved only hujson; coder/websocket upstream is
-still v1.8.15, so the `SetWriteDeadline` fork replace stays. govulncheck
-clean. Detail in `state/ci.md`.
+The only edit was the Makefile: **the staticcheck pin came off**, as the
+comment holding it had said it would. 2026.2 shipped as v0.8.1, so
+`@latest` resolves to something that can read 1.27 export data and the
+`@v0.8.0-rc.1` goes away. The grep in `make lint` stays — the pin fixed
+one release, the guard fixes the next toolchain that outruns a linter.
+Lint, `test-race` and govulncheck are all clean. Detail in
+`state/ci.md`.
 
 ## State file index
 
@@ -56,6 +40,8 @@ clean. Detail in `state/ci.md`.
 - **2026-08-19** — Go 1.27; `GOEXPERIMENT=jsonv2` retired; linters pinned
   around a toolchain they do not yet support; stdlib modernization pass;
   hujson updated.
+- **2026-09-02** — toolchain go1.27.1; no module moved; staticcheck
+  unpinned now 2026.2 is out; `go fix` clean.
 
 ## Key decisions
 
