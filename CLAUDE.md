@@ -627,11 +627,15 @@ gates it on the `go` directive instead.
   module and installs v1.64.8 over a v2 that was already there. That is
   the one line here not spelled the obvious way.
 
-  **There is one linter binary, not two.** staticcheck and `unused` run
-  from inside golangci-lint, which redistributes honnef.co/go/tools, so
-  running the standalone binary as well was two copies of one analyser —
-  and the only interesting thing about two copies is that they disagreed.
-  golangci-lint registers honnef's `quickfix` analysers, which
+  **`make lint` is one binary.** govet, staticcheck, `unused`, errcheck
+  and ineffassign all run from inside golangci-lint, so the `go vet` and
+  `staticcheck` that used to run in front of it were second copies of
+  analysers golangci-lint was about to run anyway. Its govet default set
+  is generated from `cmd/vet`'s own list — on 1.27 the two agree exactly,
+  plus `inline`, which comes from `cmd/fix`.
+
+  Its staticcheck needed configuring to match, and the mismatch is worth
+  knowing: golangci-lint registers honnef's `quickfix` analysers, which
   `cmd/staticcheck` treats as debug output and does not register at all
   without `-debug.run-quickfix-analyzers`. `.golangci.yml` therefore sets
   `checks: [all, -QF*]`: honnef's own set, which is also stricter than

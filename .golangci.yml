@@ -1,6 +1,6 @@
-# golangci-lint's own config. `make lint` also runs go vet as its own
-# binary; everything else -- staticcheck, unused, errcheck, ineffassign --
-# is run from here.
+# golangci-lint's own config, and the whole of `make lint`: govet,
+# staticcheck, unused, errcheck and ineffassign all run from here, one
+# binary and one pass over the tree.
 
 version: "2"
 

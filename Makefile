@@ -61,9 +61,11 @@ vendor: ## go mod vendor + tidy
 check-tools:
 	@command -v golangci-lint >/dev/null || { echo "golangci-lint is not installed; run: make init"; exit 1; }
 
+# One binary. golangci-lint's govet default set is cmd/vet's own list --
+# it is generated from it -- so `go vet ./...` in front of this ran the
+# same analysers a second time.
 .PHONY: lint
-lint: check-tools ## go vet and golangci-lint
-	$(GO) vet ./...
+lint: check-tools ## golangci-lint
 	golangci-lint run
 
 .PHONY: pre-commit
