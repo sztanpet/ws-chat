@@ -16,13 +16,24 @@ version and has no patch to move. `go fix ./...` reported nothing, which
 is the expected answer now that 1.27's fix tool *is* the modernizers and
 `dcc35d8` already ran them.
 
-The only edit was the Makefile: **the staticcheck pin came off**, as the
-comment holding it had said it would. 2026.2 shipped as v0.8.1, so
-`@latest` resolves to something that can read 1.27 export data and the
-`@v0.8.0-rc.1` goes away. The grep in `make lint` stays — the pin fixed
-one release, the guard fixes the next toolchain that outruns a linter.
-Lint, `test-race` and govulncheck are all clean. Detail in
-`state/ci.md`.
+**The staticcheck pin came off**, as the comment holding it had said it
+would: 2026.2 shipped as v0.8.1, so `@latest` resolves to something that
+can read 1.27 export data.
+
+Then **the standalone binary went too, and there is now one linter**.
+staticcheck and `unused` run from inside golangci-lint, which
+redistributes the same honnef.co/go/tools; running both was two copies of
+one analyser. The disagreement that had kept them apart has a cause worth
+knowing: `cmd/staticcheck` does not *register* the `quickfix` analysers
+without `-debug.run-quickfix-analyzers`, so the QF reports golangci-lint
+made are debug output in honnef's own command. `.golangci.yml` sets
+`checks: [all, -QF*]`, which is honnef's set in both directions —
+golangci-lint's default also drops several `ST` checks this keeps. The
+"internal error in importing" grep went with the binary it guarded; that
+exit-0 failure was `cmd/staticcheck`'s alone, and golangci-lint reports a
+package it cannot type-check as a `typecheck` issue with a non-zero
+status. Both halves checked rather than assumed. Lint, `test-race` and
+govulncheck clean. Detail in `state/ci.md`.
 
 ## State file index
 
@@ -40,8 +51,9 @@ Lint, `test-race` and govulncheck are all clean. Detail in
 - **2026-08-19** — Go 1.27; `GOEXPERIMENT=jsonv2` retired; linters pinned
   around a toolchain they do not yet support; stdlib modernization pass;
   hujson updated.
-- **2026-09-02** — toolchain go1.27.1; no module moved; staticcheck
-  unpinned now 2026.2 is out; `go fix` clean.
+- **2026-09-02** — toolchain go1.27.1; no module moved; `go fix` clean;
+  staticcheck unpinned and then folded into golangci-lint, one linter
+  binary instead of two.
 
 ## Key decisions
 
@@ -175,11 +187,12 @@ Lint, `test-race` and govulncheck are all clean. Detail in
   half the garbage; the strictness (invalid UTF-8, duplicate members) is
   the better half of the deal. Optional scalars are tagged `omitzero`
   because v2's `omitempty` would put `"sent":false` on the wire.
-- **A linter that exits 0 is not the same as a clean tree.** `make lint`
-  fails on staticcheck's "internal error in importing", because that is
-  what a staticcheck too old for the toolchain prints before reporting
-  success. Go releases run ahead of the linters, so `make tools` pins
-  around them rather than trusting `@latest`.
+- **A linter that exits 0 is not the same as a clean tree.** Go releases
+  run ahead of the linters, and `cmd/staticcheck` answered a toolchain it
+  could not read with a few lines and a success status. That binary is
+  gone — staticcheck runs inside golangci-lint now, which fails loudly —
+  but the habit it bought stays: prove the analysers fire before believing
+  "0 issues".
 - **The wire format is negotiated, not configured.** `proto.Codec` is an
   interface over bytes, selected by WebSocket subprotocol. MessagePack
   preferred, JSON the default for anything that did not ask. A ring holds

@@ -147,9 +147,31 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   export data and `tools` no longer names a version. The grep in `make
   lint` stays: the pin was the fix for one release, the guard is the fix
   for the next toolchain that does this. golangci-lint is v2.13.2 and
-  bundles honnef.co/go/tools v0.8.1 itself now, but `staticcheck` and
-  `unused` stay off there for the reason already in `.golangci.yml` --
-  running two copies of an analyser that disagree, not the old panic.
+  bundles honnef.co/go/tools v0.8.1 itself now.
+
+- **One linter binary, not two** -- standalone staticcheck dropped from
+  `make lint`, `make tools` and `check-tools`, and `staticcheck`/`unused`
+  re-enabled in `.golangci.yml`. Running both was two copies of one
+  analyser, kept apart only by the disagreement documented in the config.
+  The disagreement turned out to have a cause worth writing down:
+  `cmd/staticcheck` does not *register* honnef's `quickfix` analysers at
+  all unless you pass `-debug.run-quickfix-analyzers`. They are debug
+  output in honnef's own command; golangci-lint runs them by default,
+  which is where the five QF reports came from. `checks: [all, -QF*]`
+  reproduces honnef's command, and is honnef's `["all"]` in the other
+  direction too -- golangci-lint's own default drops ST1000, ST1003,
+  ST1016 and ST1020-22, and this config keeps them.
+
+  **The "internal error in importing" grep went with it**, because the
+  binary it guarded is gone. It is not a capability lost: the failure it
+  caught was specific to `cmd/staticcheck`, which prints load errors and
+  exits 0. golangci-lint reports a package it cannot type-check as a
+  `typecheck` issue and exits 1 -- checked by pointing it at a file
+  referencing an undefined symbol, which is the same code path a
+  toolchain it cannot read takes. Verified in the same session that the
+  bundled analysers actually fire (ST1000 and `unused` on a throwaway
+  package), because "0 issues" from a linter that ran nothing looks
+  identical to a clean tree.
 
 ## Decisions
 
@@ -181,12 +203,13 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
 - **The first run after `/cache` is cleared is cold**: every vendored
   dependency recompiles and the linters are built from source, minutes of
   it. Nothing to do about it beyond not clearing the cache.
-- **The linters lag every Go release, and `make tools` cannot fix that by
-  itself.** Both have caught up with 1.27 and no version is pinned any
-  more, but the failure mode is not: a linter that cannot read the
-  toolchain's export data reports success. That is what the grep in `make
-  lint` is for, and it is the thing to reach for on the next bump. See
-  the Go 1.27 entry under Done.
+- **golangci-lint lags every Go release.** It has caught up with 1.27 and
+  nothing is pinned any more, but the next toolchain bump will be ahead of
+  it again, and the two shapes that takes are a bundled analyser panicking
+  and one that cannot read export data. The first aborts the run and the
+  second is a `typecheck` issue; both are loud now that the standalone
+  staticcheck with its exit-0 failure is gone. See the Go 1.27 entry under
+  Done.
 - **No cron exists yet.** The vulncheck step needs one adding in the
   repository's Woodpecker settings or it never runs.
 - **Nothing checks that `vendor/` is in sync** beyond the build failing.
