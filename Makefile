@@ -53,40 +53,26 @@ vendor: ## go mod vendor + tidy
 	$(GO) mod vendor
 	$(GO) mod tidy
 
-# The linters are installed by `make init`, not by every lint run: a
+# The linter is installed by `make init`, not by every lint run: a
 # `go install` in front of every commit is a network round trip between
 # somebody and their commit, and the first thing they would do about it
 # is stop running the hook.
 .PHONY: check-tools
 check-tools:
-	@for t in staticcheck golangci-lint; do \
-		command -v $$t >/dev/null || { echo "$$t is not installed; run: make init"; exit 1; }; \
-	done
+	@command -v golangci-lint >/dev/null || { echo "golangci-lint is not installed; run: make init"; exit 1; }
 
-# staticcheck reports a toolchain whose export data it cannot read as a
-# handful of "internal error in importing" lines and an exit status of 0:
-# it checks nothing and calls it a pass. That is how a Go release ahead of
-# staticcheck's own shows up, and a linter that silently checks nothing is
-# worse than one that is not installed, so turn it into a failure.
 .PHONY: lint
-lint: check-tools ## go vet, staticcheck, golangci-lint
+lint: check-tools ## go vet and golangci-lint
 	$(GO) vet ./...
-	@out=$$(staticcheck ./... 2>&1); rc=$$?; \
-		[ -z "$$out" ] || printf '%s\n' "$$out"; \
-		case "$$out" in *"internal error in importing"*) \
-			echo "staticcheck cannot read this toolchain, so it checked nothing; run: make tools" >&2; \
-			exit 1;; \
-		esac; \
-		exit $$rc
 	golangci-lint run
 
 .PHONY: pre-commit
 pre-commit: vendor lint test-race ## what the git pre-commit hook runs
 
-# One command for a fresh clone: the linters the hook needs, and the
+# One command for a fresh clone: the linter the hook needs, and the
 # hook itself. Everything else in here assumes it has been run.
 .PHONY: init
-init: tools hook ## set a clone up: install the linters and the git hook
+init: tools hook ## set a clone up: install the linter and the git hook
 
 .PHONY: hook
 hook: ## install the pre-commit git hook
@@ -96,15 +82,8 @@ hook: ## install the pre-commit git hook
 # golangci-lint's module path gained a /v2 in v2.0; without it @latest
 # resolves against the v1 module and quietly installs v1.64.8 over a v2
 # that was already there.
-#
-# staticcheck was pinned to 2026.2rc1 for as long as @latest resolved to
-# 2026.1, which cannot read Go 1.27 export data, reports that as a few
-# compile errors, and exits 0 -- a linter that silently checks nothing.
-# 2026.2 is out, so the pin is off; the grep in `make lint` is what stays,
-# because the next toolchain release does this again.
 .PHONY: tools
-tools: ## install the linters and govulncheck
-	$(GO) install honnef.co/go/tools/cmd/staticcheck@latest
+tools: ## install the linter and govulncheck
 	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 	$(GO) install golang.org/x/vuln/cmd/govulncheck@latest
 

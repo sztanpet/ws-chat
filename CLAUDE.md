@@ -619,19 +619,24 @@ nothing a plain `go test ./...` needs any more — the `GOEXPERIMENT=jsonv2`
 this used to export died with Go 1.27, which ships `encoding/json/v2` and
 gates it on the `go` directive instead.
 
-- `make init` — what a fresh clone runs once: installs the linters and
-  the git pre-commit hook. `make lint` refuses to run without them and
-  says so rather than skipping them quietly.
-- `make tools` — the linters, and **not all at `@latest`**. Go releases
-  ahead of the linters' own, and both ways that bites are quiet.
-  staticcheck's release cannot decode a newer toolchain's export data,
-  prints a few "internal error in importing" lines and **exits 0** — so
-  `make lint` turns that string into a failure rather than trusting the
-  status. golangci-lint's module path gained a `/v2`, and without it
-  `@latest` silently resolves against v1. It also compiles in its own copy
-  of staticcheck, which `.golangci.yml` disables: it is an older one that
-  panics on 1.27 stdlib source, and a panicking analyser aborts the whole
-  run.
+- `make init` — what a fresh clone runs once: installs golangci-lint and
+  the git pre-commit hook. `make lint` refuses to run without it and says
+  so rather than skipping it quietly.
+- `make tools` — golangci-lint and govulncheck. Its module path gained a
+  `/v2` in v2.0, and without it `@latest` silently resolves against the v1
+  module and installs v1.64.8 over a v2 that was already there. That is
+  the one line here not spelled the obvious way.
+
+  **There is one linter binary, not two.** staticcheck and `unused` run
+  from inside golangci-lint, which redistributes honnef.co/go/tools, so
+  running the standalone binary as well was two copies of one analyser —
+  and the only interesting thing about two copies is that they disagreed.
+  golangci-lint registers honnef's `quickfix` analysers, which
+  `cmd/staticcheck` treats as debug output and does not register at all
+  without `-debug.run-quickfix-analyzers`. `.golangci.yml` therefore sets
+  `checks: [all, -QF*]`: honnef's own set, which is also stricter than
+  golangci-lint's default in the other direction, since that one drops
+  several `ST` checks.
 - `make soak` — the long-running connection soak tests, gated behind the
   `soak` build tag so they stay out of `make test`.
 - `make vulncheck` — `govulncheck ./...` (kept out of pre-commit: it
@@ -658,10 +663,12 @@ Every cache Go has lives on the agent's persistent `/cache` volume —
 `GOCACHE`, `GOPATH` (the module cache *and* the tool binaries) and
 `GOLANGCI_LINT_CACHE` — the same convention as the sibling
 `kikapcsologo/backend` pipeline on the same agent. Without it every run
-recompiles every vendored dependency and rebuilds staticcheck and
-golangci-lint from source, which over there was half the pipeline. The
-lint step therefore installs the linters only when they are missing
-rather than calling `make tools` unconditionally.
+recompiles every vendored dependency and rebuilds golangci-lint from
+source, which over there was half the pipeline. The lint step still calls
+`make tools` unconditionally: against a warm `/cache` a re-run relinks
+what is already built, and skipping it when the binary merely *exists* is
+what left a linter older than the image's toolchain in place across the
+1.27 bump.
 
 Detail, the step table and the known rough edges are in
 [`state/ci.md`](state/ci.md).

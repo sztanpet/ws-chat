@@ -1,28 +1,27 @@
-# golangci-lint's own config. `make lint` also runs go vet and staticcheck
-# as their own binaries; what is left for golangci-lint is errcheck and
-# ineffassign.
+# golangci-lint's own config. `make lint` also runs go vet as its own
+# binary; everything else -- staticcheck, unused, errcheck, ineffassign --
+# is run from here.
 
 version: "2"
 
 linters:
-  # Not because they are broken -- golangci-lint v2.13.0 fixed the
-  # honnef.co/go/tools panic that made this block mandatory on Go 1.27 --
-  # but because `make lint` already runs staticcheck as its own binary,
-  # and `unused` is part of it. Two copies of the same analyser is
-  # duplicate work whose only interesting property is that the copies
-  # DISAGREE: golangci-lint turns on the QF* quickfix checks that
-  # staticcheck itself leaves off, which here means five reports, none of
-  # them a bug and none worth taking (unembedding `ta.app.autojoin` into
-  # `ta.autojoin` hides which object is being addressed; De Morgan on
-  # `!(alpha < middle && middle < zebra)` reads worse than "not sorted").
-  #
-  # The standalone binary is the one to believe: it is honnef's own
-  # default check set rather than a redistributor's. If these are ever
-  # re-enabled, drop staticcheck from `make lint` in the same commit --
-  # running both is the thing to avoid.
-  disable:
-    - staticcheck
-    - unused
+  settings:
+    # golangci-lint redistributes honnef.co/go/tools but does not
+    # reproduce how honnef's own command configures it, and the
+    # difference is not a preference: `cmd/staticcheck` does not
+    # REGISTER the quickfix analysers at all unless you pass
+    # -debug.run-quickfix-analyzers. They are debug output there, and
+    # here they are five reports, none of them a bug and none worth
+    # taking -- unembedding `ta.app.autojoin` into `ta.autojoin` hides
+    # which object is being addressed, and De Morgan on
+    # `!(alpha < middle && middle < zebra)` reads worse than "not
+    # sorted". golangci-lint turns them on by default; turn them back
+    # off, and inherit honnef's `["all"]` for everything else rather
+    # than golangci-lint's shorter list, which also drops the ST checks.
+    staticcheck:
+      checks:
+        - all
+        - -QF*
 
   exclusions:
     # What golangci-lint v1 excluded by default and v2 made opt-in:

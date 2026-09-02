@@ -193,12 +193,15 @@ game here, so anything touching the hub or the fan-out ships with a
 
 ```sh
 make init        # tools + hook; what a fresh clone runs
-make lint        # go vet + staticcheck + golangci-lint
+make lint        # go vet + golangci-lint
 make pre-commit  # vendor + lint + test-race (what the hook runs)
 ```
 
-`make lint` refuses to run when the linters are missing and says to run
-`make init`, rather than installing them in front of every commit.
+`make lint` refuses to run when golangci-lint is missing and says to run
+`make init`, rather than installing it in front of every commit.
+staticcheck and `unused` run from inside golangci-lint, configured in
+`.golangci.yml` to honnef's own check set rather than the redistributed
+default.
 
 ## Dependencies and security
 

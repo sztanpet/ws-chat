@@ -40,15 +40,14 @@ steps:
     image: *golang
     environment: *goenv
     commands:
-      # Unconditionally, despite `make tools` building the linters from
+      # Unconditionally, despite `make tools` building the linter from
       # source. With GOPATH and GOCACHE on /cache a re-run relinks what is
       # already built and takes no measurable time; only a version that
-      # actually moved costs anything. Running it only when the binaries
-      # are MISSING is what broke this step on the Go 1.27 bump: a cached
-      # staticcheck too old for the toolchain is present, so it was never
-      # replaced, and it checks nothing while exiting 0. The Makefile puts
-      # $(go env GOPATH)/bin on PATH for its own recipes; this shell needs
-      # it too.
+      # actually moved costs anything. Running it only when the binary is
+      # MISSING is what broke this step on the Go 1.27 bump: /cache held a
+      # linter older than the image's toolchain, and being present it was
+      # never replaced. The Makefile puts $(go env GOPATH)/bin on PATH for
+      # its own recipes; this shell needs it too.
       - export PATH="/cache/gopath/bin:$PATH"
       - make tools
       - make lint
