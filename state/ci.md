@@ -173,6 +173,18 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   package), because "0 issues" from a linter that ran nothing looks
   identical to a clean tree.
 
+- **`go vet` went the same way, so `make lint` is now one command.**
+  golangci-lint's `govet` builds its default analyser set from
+  `cmd/vet/main.go` -- the source file is cited in a comment above the
+  list -- so the standalone step was running the same passes twice.
+  Diffed against `go tool vet help` on 1.27 rather than trusting that:
+  identical, once `composites`/`copylocks` are recognised as vet's plural
+  flag aliases for `composite`/`copylock`, plus `inline`, which
+  golangci-lint takes from `cmd/fix`. A seeded package confirmed it
+  reports the same printf and lostcancel diagnostics. The
+  `std-error-handling` exclusion preset cannot hide any of it: it is a
+  single rule scoped to `errcheck`.
+
 ## Decisions
 
 - **Every step shells out to the Makefile, never to `go` directly.** The

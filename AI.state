@@ -32,8 +32,15 @@ golangci-lint's default also drops several `ST` checks this keeps. The
 "internal error in importing" grep went with the binary it guarded; that
 exit-0 failure was `cmd/staticcheck`'s alone, and golangci-lint reports a
 package it cannot type-check as a `typecheck` issue with a non-zero
-status. Both halves checked rather than assumed. Lint, `test-race` and
-govulncheck clean. Detail in `state/ci.md`.
+status.
+
+**`go vet` went the same way**, and `make lint` is now a single command.
+golangci-lint's `govet` generates its default analyser set from
+`cmd/vet/main.go`, which the diff against `go tool vet help` on 1.27
+bears out exactly — plus `inline`, out of `cmd/fix`. Nothing here was
+assumed: every claim above was checked against a seeded package before
+the step it justified was deleted. Lint, `test-race` and govulncheck
+clean. Detail in `state/ci.md`.
 
 ## State file index
 
@@ -52,8 +59,8 @@ govulncheck clean. Detail in `state/ci.md`.
   around a toolchain they do not yet support; stdlib modernization pass;
   hujson updated.
 - **2026-09-02** — toolchain go1.27.1; no module moved; `go fix` clean;
-  staticcheck unpinned and then folded into golangci-lint, one linter
-  binary instead of two.
+  staticcheck unpinned, then it and `go vet` folded into golangci-lint —
+  `make lint` is one command over one binary.
 
 ## Key decisions
 
