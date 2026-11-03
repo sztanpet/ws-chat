@@ -4,43 +4,26 @@ import (
 	"github.com/sztanpet/ws-chat/internal/metrics"
 )
 
-// The server's metrics, declared in one place so the set can be read
-// without grepping for increments.
-//
-// Every one of them earns its place by answering a question somebody asks
-// at three in the morning: is anything connected, is anything being
-// delivered, is the server refusing things, and is it dropping things. A
-// metric nobody would page on is a metric that costs a line of code on the
-// hot path for nothing.
-//
-// Counters here never reset — that is the point of a counter, and the
-// scraper takes the difference. Anything that goes up and down is a gauge,
-// and anything already counted elsewhere is a GaugeFunc reading the real
-// thing rather than a mirror of it that can disagree.
+// A metric earns its place by answering a question asked at three in the morning.
 type appMetrics struct {
-	// Connections.
 	connectionsTotal  *metrics.Counter
-	connectionsFailed *metrics.CounterVec // by reason
-	codecs            *metrics.CounterVec // by negotiated subprotocol
+	connectionsFailed *metrics.CounterVec
+	codecs            *metrics.CounterVec
 
-	// Traffic.
-	commandsTotal *metrics.CounterVec // by verb, INCLUDING refused ones
-	messagesTotal *metrics.Counter    // accepted and fanned out
-	privateTotal  *metrics.Counter    // accepted and delivered
-	refusalsTotal *metrics.CounterVec // by ERR code
+	commandsTotal *metrics.CounterVec
+	messagesTotal *metrics.Counter
+	privateTotal  *metrics.Counter
+	refusalsTotal *metrics.CounterVec
 
-	// Things going wrong.
-	laggedTotal   *metrics.Counter // subscribers dropped for falling behind
-	recordsFailed *metrics.Counter // persistence jobs that returned an error
+	laggedTotal   *metrics.Counter
+	recordsFailed *metrics.Counter
 
-	// Channels.
-	channelsTotal *metrics.Counter // created
+	channelsTotal *metrics.Counter
 	joinsTotal    *metrics.Counter
 	partsTotal    *metrics.Counter
 
-	// Moderation.
-	moderationTotal *metrics.CounterVec // by action
-	sanctionsLoaded *metrics.Counter    // recovered at startup
+	moderationTotal *metrics.CounterVec
+	sanctionsLoaded *metrics.Counter
 }
 
 func newMetrics(r *metrics.Registry) *appMetrics {
@@ -80,8 +63,6 @@ func newMetrics(r *metrics.Registry) *appMetrics {
 	}
 }
 
-// registerStateMetrics wires the gauges that read the server's live state
-// at scrape time rather than being maintained alongside it.
 func (a *app) registerStateMetrics(r *metrics.Registry) {
 	r.GaugeFunc("connections", "Connections currently held.", func() int64 {
 		a.connsMu.RLock()
@@ -125,9 +106,6 @@ func (a *app) registerStateMetrics(r *metrics.Registry) {
 		return int64(len(a.limiters))
 	})
 
-	// The broadcasters count their own drops, and the persistence queue
-	// counts its own. Reading them is better than maintaining a second
-	// number that can disagree with the first.
 	r.GaugeFunc("fanout_drops_total", "Subscribers dropped by the fan-out, as it counts them.", func() int64 {
 		a.channelsMu.RLock()
 		channels := make([]*channel, 0, len(a.channels))
@@ -149,8 +127,6 @@ func (a *app) registerStateMetrics(r *metrics.Registry) {
 	})
 }
 
-// refused counts a refusal alongside sending it, so the two cannot drift.
-// Every ERR the server sends goes through conn.reply, which calls this.
 func (a *app) refused(code string) {
 	a.metrics.refusalsTotal.With(code).Inc()
 }

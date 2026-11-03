@@ -21,44 +21,26 @@ import (
 	"github.com/sztanpet/ws-chat/internal/ratelimit"
 )
 
-// app is the composition root. Everything the handlers need hangs off it,
-// and nothing reaches for a package-level global.
 type app struct {
 	cfg config.Config
 	log *slog.Logger
 
-	// hooks are the layers outside the chat core: authentication, chatter
-	// data, moderation, persistence. All optional; see internal/hook.
 	hooks hook.Hooks
 
-	// records is the persistence queue. Bounded and lossy on purpose — a
-	// slow store must not become backpressure on the chat.
+	// Bounded and lossy: a slow store must not become backpressure on the chat.
 	records     chan func(context.Context) error
 	recordsDone chan struct{}
 	dropped     atomic.Uint64
 
-	// channels is every channel that currently exists, created on demand
-	// and reclaimed when empty. Each owns its own fan-out (one broadcaster
-	// per codec), its own rate limit and its own member list.
 	channelsMu sync.RWMutex
 	channels   map[string]*channel
 
-	// filters is the chain run in front of every message: the built-in
-	// text-hygiene filters, then whatever the deployment installed. Built
-	// once, since none of it changes at runtime.
 	filters hook.Filter
 
-	// mod is who is muted and who is banned. One store for now; per
-	// channel once channels exist.
 	mod *moderation.Store
 
-	// hist is the replay window a connecting client is shown. The default
-	// is history.Memory; a deployment can install anything.
 	hist hook.History
 
-	// limiters are the rate limit buckets shared between the connections of
-	// one account, keyed by whatever the Limiter hook decided an account
-	// is. Connections with no key are not in here at all.
 	limitersMu sync.Mutex
 	limiters   map[string]*limiterEntry
 
@@ -67,28 +49,18 @@ type app struct {
 	debug     *http.Server
 	debugAddr string // the address it actually bound, for tests and logs
 
-	// registry and metrics are the server describing itself. Not a hook:
-	// how many connections are held is not policy, and anything that wants
-	// the numbers elsewhere can scrape them.
 	registry *metrics.Registry
 	metrics  *appMetrics
 
-	// ctx is the lifetime of every connection. Cancelling it is what stops
-	// the read pumps: net/http's Shutdown does not wait for — or even know
-	// about — hijacked connections.
+	// Cancelled on shutdown: net/http's Shutdown ignores hijacked connections.
 	ctx      context.Context
 	stopConn context.CancelFunc
 
-	// conns is the directory private messages are addressed through. A user
-	// has one connection and (once channels exist) many memberships, so
-	// this is a lookup by name, separate from any channel's member set.
 	connsMu sync.RWMutex
 	conns   map[string]*conn
 
 	// Server-wide, so an id names one message whichever channel it was in.
-	seq atomic.Uint64
-	// anon names unauthenticated connections until there is a login to do
-	// it properly.
+	seq  atomic.Uint64
 	anon atomic.Uint64
 }
 
@@ -97,9 +69,7 @@ func newApp(configPath string) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	// No hooks are installed here yet. This is the seam where a real
-	// deployment wires in its auth, directory and storage layers; the
-	// server runs without them.
+	// The seam for a deployment's hooks; the server runs without any.
 	return newAppWithConfig(cfg, hook.Hooks{})
 }
 
@@ -123,15 +93,12 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 	}
 	a.mod = moderation.New()
 
-	// The default window is what the server did before the hook existed:
-	// the last cfg.Backlog messages, in memory.
 	a.hist = hooks.History
 	if a.hist == nil {
 		a.hist = history.NewMemory(cfg.Backlog)
 	}
 
-	// Text hygiene first, then policy. A message that is not valid text
-	// should never reach a filter that was written assuming it was.
+	// Hygiene before policy: no filter should see text that is not valid.
 	a.filters = filter.Chain(
 		filter.UTF8{},
 		filter.Zalgo{Max: cfg.MaxDiacritics},
@@ -142,9 +109,7 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 	a.metrics = newMetrics(a.registry)
 	a.registerStateMetrics(a.registry)
 
-	// Whatever was in force when the server last stopped. Before the
-	// listener, before the janitor: a connection must never be answered
-	// while the answer to "is this person banned" is still loading.
+	// Before the listener: no connection is answered while bans are still loading.
 	if err := a.loadSanctions(context.Background()); err != nil {
 		return nil, err
 	}
@@ -161,16 +126,12 @@ func newAppWithConfig(cfg config.Config, hooks hook.Hooks) (*app, error) {
 	return a, nil
 }
 
-// limiterEntry is a shared rate limit bucket and the number of connections
-// currently holding it.
 type limiterEntry struct {
 	bucket *ratelimit.Bucket
 	refs   int
 }
 
-// janitorInterval is how often expired moderation entries and unreferenced
-// rate limiters are reclaimed. Nothing waits on it, so it is deliberately
-// unhurried.
+// Unhurried: nothing waits on it.
 const janitorInterval = time.Minute
 
 func (a *app) routes() {
@@ -186,9 +147,6 @@ func parseLevel(s string) (slog.Level, error) {
 	return l, nil
 }
 
-// register adds a connection to the directory. Nicks are assigned by the
-// server and unique, so this cannot collide today; when logins arrive it
-// will, and this is where that is decided.
 func (a *app) register(c *conn) {
 	a.connsMu.Lock()
 	defer a.connsMu.Unlock()
@@ -198,8 +156,7 @@ func (a *app) register(c *conn) {
 func (a *app) unregister(c *conn) {
 	a.connsMu.Lock()
 	defer a.connsMu.Unlock()
-	// Only if it is still ours: a reconnect under the same name must not
-	// have its entry removed by the old connection's teardown.
+	// Only if still ours: the old connection's teardown must spare a reconnect.
 	if cur, ok := a.conns[c.nick()]; ok && cur == c {
 		delete(a.conns, c.nick())
 	}
@@ -212,15 +169,7 @@ func (a *app) lookup(nick string) (*conn, bool) {
 	return c, ok
 }
 
-// broadcastMsg fans out a chat message and adds it to the replay window.
-//
-// Everything a client sees is derived from the identity and the text, so
-// the caller passes those rather than assembling a frame: the wire form and
-// the history form are then two views of the same thing and cannot drift.
-//
-// The window is appended under the same lock that orders the fan-out, so
-// what a joining client is shown cannot disagree with the order the room
-// saw.
+// Appended under the fan-out lock, so the backlog keeps the room's order.
 func (a *app) broadcastMsg(ch *channel, from hook.Identity, data string, at time.Time) (uint64, error) {
 	return ch.broadcastTo(a,
 		func(id uint64) proto.Outbound {
@@ -234,8 +183,7 @@ func (a *app) broadcastMsg(ch *channel, from hook.Identity, data string, at time
 	)
 }
 
-// wireMsg is the one place a recorded message becomes a frame, so the
-// backlog and live traffic cannot describe the same message differently.
+// The one place a message becomes a frame, so backlog and live cannot differ.
 func wireMsg(channel string, m hook.Message) proto.Msg {
 	return proto.NewMsg(proto.Msg{
 		Channel:   channel,
@@ -248,12 +196,7 @@ func wireMsg(channel string, m hook.Message) proto.Msg {
 	})
 }
 
-// backlog is what a connecting client is replayed.
-//
-// Deliberately not under sendMu: a History implementation may be backed by
-// something slow, and Recent is allowed to be — it runs once per
-// connection. Holding the broadcast lock across it would let a slow store
-// stall the whole channel.
+// Not under sendMu: Recent may be slow, and the channel must not wait on it.
 func (a *app) backlog(ctx context.Context, channel string) []proto.Msg {
 	if a.cfg.Backlog < 1 {
 		return nil
@@ -261,8 +204,7 @@ func (a *app) backlog(ctx context.Context, channel string) []proto.Msg {
 
 	recent, err := a.hist.Recent(ctx, channel, a.cfg.Backlog)
 	if err != nil {
-		// Failing to show history is not a reason to refuse somebody a
-		// connection. Log it; they get an empty window.
+		// Not a reason to refuse a connection: they get an empty window.
 		a.log.Error("cannot read history", "channel", channel, "err", err)
 		return nil
 	}

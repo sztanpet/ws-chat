@@ -12,11 +12,9 @@ import (
 	"github.com/coder/websocket"
 )
 
-// shutdownGrace is how long in-flight HTTP requests get to finish. WebSocket
-// connections are not covered by it — see close.
+// For HTTP requests only: hijacked WebSockets are close's business.
 const shutdownGrace = 10 * time.Second
 
-// run serves until the process is asked to stop, then shuts down.
 func (a *app) run(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -25,10 +23,7 @@ func (a *app) run(ctx context.Context) error {
 		return err
 	}
 
-	// Labelling the listener labels every handler goroutine it starts,
-	// which is what puts /health and a rejected upgrade somewhere sensible
-	// in a profile. A connection that survives the upgrade relabels itself
-	// as taskConn and keeps that goroutine for its whole life.
+	// Labels every handler goroutine net/http starts from here.
 	serving := make(chan error, 1)
 	go pprof.Do(ctx, pprof.Labels(labelTask, taskListener), func(context.Context) {
 		a.log.Info("listening", "addr", a.cfg.Addr)
@@ -53,18 +48,7 @@ func (a *app) run(ctx context.Context) error {
 	return err
 }
 
-// close ends every connection.
-//
-// net/http's Shutdown deliberately ignores hijacked connections, and every
-// WebSocket here is one, so waiting on it would return promptly while every
-// client stayed connected. Everything below is therefore our own doing.
-//
-// The order matters. Cancelling a read context does not politely end a
-// WebSocket — the library has to drop the socket, because a cancelled read
-// leaves the stream at an unknown offset — so the goodbye has to go out
-// first. A client that is dropped without a close frame cannot tell a
-// deliberate shutdown from a network failure, and will treat one as the
-// other.
+// Goodbye first: a cancelled read drops the socket without a close frame.
 func (a *app) close() {
 	a.connsMu.RLock()
 	conns := make([]*conn, 0, len(a.conns))
@@ -77,13 +61,9 @@ func (a *app) close() {
 		c.close(websocket.StatusGoingAway, "server shutting down")
 	}
 
-	// Then unblock both pumps: the read pumps by cancelling their context,
-	// the write pumps by ending the subscriptions they are parked in.
 	a.stopConn()
 	a.closeChannels()
 
-	// The persistence worker gets the same cancellation and makes a best
-	// effort to finish what is already queued.
 	<-a.recordsDone
 
 	a.closeDebug()

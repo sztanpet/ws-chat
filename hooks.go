@@ -12,20 +12,8 @@ import (
 	"github.com/sztanpet/ws-chat/internal/ratelimit"
 )
 
-// This file is where the core meets the layers outside it. Every call to a
-// hook goes through here, so the rules about which of them may block, and
-// what happens when one misbehaves, are enforced in one place instead of
-// being scattered through the connection handling.
-
-// recordQueue is how many pending writes the persistence worker will hold.
-// Beyond it, records are dropped: the alternative is letting a slow store
-// become backpressure on the chat, which is the one thing the whole design
-// refuses to do.
 const recordQueue = 1024
 
-// httpRequest adapts an *http.Request to the narrow view an auth layer
-// gets. It exists so an implementation cannot hijack the connection or
-// start writing a response behind the server's back.
 type httpRequest struct{ r *http.Request }
 
 func (h httpRequest) Header(name string) string { return h.r.Header.Get(name) }
@@ -42,8 +30,6 @@ func (h httpRequest) Cookie(name string) (string, bool) {
 	return c.Value, true
 }
 
-// identify resolves a connection request to an identity, applying whatever
-// the directory knows on top. It is the only place either hook is called.
 func (a *app) identify(ctx context.Context, r *http.Request) (hook.Identity, error) {
 	var id hook.Identity
 
@@ -60,34 +46,20 @@ func (a *app) identify(ctx context.Context, r *http.Request) (hook.Identity, err
 		case err == nil:
 			id = id.Apply(chatter)
 		case errors.Is(err, hook.ErrNoChatter):
-			// Nothing on file. What Authenticate said stands.
 		default:
-			// A broken directory must not cost somebody their login. Log
-			// it and carry on with what we have.
+			// A broken directory must not cost somebody their login.
 			a.log.Error("directory lookup failed", "id", id.ID, "err", err)
 		}
 	}
 
-	// Anyone the layers did not name gets named here. Anonymous nicks are
-	// distinguishable on purpose: nobody should be able to pass for a
-	// logged-in user by picking their name.
+	// Anonymous nicks look anonymous, so nobody passes for a logged-in user.
 	if id.Nick == "" {
 		id.Nick = fmt.Sprintf("anon%d", a.anon.Add(1))
 	}
 	return id, nil
 }
 
-// resolve finds who a command is about.
-//
-// A connected person is resolved from the connection directory, which is
-// authoritative for anybody here: it has the identity the connection is
-// actually running as, and the connection itself for anything that has to
-// be enforced on it. Anybody else is looked up through the Directory hook,
-// which is what lets a command name somebody who has left.
-//
-// The returned conn is nil when the target is not connected, which every
-// caller has to handle — that is the whole point of the lookup succeeding
-// anyway.
+// The conn is nil for somebody who is not connected, and callers must cope.
 func (a *app) resolve(ctx context.Context, nick string) (*conn, hook.Identity, bool) {
 	if target, ok := a.lookup(nick); ok {
 		return target, target.id, true
@@ -101,14 +73,12 @@ func (a *app) resolve(ctx context.Context, nick string) (*conn, hook.Identity, b
 	case errors.Is(err, hook.ErrNoChatter):
 		return nil, hook.Identity{}, false
 	case err != nil:
-		// A broken directory must not become a moderator quietly acting on
-		// the wrong person, so an error is a miss rather than a guess.
+		// An error is a miss, not a guess: never act on the wrong person.
 		a.log.Error("cannot resolve a nick", "nick", nick, "err", err)
 		return nil, hook.Identity{}, false
 	}
 
-	// A directory that hands back nothing to file an action under is no
-	// better than one that said it did not know the name.
+	// Nothing to file an action under is as good as not knowing the name.
 	if id.Key() == "nick:" {
 		return nil, hook.Identity{}, false
 	}
@@ -118,14 +88,6 @@ func (a *app) resolve(ctx context.Context, nick string) (*conn, hook.Identity, b
 	return nil, id, true
 }
 
-// clientLimiter builds the rate limiter for one connection, and returns the
-// function that hands it back.
-//
-// No Limiter installed, or one with no opinion, means unlimited — which New
-// returns as a nil *Bucket, so the check on the hot path costs a nil
-// comparison. A Limits with no Key gets a bucket of its own and nothing to
-// release; one with a Key shares a bucket with every other connection
-// naming it.
 func (a *app) clientLimiter(ctx context.Context, id hook.Identity) (*ratelimit.Bucket, func()) {
 	if a.hooks.Limiter == nil {
 		return nil, nil
@@ -138,13 +100,7 @@ func (a *app) clientLimiter(ctx context.Context, id hook.Identity) (*ratelimit.B
 	return a.acquireLimiter(limits)
 }
 
-// acquireLimiter hands out the bucket for a key, creating it if this is the
-// first connection to ask.
-//
-// The limits of an existing bucket are left alone. A bucket in use is
-// somebody's remaining budget, and rebuilding it because a later connection
-// reported different numbers would refill it — which is a way to escape a
-// throttle by opening a second socket.
+// An existing bucket keeps its limits: rebuilding it would refill a throttle.
 func (a *app) acquireLimiter(limits hook.Limits) (*ratelimit.Bucket, func()) {
 	a.limitersMu.Lock()
 	defer a.limitersMu.Unlock()
@@ -160,12 +116,7 @@ func (a *app) acquireLimiter(limits hook.Limits) (*ratelimit.Bucket, func()) {
 	return entry.bucket, func() { a.releaseLimiter(key) }
 }
 
-// releaseLimiter drops one connection's hold on a shared bucket.
-//
-// It does NOT delete the entry at zero. A bucket that still has spent
-// tokens is somebody's throttle, and handing back a fresh one the moment
-// they disconnect is exactly what a person being throttled would try.
-// Reclaiming is the janitor's job, and only once the bucket has refilled.
+// Kept at zero holders: a fresh bucket on reconnect would escape the throttle.
 func (a *app) releaseLimiter(key string) {
 	a.limitersMu.Lock()
 	defer a.limitersMu.Unlock()
@@ -174,10 +125,6 @@ func (a *app) releaseLimiter(key string) {
 	}
 }
 
-// sweepLimiters drops shared buckets that nobody holds and that have
-// refilled, and reports how many it removed. A refilled bucket is
-// indistinguishable from one that never existed, so forgetting it loses
-// nothing.
 func (a *app) sweepLimiters(now time.Time) int {
 	a.limitersMu.Lock()
 	defer a.limitersMu.Unlock()
@@ -192,9 +139,6 @@ func (a *app) sweepLimiters(now time.Time) int {
 	return removed
 }
 
-// janitor reclaims what lazy expiry leaves behind. Nothing depends on it
-// running — every read already treats an expired entry as absent — so it
-// only exists to stop a long-lived server accumulating them.
 func (a *app) janitor(ctx context.Context) {
 	ticker := time.NewTicker(janitorInterval)
 	defer ticker.Stop()
@@ -217,7 +161,6 @@ func (a *app) janitor(ctx context.Context) {
 	}
 }
 
-// channelLimiter builds the bucket every member of a channel shares.
 func (a *app) channelLimiter(ctx context.Context, channel string) *ratelimit.Bucket {
 	if a.hooks.Limiter == nil {
 		return nil
@@ -226,9 +169,6 @@ func (a *app) channelLimiter(ctx context.Context, channel string) *ratelimit.Buc
 	return ratelimit.New(limits.Burst, limits.Interval)
 }
 
-// allow runs the filter chain: the built-in text filters and then whatever
-// the deployment installed. It runs on the sender's read pump, so a filter
-// that blocks holds up one client — its own.
 func (a *app) allow(ctx context.Context, from hook.Identity, data string) (bool, string) {
 	if a.filters == nil {
 		return true, ""
@@ -236,9 +176,7 @@ func (a *app) allow(ctx context.Context, from hook.Identity, data string) (bool,
 	return a.filters.Allow(ctx, from, data)
 }
 
-// canModerate reports whether this identity may moderate in a scope — a
-// channel name, or empty for server-wide. The default is DENY: a server
-// that has not been told who its moderators are does not have any.
+// Deny by default: a server not told who its moderators are has none.
 func (a *app) canModerate(ctx context.Context, id hook.Identity, scope string) bool {
 	if a.hooks.Authz == nil {
 		return false
@@ -246,9 +184,6 @@ func (a *app) canModerate(ctx context.Context, id hook.Identity, scope string) b
 	return a.hooks.Authz.CanModerate(ctx, id, scope)
 }
 
-// autojoin is where a connection starts. No Channels hook, or one with no
-// opinion, means the configured default channel — which is what the server
-// did before channels existed.
 func (a *app) autojoin(ctx context.Context, id hook.Identity) []string {
 	if a.hooks.Channels == nil {
 		return []string{a.cfg.DefaultChannel}
@@ -259,9 +194,6 @@ func (a *app) autojoin(ctx context.Context, id hook.Identity) []string {
 	return []string{a.cfg.DefaultChannel}
 }
 
-// canJoin asks whether an identity may enter a channel it named. With no
-// Channels hook installed anybody may join anything, which is the same
-// permissive default the other hooks have.
 func (a *app) canJoin(ctx context.Context, id hook.Identity, channel string) (bool, string) {
 	if a.hooks.Channels == nil {
 		return true, ""
@@ -269,19 +201,11 @@ func (a *app) canJoin(ctx context.Context, id hook.Identity, channel string) (bo
 	return a.hooks.Channels.CanJoin(ctx, id, channel)
 }
 
-// record queues a persistence job. It never blocks and never fails the
-// message: by the time it is called, the thing has already happened.
-//
-// The caller checks that the hook it is about to close over exists. It
-// cannot be checked here — the job is a closure and this function does not
-// know which hook is inside it — and getting that wrong queues a job that
-// dereferences nil on a worker goroutine, which is how it was found.
+// Callers check the hook exists: the closure hides it, and nil would panic later.
 func (a *app) record(job func(context.Context) error) {
 	select {
 	case a.records <- job:
 	default:
-		// Dropping is deliberate and counted. A store that cannot keep up
-		// loses history; it does not get to stop the chat.
 		a.dropped.Add(1)
 		a.log.Warn("record queue full, dropping", "dropped", a.dropped.Load())
 	}
@@ -301,12 +225,6 @@ func (a *app) recordPrivate(p hook.Private) {
 	a.record(func(ctx context.Context) error { return a.hooks.Recorder.Private(ctx, p) })
 }
 
-// recordSanction persists a moderation action, if anything is listening.
-//
-// It goes on the same queue as the chat records, so a slow store cannot
-// stall the moderator who issued the command. That does mean a record
-// dropped under load is a sanction that will not survive a restart —
-// the tradeoff is stated in hook.Sanctions and the drops are counted.
 func (a *app) recordSanction(m hook.Moderation) {
 	if a.hooks.Sanctions == nil {
 		return
@@ -314,12 +232,7 @@ func (a *app) recordSanction(m hook.Moderation) {
 	a.record(func(ctx context.Context) error { return a.hooks.Sanctions.Record(ctx, m) })
 }
 
-// loadSanctions puts the mutes and bans that survived a restart back into
-// memory. It runs once, before anything is served.
-//
-// A failure stops the server. Starting without knowing who is banned means
-// letting them in, and there is no sensible way to serve a connection when
-// the answer to "may this person be here" is unavailable.
+// A failure stops the server: not knowing who is banned means letting them in.
 func (a *app) loadSanctions(ctx context.Context) error {
 	if a.hooks.Sanctions == nil {
 		return nil
@@ -338,9 +251,7 @@ func (a *app) loadSanctions(ctx context.Context) error {
 		case proto.ActionBan:
 			a.mod.Ban(m.Scope, m.Key, m.Until)
 		default:
-			// Unmute and unban lift a sanction; they are not one. An
-			// implementation handing them back has misunderstood Active,
-			// and applying them would be worse than saying so.
+			// A lift is not a sanction: an Active returning one is broken, so say so.
 			a.log.Warn("ignoring a lifted action in the active set",
 				"action", m.Action, "key", m.Key)
 			continue
@@ -353,12 +264,7 @@ func (a *app) loadSanctions(ctx context.Context) error {
 	return nil
 }
 
-// recordWorker drains the persistence queue until the server shuts down.
-//
-// One worker, on purpose: it keeps writes in the order they happened, which
-// a store that reconstructs a conversation is going to want. If a real
-// store turns out to need more throughput than one worker gives, that is a
-// batching change here, not a change to anything on the hot path.
+// One worker, so records are written in the order things happened.
 func (a *app) recordWorker(ctx context.Context) {
 	defer close(a.recordsDone)
 
@@ -373,8 +279,6 @@ func (a *app) recordWorker(ctx context.Context) {
 	}
 }
 
-// drainRecords makes a best effort to finish what is already queued when
-// the server is going down, rather than silently losing it.
 func (a *app) drainRecords() {
 	ctx, cancel := context.WithTimeout(context.Background(), recordDrainGrace)
 	defer cancel()
@@ -397,9 +301,7 @@ const recordDrainGrace = 5 * time.Second
 func (a *app) runRecord(ctx context.Context, job func(context.Context) error) {
 	if err := job(ctx); err != nil {
 		a.metrics.recordsFailed.Inc()
-		// A failed write is the store's problem to shout about; the
-		// message has already been delivered and there is nothing useful
-		// to tell the sender at this point.
+		// Only logged: the message is delivered, and the sender can do nothing.
 		a.log.Error("record failed", "err", err)
 	}
 }
