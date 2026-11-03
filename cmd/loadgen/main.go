@@ -1,16 +1,4 @@
-// Command loadgen points a crowd at a ws-chat server and says what came
-// back.
-//
-//	loadgen -url ws://127.0.0.1:8080/ws -conns 5000 -speak 10 -rate 1 -for 60s
-//
-// It runs in its own process on purpose. A benchmark living inside the
-// server shares its scheduler, its allocator and its GC, and then reports
-// on them as if they were the server's — and it cannot be pointed at a
-// machine that is not this one.
-//
-// Note the file descriptor limit: one connection is one socket at each end,
-// so anything above about a thousand needs `ulimit -n` raising on both
-// sides.
+// Command loadgen points a crowd at a ws-chat server and reports what came back.
 package main
 
 import (
@@ -42,9 +30,7 @@ func main() {
 	flag.DurationVar(&cfg.Progress, "progress", time.Second, "how often to print a progress line; 0 for none")
 	flag.Parse()
 
-	// Ctrl-C stops the run and still prints the report. A load test you
-	// cannot interrupt without losing its numbers is one nobody interrupts,
-	// and so one that always runs for the wrong length of time.
+	// Ctrl-C still gets the report, or nobody would ever cut a run short.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

@@ -10,13 +10,7 @@ import (
 	"time"
 )
 
-// stats is what a run counts while it runs.
-//
-// The plain counters are atomics because the progress line reads them while
-// every connection writes them. The maps are behind one mutex, which is fine
-// precisely because what goes in them is rare: a refusal, a lost connection,
-// a dial that failed. If any of them were hot the run would be measuring
-// something that had already gone wrong.
+// The maps share one mutex: what goes in them is rare, or the run has gone wrong.
 type stats struct {
 	dialed     atomic.Uint64
 	dialFailed atomic.Uint64
@@ -25,12 +19,9 @@ type stats struct {
 	sendFailed atomic.Uint64
 	received   atomic.Uint64
 	other      atomic.Uint64 // joins, parts, pongs, backlogs — load, but not delivery
-	garbage    atomic.Uint64 // frames that would not decode
+	garbage    atomic.Uint64
 
-	// sentIn counts messages per channel, which is the only way to work out
-	// how many deliveries a run should have produced: a message costs one
-	// delivery per member of the channel it was said in, and the channels do
-	// not have to be the same size.
+	// Per channel: expected deliveries are per member, and rooms differ in size.
 	sentIn []atomic.Uint64
 
 	mu       sync.Mutex
@@ -66,15 +57,13 @@ func (s *stats) bump(m map[string]uint64, key string) {
 	m[key]++
 }
 
-// mergeLatency folds one connection's histogram in, once, when it stops.
 func (s *stats) mergeLatency(h *Histogram) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.latency.Merge(h)
 }
 
-// Result is what a run measured. Everything in it is a client-side
-// observation; nothing was read out of the server.
+// Result is all client-side observation; nothing in it was read from the server.
 type Result struct {
 	Conns     int // asked for
 	Speakers  int
@@ -88,10 +77,7 @@ type Result struct {
 	Sent      uint64
 	SendFails uint64
 
-	// Received is MSG frames that arrived. Expected is how many should have,
-	// if every connection had been in place for the whole run — it is a
-	// denominator, not a promise, and the two differ by whatever was still
-	// in flight when the clock stopped.
+	// Expected is a denominator, not a promise: some is in flight at the end.
 	Received uint64
 	Expected uint64
 	Other    uint64
@@ -103,7 +89,6 @@ type Result struct {
 	Latency  Histogram
 }
 
-// snapshot freezes the counters into a Result.
 func (s *stats) snapshot(cfg Config, elapsed time.Duration) *Result {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -134,7 +119,6 @@ func (s *stats) snapshot(cfg Config, elapsed time.Duration) *Result {
 	return r
 }
 
-// String is the report a run prints.
 func (r *Result) String() string {
 	var b strings.Builder
 	secs := r.Elapsed.Seconds()
@@ -166,8 +150,7 @@ func (r *Result) String() string {
 	return b.String()
 }
 
-// writeCounts prints a map of counters, busiest first, and nothing at all
-// when it is empty — a clean run should look clean.
+// Prints nothing when empty: a clean run should look clean.
 func writeCounts(b *strings.Builder, label string, m map[string]uint64) {
 	if len(m) == 0 {
 		return
@@ -205,8 +188,7 @@ func percent(got, want uint64) string {
 	return fmt.Sprintf(" — %.2f%%", 100*float64(got)/float64(want))
 }
 
-// dur keeps the report readable: three digits is as much as a latency
-// measurement ever means.
+// Three digits are all a latency measurement means.
 func dur(d time.Duration) string {
 	switch {
 	case d >= time.Second:

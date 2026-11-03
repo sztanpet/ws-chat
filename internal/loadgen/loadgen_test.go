@@ -19,15 +19,7 @@ import (
 	"github.com/sztanpet/ws-chat/internal/proto"
 )
 
-// The stub below is deliberately not the real server: what is under test
-// here is the load generator's own arithmetic — who speaks, where, and what
-// it should therefore have received. Running it against the real server
-// would test the server, which the server's own tests already do, and would
-// make these results depend on its timing.
-
-// stub is the smallest thing that behaves like a chat server: READY, an
-// autojoin, per-connection membership, and a MSG fanned out to whoever is
-// in the channel it names.
+// Not the real server: this tests the generator's arithmetic, not server timing.
 type stub struct {
 	*httptest.Server
 
@@ -203,8 +195,6 @@ func mustRun(t *testing.T, cfg Config) *Result {
 	return r
 }
 
-// The whole thing end to end: everybody connects, half of them talk, and
-// every message comes back to every member of the room.
 func TestRun(t *testing.T) {
 	s := newStub(t)
 	r := mustRun(t, baseConfig(s))
@@ -222,8 +212,7 @@ func TestRun(t *testing.T) {
 		t.Errorf("%d frames would not decode", r.Garbage)
 	}
 
-	// Three speakers at 50/s for 300ms. Timing is timing, so this only
-	// insists that they all spoke and that nobody sent for everybody.
+	// Timing is timing: only insist that all three spoke, and nobody for all.
 	if r.Sent < 3 || r.Sent > 3*50 {
 		t.Errorf("sent %d messages, want between 3 and 150", r.Sent)
 	}
@@ -232,8 +221,7 @@ func TestRun(t *testing.T) {
 			r.Expected, r.Sent, r.Sent*6)
 	}
 
-	// Received can lag Expected by whatever was in flight when the clock
-	// stopped, but not by much.
+	// Less by what was in flight when the clock stopped, but not by much.
 	if r.Received < r.Expected*8/10 {
 		t.Errorf("received %d of %d expected", r.Received, r.Expected)
 	}
@@ -245,8 +233,6 @@ func TestRun(t *testing.T) {
 	}
 }
 
-// A listener that never speaks still has to ping, or the real server closes
-// it for being idle.
 func TestListenersPing(t *testing.T) {
 	s := newStub(t)
 	cfg := baseConfig(s)
@@ -263,8 +249,6 @@ func TestListenersPing(t *testing.T) {
 	}
 }
 
-// Spread over several channels, a connection joins its own and leaves the
-// one it was put in, and a message reaches that room only.
 func TestRunSpreadsOverChannels(t *testing.T) {
 	s := newStub(t)
 	cfg := baseConfig(s)
@@ -284,8 +268,7 @@ func TestRunSpreadsOverChannels(t *testing.T) {
 	if r.Received < r.Expected*8/10 {
 		t.Errorf("received %d of %d expected", r.Received, r.Expected)
 	}
-	// Six speakers in three rooms of two: anybody hearing more than their
-	// own room means the spread did not happen.
+	// Hearing beyond its own room means the spread did not happen.
 	if r.Received > r.Sent*2 {
 		t.Errorf("received %d for %d messages: traffic crossed channels", r.Received, r.Sent)
 	}
@@ -306,14 +289,11 @@ func TestRunOverEveryCodec(t *testing.T) {
 	}
 }
 
-// A server that is not there has to produce a report rather than an error:
-// counted dial failures are a result, and half a run reported is worth more
-// than none.
 func TestRunReportsDialFailures(t *testing.T) {
 	s := newStub(t)
 	cfg := baseConfig(s)
 	cfg.URL = s.url()
-	s.Close() // nothing is listening now
+	s.Close()
 
 	r := mustRun(t, cfg)
 	if r.Dialed != 0 || r.Failed != 6 {
@@ -327,12 +307,10 @@ func TestRunReportsDialFailures(t *testing.T) {
 	}
 }
 
-// The context is the only way to stop an open-ended run, so it had better
-// work.
 func TestRunStopsOnContext(t *testing.T) {
 	s := newStub(t)
 	cfg := baseConfig(s)
-	cfg.Duration = 0 // until cancelled
+	cfg.Duration = 0
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -377,10 +355,6 @@ func TestRunRejectsNonsense(t *testing.T) {
 	}
 }
 
-// Who speaks is arithmetic, and it is worth checking on its own: the
-// percentage has to come out right and the speakers have to be spread
-// through the range, or a run over several channels puts all of them in the
-// first room.
 func TestSpeakerSpread(t *testing.T) {
 	tests := []struct {
 		conns   int
@@ -411,8 +385,6 @@ func TestSpeakerSpread(t *testing.T) {
 				tt.conns, tt.percent, got, cfg.speakers())
 		}
 
-		// Every channel with members should get a speaker, once there are
-		// more speakers than channels.
 		if got >= cfg.Channels {
 			for ch := range cfg.Channels {
 				found := false
@@ -440,7 +412,6 @@ func TestMembersInAddUp(t *testing.T) {
 				t.Fatalf("%d conns over %d channels adds up to %d", conns, channels, total)
 			}
 
-			// And it has to agree with what channelName hands out.
 			counted := make([]int, channels)
 			for i := range conns {
 				counted[i%channels]++
@@ -455,10 +426,6 @@ func TestMembersInAddUp(t *testing.T) {
 	}
 }
 
-// Losses are counted in a map keyed by the reason, so the reason has to
-// come from a closed set. A net.OpError carries the peer address, which
-// turned three thousand dropped sockets into three thousand report lines
-// the first time this ran at scale.
 func TestReasonsAreABoundedSet(t *testing.T) {
 	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 51234}
 	peer := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8099}

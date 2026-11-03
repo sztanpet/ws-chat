@@ -7,10 +7,7 @@ import (
 	"time"
 )
 
-// Every value has to come back out of the bucket it went into, within the
-// resolution the histogram promises. This is the property everything else
-// rests on, so it is checked across the whole range rather than at a few
-// hand-picked points.
+// Checked across the whole range: everything else rests on this.
 func TestHistogramResolution(t *testing.T) {
 	for us := uint64(0); us < 1<<24; us = us + us/17 + 1 {
 		i := bucketOf(us)
@@ -25,8 +22,6 @@ func TestHistogramResolution(t *testing.T) {
 	}
 }
 
-// Buckets must not overlap or leave gaps, or a quantile walks the wrong
-// number of samples.
 func TestHistogramBucketsAreContiguous(t *testing.T) {
 	prev := -1
 	for us := range uint64(1 << 20) {
@@ -55,16 +50,13 @@ func TestHistogramExactCounters(t *testing.T) {
 	}
 }
 
-// The quantiles are what the report prints, so they are checked against a
-// sorted copy of the same samples.
 func TestHistogramQuantiles(t *testing.T) {
 	var h Histogram
 	var sorted []time.Duration
 
 	r := rand.New(rand.NewPCG(1, 2))
 	for range 10000 {
-		// Long tailed on purpose: a latency distribution is, and a
-		// histogram that only works on uniform input is no use here.
+		// Long tailed, as latency is: uniform input would prove little.
 		d := time.Duration(r.ExpFloat64() * float64(time.Millisecond))
 		h.Record(d)
 		sorted = append(sorted, d.Truncate(time.Microsecond))
@@ -113,9 +105,6 @@ func TestHistogramMerge(t *testing.T) {
 	}
 }
 
-// Absurd values must not panic or wrap. They saturate into the top bucket,
-// and the exact one still comes out of Max — which is the pair of answers
-// worth having: the quantile says "off the scale", the max says how far.
 func TestHistogramSaturates(t *testing.T) {
 	var h Histogram
 	huge := time.Duration(1<<62 - 1)
