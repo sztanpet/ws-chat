@@ -11,28 +11,14 @@ import (
 	"github.com/sztanpet/ws-chat/internal/proto"
 )
 
-// Membership: joining, leaving, and the goroutine that feeds a connection
-// one channel's traffic.
-//
-// There is a write pump per membership rather than one multiplexing over
-// all of them, because Recv blocks and cannot be selected on. A merge
-// channel in front of the socket would fix that and would also put a
-// channel hop back in front of every broadcast message, which is the thing
-// internal/broadcast exists to avoid. So a connection in five channels runs
-// five pumps, and coder/websocket serializes their writes.
-
-// membership is one connection's place in one channel.
+// A pump each: Recv cannot be selected on, and a merge channel costs a hop.
 type membership struct {
 	ch   *channel
 	sub  broadcast.Sub
 	done chan struct{} // closed when its pump has stopped
 }
 
-// join puts a connection into a channel, announces it, and starts feeding
-// it. It reports the error code to send back, or "" on success.
-//
-// force skips the CanJoin hook and is used for autojoin: a layer that put
-// somebody somewhere has already decided they may be there.
+// force skips CanJoin for autojoin, whose layer has already decided.
 func (c *conn) join(ctx context.Context, name string, force bool) string {
 	name = c.app.normalise(name)
 	if !validChannel(name) {
@@ -50,11 +36,7 @@ func (c *conn) join(ctx context.Context, name string, force bool) string {
 	}
 	c.membersMu.Unlock()
 
-	// A channel ban is enforced here rather than at connect: it bars
-	// somebody from one room, not from the server, so the connection is
-	// fine and the join is not. Checked even for an autojoin — a layer
-	// putting somebody somewhere does not overrule a moderator who threw
-	// them out of it.
+	// Even on autojoin: a layer putting somebody here does not overrule a ban.
 	if banned, _ := c.app.mod.Banned(name, c.id.Key()); banned {
 		return proto.ErrBanned
 	}
@@ -96,22 +78,10 @@ func (c *conn) join(ctx context.Context, name string, force bool) string {
 		return proto.ErrBanned
 	}
 
-	// The order of the next three matters, and it is why the pump starts
-	// last.
-	//
-	// The subscription is already open, so nothing said from here on can be
-	// missed. The backlog is written directly, while no pump is running for
-	// this channel, so nothing can interleave with it. Then the JOIN is
-	// broadcast and the pump starts, which delivers that JOIN and
-	// everything after it in order.
-	//
-	// A client therefore sees exactly: BACKLOG, its own JOIN, then live
-	// traffic. Starting the pump earlier makes those first two race, which
-	// they did.
+	// Pump last: the backlog goes out directly while none runs, and the JOIN is
+	// the first thing it delivers: BACKLOG, then the JOIN, then live traffic.
 	c.sendBacklog(ctx, name)
 
-	// Told to the channel, including the person who asked — which is how
-	// they learn it worked, and how everybody else learns they are here.
 	if _, err := ch.broadcastTo(c.app, func(uint64) proto.Outbound {
 		return proto.NewJoin(proto.Join{
 			Channel: name, Nick: c.nick(), Roles: c.id.Roles, Attrs: c.id.Attrs,
@@ -129,7 +99,6 @@ func (c *conn) join(ctx context.Context, name string, force bool) string {
 	return ""
 }
 
-// part takes a connection out of a channel and announces it.
 func (c *conn) part(ctx context.Context, name string) string {
 	name = c.app.normalise(name)
 
@@ -144,11 +113,7 @@ func (c *conn) part(ctx context.Context, name string) string {
 		return proto.ErrNotJoined
 	}
 
-	// The parting client is told directly, before it stops receiving.
-	// Broadcasting and hoping is not enough: ending the subscription
-	// discards whatever it had not read yet, so its own PART would be the
-	// message most likely to be lost. Everybody else hears it from the
-	// channel, which is why this is not simply a broadcast.
+	// Told directly: closing the subscription discards what it has not read.
 	c.sendFrame(ctx, proto.NewPart(name, c.nick()))
 	c.leave(m)
 
@@ -163,21 +128,14 @@ func (c *conn) part(ctx context.Context, name string) string {
 	return ""
 }
 
-// leave ends a membership: out of the member list, subscription closed,
-// pump stopped.
 func (c *conn) leave(m *membership) {
 	m.ch.remove(c)
 	m.sub.Close() // unblocks the pump, which is parked in Recv
 	<-m.done
 }
 
-// leaveAll takes a connection out of everything, on disconnect.
-//
-// The PART frames go out because the room is entitled to know somebody
-// left, whether they asked to or their socket did.
 func (c *conn) leaveAll(ctx context.Context) {
-	// Hand the map over rather than copy it: replacing the field under the
-	// lock leaves this goroutine the only one holding the old one.
+	// Swapped, not copied: under the lock, that leaves us the only holder.
 	c.membersMu.Lock()
 	memberships := c.memberships
 	c.memberships = make(map[string]*membership)
@@ -193,7 +151,6 @@ func (c *conn) leaveAll(ctx context.Context) {
 	}
 }
 
-// joined reports the membership for a channel.
 func (c *conn) joined(name string) (*membership, bool) {
 	c.membersMu.RLock()
 	defer c.membersMu.RUnlock()
@@ -201,7 +158,6 @@ func (c *conn) joined(name string) (*membership, bool) {
 	return m, ok
 }
 
-// channelPump feeds this connection one channel's traffic.
 func (c *conn) channelPump(ctx context.Context, m *membership) {
 	defer close(m.done)
 
@@ -217,16 +173,13 @@ func (c *conn) channelPump(ctx context.Context, m *membership) {
 		case err == nil:
 			continue
 		case errors.Is(err, broadcast.ErrLagged):
-			// The client could not keep up with this channel. Say so on the
-			// way out rather than dropping the socket silently: a client
-			// that reconnects blind cannot tell this from a network
-			// failure.
+			// Said in the close frame: blind, a client cannot tell this from the network.
 			c.app.metrics.laggedTotal.Inc()
 			c.log.Info("dropped: too slow", "channel", m.ch.name)
 			c.close(websocket.StatusPolicyViolation, "too slow")
 			return
 		default:
-			return // orderly close
+			return
 		}
 	}
 }

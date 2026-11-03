@@ -12,17 +12,7 @@ import (
 	"github.com/sztanpet/ws-chat/internal/ratelimit"
 )
 
-// A channel is a fan-out, a rate limit and a member list.
-//
-// The fan-out is one broadcaster per codec, for the same reason it always
-// was: a ring holds encoded bytes, so clients that negotiated different
-// wire formats cannot share one. A channel therefore costs len(codecs)
-// rings, which is why an empty one is reclaimed rather than kept.
-//
-// The member list is here rather than derived from the connection directory
-// because presence is a per-channel question — who is in this room — and
-// walking every connection to answer it would make NAMES O(server) instead
-// of O(channel).
+// A ring holds encoded bytes, hence one per codec.
 type channel struct {
 	name  string
 	bcs   map[string]broadcast.Broadcaster
@@ -35,11 +25,7 @@ type channel struct {
 	members map[string]*conn // by nick
 }
 
-// validChannel reports whether a name is one the server will create.
-//
-// Bounded and boring on purpose. The name is a map key, a metric label
-// would be tempting, and it comes from whoever is connected; a client that
-// can name a channel anything can make the server hold anything.
+// Bounded and boring: the name is client-chosen, and becomes a map key.
 func validChannel(name string) bool {
 	if name == "" || len(name) > maxChannelName {
 		return false
@@ -53,22 +39,12 @@ func validChannel(name string) bool {
 }
 
 const (
-	// maxChannelName bounds a name a client can invent.
 	maxChannelName = 64
 
-	// maxNames caps a NAMES response. A channel with ten thousand people in
-	// it would otherwise be a hundred-kilobyte frame; the total is reported
-	// separately so a client knows it got a sample.
 	maxNames = 1000
 )
 
 // c joins under channelsMu, or the sweep could reclaim the channel mid-join.
-//
-// Creation is on demand because the alternative is a list of channels in
-// the config, which is a deployment's business and is what the Channels
-// hook is for. The cap is what stops a client inventing channels until the
-// server runs out of memory; a deployment that cares about which names
-// exist refuses the rest in CanJoin.
 func (a *app) channelFor(ctx context.Context, name string, c *conn) (*channel, bool) {
 	a.channelsMu.RLock()
 	ch, ok := a.channels[name]
@@ -106,7 +82,6 @@ func (a *app) channelFor(ctx context.Context, name string, c *conn) (*channel, b
 	return ch, true
 }
 
-// lookupChannel finds a channel without creating one.
 func (a *app) lookupChannel(name string) (*channel, bool) {
 	a.channelsMu.RLock()
 	defer a.channelsMu.RUnlock()
@@ -123,8 +98,7 @@ func (ch *channel) add(c *conn) {
 func (ch *channel) remove(c *conn) {
 	ch.mu.Lock()
 	defer ch.mu.Unlock()
-	// Only if it is still ours, so a reconnect under the same name is not
-	// removed by the old connection's teardown.
+	// Only if still ours: the old connection's teardown must spare a reconnect.
 	if cur, ok := ch.members[c.nick()]; ok && cur == c {
 		delete(ch.members, c.nick())
 	}
@@ -136,7 +110,6 @@ func (ch *channel) len() int {
 	return len(ch.members)
 }
 
-// names returns up to maxNames members, sorted, and the true total.
 func (ch *channel) names() ([]string, int) {
 	ch.mu.RLock()
 	nicks := make([]string, 0, len(ch.members))
@@ -153,12 +126,7 @@ func (ch *channel) names() ([]string, int) {
 	return nicks, total
 }
 
-// sweepChannels reclaims channels nobody is in.
-//
-// Free to do, which is the only reason it is done: an empty channel's rings
-// hold frames for subscribers that no longer exist, and the backlog a
-// joining client is shown comes from the History hook, not from here. There
-// is nothing in an empty channel anybody can observe.
+// Nothing in an empty channel is observable: the backlog lives in History.
 func (a *app) sweepChannels() int {
 	a.channelsMu.Lock()
 	defer a.channelsMu.Unlock()
@@ -177,8 +145,6 @@ func (a *app) sweepChannels() int {
 	return removed
 }
 
-// closeChannels ends every channel's fan-out, which unblocks the write
-// pumps parked in them.
 func (a *app) closeChannels() {
 	a.channelsMu.RLock()
 	defer a.channelsMu.RUnlock()
@@ -198,8 +164,7 @@ func (ch *channel) broadcastTo(a *app, build func(id uint64) proto.Outbound, aft
 	id := a.seq.Add(1)
 	payload := build(id)
 
-	// Encode everything before delivering anything: a codec that fails must
-	// not leave half the room having seen the message.
+	// All encoded before any is sent, or a failing codec leaves half the room told.
 	for _, codec := range proto.Codecs() {
 		frame, err := codec.Encode(payload)
 		if err != nil {
@@ -217,7 +182,6 @@ func (ch *channel) broadcastTo(a *app, build func(id uint64) proto.Outbound, aft
 	return id, nil
 }
 
-// channelNames lists the channels that exist, for logging and tests.
 func (a *app) channelNames() []string {
 	a.channelsMu.RLock()
 	defer a.channelsMu.RUnlock()
@@ -230,10 +194,6 @@ func (a *app) channelNames() []string {
 	return names
 }
 
-// normalise trims a channel name and applies the default when empty.
-//
-// An empty channel on a MSG means the default, so a client that only ever
-// uses one room does not have to name it on every message.
 func (a *app) normalise(name string) string {
 	name = strings.TrimSpace(name)
 	if name == "" {
