@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// documented matches a commented-out setting: // "Key": value,
+// A field name and a colon, since prose can start with a quote too.
 var documented = regexp.MustCompile(`^// "[A-Za-z][A-Za-z0-9]*":`)
 
 func write(t *testing.T, content string) string {
@@ -22,7 +22,6 @@ func write(t *testing.T, content string) string {
 	return path
 }
 
-// An absent config is a valid config. A fresh checkout has to run.
 func TestLoadMissingFile(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "nope.hujson"))
 	if err != nil {
@@ -33,7 +32,6 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 }
 
-// The committed default file is the documentation, so it had better parse.
 func TestCommittedDefaultFileLoads(t *testing.T) {
 	cfg, err := Load("../../config_default.hujson")
 	if err != nil {
@@ -44,16 +42,7 @@ func TestCommittedDefaultFileLoads(t *testing.T) {
 	}
 }
 
-// And it had better say what the defaults ARE.
-//
-// The test above cannot check that on its own: every value in the file is
-// commented out, so it loads as the defaults whatever the comments claim,
-// and comparing that to Default() compares Default() to itself. It passed
-// happily while the file documented a Capacity of 4096 and the code used
-// 256 — twice, in two different fields.
-//
-// So this one uncomments the file and loads THAT. Every documented value
-// has to be the real one.
+// Uncommented, or every documented value loads as the default whatever it says.
 func TestCommittedDefaultFileDocumentsTheRealDefaults(t *testing.T) {
 	raw, err := os.ReadFile("../../config_default.hujson")
 	if err != nil {
@@ -65,9 +54,6 @@ func TestCommittedDefaultFileDocumentsTheRealDefaults(t *testing.T) {
 	settings := 0
 	for line := range strings.Lines(string(raw)) {
 		trimmed := strings.TrimSpace(line)
-		// A documented setting looks like: // "Key": value,
-		// Prose in the comments can start with a quote too, so the key has
-		// to look like a field name and be followed by a colon.
 		if !documented.MatchString(trimmed) {
 			continue
 		}
@@ -86,8 +72,7 @@ func TestCommittedDefaultFileDocumentsTheRealDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the documented values do not load: %v\n%s", err, uncommented.String())
 	}
-	// An empty JSON array decodes to an empty slice where the zero value is
-	// nil. They mean the same thing here and DeepEqual disagrees.
+	// [] decodes to an empty slice, nil in Default(): the same here, not to DeepEqual.
 	if len(cfg.AllowedOrigins) == 0 {
 		cfg.AllowedOrigins = nil
 	}
@@ -95,15 +80,11 @@ func TestCommittedDefaultFileDocumentsTheRealDefaults(t *testing.T) {
 		t.Fatalf("config_default.hujson documents values that are not the defaults:\n got %+v\nwant %+v", cfg, Default())
 	}
 
-	// Every field should be documented, or the file is not the reference it
-	// claims to be.
 	if want := reflect.TypeFor[Config]().NumField(); settings != want {
 		t.Errorf("the file documents %d settings, but Config has %d fields", settings, want)
 	}
 }
 
-// Comments and trailing commas are the reason for HuJSON in the first
-// place.
 func TestLoadHuJSON(t *testing.T) {
 	path := write(t, `{
 		// The address to listen on.
@@ -126,7 +107,6 @@ func TestLoadHuJSON(t *testing.T) {
 	if cfg.Capacity != 1024 {
 		t.Errorf("Capacity = %d, want 1024", cfg.Capacity)
 	}
-	// Everything unmentioned keeps its default.
 	if cfg.WriteBatch != Default().WriteBatch {
 		t.Errorf("WriteBatch = %d, want the default %d", cfg.WriteBatch, Default().WriteBatch)
 	}

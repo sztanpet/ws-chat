@@ -2,9 +2,6 @@
 	// Copy this file to config.hujson next to the binary and uncomment
 	// what you need. Every value here is the built-in default, so an
 	// absent or empty config.hujson is a valid config.
-	//
-	// config_test.go loads this file and checks it against the defaults in
-	// code, so the two cannot drift apart.
 
 	// Address the HTTP server listens on.
 	// "Addr": ":8080",
@@ -13,27 +10,13 @@
 	// "*" disables the check entirely (do not do that in production).
 	// "AllowedOrigins": [],
 
-	// How many messages the shared fan-out buffer holds. It doubles as the
-	// lag threshold: a client that falls this far behind is disconnected
-	// rather than waited on.
-	//
-	// Size it for the lag spread, not the average: one straggler thousands
-	// of messages behind is what decides whether anything is dropped.
-	//
-	// Read it as a time window — slots over the channel's message rate —
-	// which gets longer as a room grows, since a big room is bound by
-	// delivery bandwidth and cannot carry many messages a second anyway. A
-	// room that sheds clients at this size is bandwidth-bound, and the lever
-	// for that is a channel rate limit, not a bigger buffer.
-	//
-	// Costs 8 bytes a slot per channel per codec, allocated when the channel
-	// is created, plus the last Capacity frames held from collection. 16384
-	// is 256KB of slots for a channel on both codecs, and MaxChannels bounds
-	// the worst case at 256MB.
+	// Messages the shared fan-out buffer holds, and so how far behind a
+	// client may fall before it is disconnected. Size it for the lag
+	// spread, not the average (see README). 8 bytes a slot per channel per
+	// codec: 16384 is 256KB for a channel on both, 256MB at MaxChannels.
 	// "Capacity": 16384,
 
-	// How many frames a connection's write pump takes per wakeup. Larger
-	// means fewer wakeups for a client that has fallen behind.
+	// How many frames a connection's write pump takes per wakeup.
 	// "WriteBatch": 16,
 
 	// The largest frame the server will read from a client, in bytes.
@@ -47,40 +30,32 @@
 	// "DefaultChannel": "main",
 
 	// How many channels may exist at once, and how many one connection may
-	// be in. Channels are created on demand by whoever joins one, so
-	// without a cap a client can invent them until the server runs out of
-	// memory.
+	// be in. Channels are created by whoever joins one, so without a cap a
+	// client can invent them until the server runs out of memory.
 	// "MaxChannels": 1024,
 	// "MaxChannelsPerConn": 32,
 
-	// How many recent messages a connecting client is sent, so it arrives
-	// with context instead of an empty window. 0 disables the backlog.
+	// How many recent messages a connecting client is sent. 0 disables it.
 	// "Backlog": 50,
 
-	// How many combining marks may be stacked on one character before a
-	// message is refused as zalgo. 0 disables the filter. Five is well
-	// clear of scripts that stack marks legitimately.
+	// Combining marks allowed in a row before a message is refused as
+	// zalgo; 0 disables. Five clears every script that stacks them.
 	// "MaxDiacritics": 5,
 
-	// How many private messages may be queued for one client before
-	// further ones are refused with ERR recipientbusy.
+	// Private messages queued for one client before further ones are
+	// refused with ERR recipientbusy.
 	// "PrivBuffer": 32,
 
-	// Bounds a socket write, or one wakeup's batch of them: a write pump
-	// drains everything pending under a single deadline. Without it a
-	// client that stops reading wedges whatever goroutine writes to it.
+	// Bounds one wakeup's worth of socket writes, so a client that stops
+	// reading cannot wedge the goroutine writing to it.
 	// "WriteTimeout": "10s",
 
-	// Closes a connection that has sent nothing at all — not even a PING —
-	// for this long. Clients are expected to ping.
+	// Closes a connection that has sent nothing, not even a PING, for this
+	// long. Clients are expected to ping.
 	// "IdleTimeout": "90s",
 
-	// Where profiling and metrics are served: /metrics and /debug/pprof/.
-	// Empty disables them and binds nothing.
-	//
-	// Loopback by default, and think before changing it. pprof has no
-	// authentication: /debug/pprof/heap hands out everything in memory and
-	// /debug/pprof/profile lets anyone pin a core for thirty seconds.
+	// Where /metrics and /debug/pprof/ are served; empty binds nothing.
+	// pprof has no authentication, so keep this off public interfaces.
 	// "DebugAddr": "127.0.0.1:6060",
 
 	// Log level: debug, info, warn, error.

@@ -1,9 +1,4 @@
-// Package config loads the server's HuJSON configuration.
-//
-// config_default.hujson is committed, fully commented out, and documents
-// every field with its built-in default. The real config.hujson sits next
-// to the binary and is not committed. An absent or empty config file is
-// valid: it means "all defaults".
+// Package config is HuJSON over defaults; config_default.hujson documents each.
 package config
 
 import (
@@ -16,8 +11,7 @@ import (
 	"github.com/tailscale/hujson"
 )
 
-// Duration is a time.Duration that reads from a Go duration string, so the
-// config says "90s" rather than 90000000000.
+// Duration is spelled "90s" in the config, not 90000000000.
 type Duration time.Duration
 
 func (d Duration) Duration() time.Duration { return time.Duration(d) }
@@ -37,109 +31,25 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Config is the whole of the server's configuration.
 type Config struct {
-	// Addr is the listen address for the HTTP server.
-	Addr string
-
-	// AllowedOrigins are the origins permitted to open a WebSocket. Empty
-	// means same-origin only; "*" disables the check entirely.
-	AllowedOrigins []string
-
-	// Capacity is how many messages the shared fan-out buffer holds. It
-	// doubles as the lag threshold: a client that falls this far behind is
-	// disconnected rather than waited on.
-	//
-	// It has to be sized for the lag SPREAD, not the average. In a busy
-	// room the mean client is a handful of messages behind while one
-	// straggler is thousands, and it is the straggler that decides whether
-	// anything gets dropped. Measured at ten thousand subscribers with a
-	// tenth of them talking, 256 collapses to almost no delivery at all and
-	// 4096 delivers 99.8% — see state/broadcast.md.
-	//
-	// Read it as a time window rather than a size: slots divided by the
-	// channel's message rate. The window gets LONGER as a room grows rather
-	// than shorter, because a big room is bound by delivery bandwidth —
-	// members times message rate — and so cannot carry many messages a
-	// second to begin with. At ~350k deliveries/s on four cores, a
-	// hundred-thousand-member channel sustains three or four messages a
-	// second, where this default is over an hour of history. A room that
-	// size sheds clients because the server cannot deliver, and no capacity
-	// fixes that: ChannelLimits on the Limiter hook is the lever.
-	//
-	// Memory is per channel and per codec, not per server, and the slot
-	// array is allocated when the channel is created — 8 bytes a slot, so
-	// 16384 slots is 128KB a ring and 256KB for a channel carrying both
-	// codecs. MaxChannels bounds the worst case: 1024 channels on both
-	// codecs is 256MB of slot arrays, which is why raising this much
-	// further wants MaxChannels lowered or channel creation gated in
-	// CanJoin. A ring also pins the last Capacity encoded frames from
-	// collection, and for a busy channel that is the bigger number — 16384
-	// frames of 150 bytes is ~2.5MB.
-	Capacity int
-
-	// WriteBatch is how many frames a connection's write pump takes per
-	// wakeup. Larger means fewer wakeups when a client is behind.
-	WriteBatch int
-
-	// MaxFrameSize is the largest frame the server will read from a client.
-	MaxFrameSize int64
-
-	// MaxMessage is the longest chat message body accepted, in bytes.
-	MaxMessage int
-
-	// DefaultChannel is the channel an empty channel name means, and the
-	// one a connection joins when nothing says otherwise.
-	DefaultChannel string
-
-	// MaxChannels bounds how many channels can exist at once. Channels are
-	// created on demand by whoever joins one, so without a cap a client can
-	// invent them until the server runs out of memory.
-	MaxChannels int
-
-	// MaxChannelsPerConn bounds how many one connection may be in.
+	Addr               string
+	AllowedOrigins     []string
+	Capacity           int
+	WriteBatch         int
+	MaxFrameSize       int64
+	MaxMessage         int
+	DefaultChannel     string
+	MaxChannels        int
 	MaxChannelsPerConn int
-
-	// Backlog is how many recent messages a connecting client is sent, so
-	// it arrives with context instead of an empty window. Zero disables it.
-	Backlog int
-
-	// MaxDiacritics is how many combining marks may be stacked on one
-	// character before a message is refused as zalgo. Non-positive disables
-	// the filter.
-	MaxDiacritics int
-
-	// PrivBuffer is how many private messages may be queued for one client
-	// before further ones are refused. It is deliberately small: private
-	// messages are rare, and a client that is not draining them is gone.
-	PrivBuffer int
-
-	// WriteTimeout bounds a socket write — or one wakeup's worth of them,
-	// since a write pump drains its batch under a single deadline. Without
-	// it a client that stops reading wedges the goroutine writing to it,
-	// which is how backpressure escapes into the rest of the server.
-	WriteTimeout Duration
-
-	// IdleTimeout closes a connection that has sent nothing at all — not
-	// even a PING — for this long. Clients are expected to ping.
-	IdleTimeout Duration
-
-	// DebugAddr is where profiling and metrics are served. Empty disables
-	// them and binds nothing.
-	//
-	// It defaults to the loopback because pprof has no authentication and
-	// is not going to grow any: /debug/pprof/heap hands out a dump of
-	// everything in memory, and anyone who can reach /debug/pprof/profile
-	// can pin a core for thirty seconds as often as they like. Move it to
-	// an interface a scraper can reach only if that interface is not
-	// reachable by anybody else.
-	DebugAddr string
-
-	// LogLevel is one of debug, info, warn, error.
-	LogLevel string
+	Backlog            int
+	MaxDiacritics      int
+	PrivBuffer         int
+	WriteTimeout       Duration
+	IdleTimeout        Duration
+	DebugAddr          string
+	LogLevel           string
 }
 
-// Default returns the configuration used when nothing overrides it.
 func Default() Config {
 	return Config{
 		Addr:               ":8080",
@@ -152,7 +62,7 @@ func Default() Config {
 		MaxChannelsPerConn: 32,
 		Backlog:            50,
 		MaxDiacritics:      5,
-		PrivBuffer:         32,
+		PrivBuffer:         32, // small: a client not draining them is gone
 		WriteTimeout:       Duration(10 * time.Second),
 		IdleTimeout:        Duration(90 * time.Second),
 		DebugAddr:          "127.0.0.1:6060",
@@ -160,7 +70,7 @@ func Default() Config {
 	}
 }
 
-// Load reads path over the defaults. A missing file is not an error.
+// Load treats a missing file as all defaults.
 func Load(path string) (Config, error) {
 	cfg := Default()
 
@@ -172,16 +82,11 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 
-	// HuJSON is JSON with comments and trailing commas; Standardize strips
-	// them back to something encoding/json accepts.
 	std, err := hujson.Standardize(raw)
 	if err != nil {
 		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
-	// Case-insensitive names are asked for explicitly because
-	// encoding/json/v2 dropped them, and a config file is the one place
-	// that must not get stricter quietly: a deployment that wrote "addr"
-	// would have its listen address silently replaced by the default.
+	// Case-insensitive, or a config saying "addr" would silently get the default.
 	if err := json.Unmarshal(std, &cfg, json.MatchCaseInsensitiveNames(true)); err != nil {
 		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
@@ -191,8 +96,6 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// check rejects values that would misbehave later in ways that are hard to
-// trace back to the config.
 func (c Config) check() error {
 	switch {
 	case c.Addr == "":
