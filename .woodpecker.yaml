@@ -52,9 +52,8 @@ steps:
       - make tools
       - make lint
 
-  # go test compiles every package, so this is only here to catch the
-  # production build itself breaking: -trimpath, the ldflags, cgo off,
-  # generate.
+  # go test compiles every package; this is for what only the production
+  # build does.
   - name: build
     image: *golang
     environment: *goenv

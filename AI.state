@@ -19,7 +19,8 @@ v1.8.15 at the same cost, and govulncheck covers the module again
 (`cc40cba`). **A batch is one `write(2)`** through `corkConn`
 (`7c4b0e9`): a fifth less CPU and half the latency at 400k deliveries/s,
 13% more delivered at the knee, nothing at light load
-(`state/loadgen.md`). Earlier the same day: the fan-out review
+(`state/loadgen.md`). The comments that work added were then cut to
+the why. Earlier the same day: the fan-out review
 (`state/broadcast.md`) and toolchain go1.27.3 (`state/ci.md`).
 
 ## State file index
@@ -220,5 +221,8 @@ _(nothing yet)_
 ## User preferences
 
 - Linus Torvalds persona when writing code; avoid needless complexity.
+- Comments carry only the non-obvious why, in a line. They never narrate
+  the code and never tell its history; that is what commit messages and
+  `state/` are for.
 - Every logical step is its own commit, in the documented kernel style.
 - `make pre-commit` (vendor + lint + `-race` tests) before every commit.

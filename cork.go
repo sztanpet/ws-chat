@@ -8,9 +8,7 @@ import (
 	"time"
 )
 
-// hijackCapture is what websocket.Accept is handed instead of the
-// ResponseWriter, so that the connection the library hijacks comes back with
-// a corkConn in front of it.
+// The library hijacks for itself; this is how a corkConn gets under it.
 type hijackCapture struct {
 	http.ResponseWriter
 	sock *corkConn
@@ -22,19 +20,12 @@ func (h *hijackCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		return sock, brw, err
 	}
 	h.sock = &corkConn{Conn: sock}
-	// The library writes through brw.Writer, which net/http hands back new
-	// and empty, so pointing it at the cork loses nothing.
+	// net/http hands back a new, empty writer, so Reset discards nothing.
 	brw.Writer.Reset(h.sock)
 	return h.sock, brw, nil
 }
 
-// corkConn is the socket under the library. coder/websocket flushes every
-// message, one frame each, so a pump draining sixteen frames cost sixteen
-// write(2)s. While anybody is corked, what the library writes is held, and
-// the last writer to uncork sends it in one.
-//
-// The writers share the socket's write deadline as well: each sets it on the
-// way in, and the last one out clears it once what they held is on the wire.
+// The library flushes every message; holding them makes a batch one write(2).
 type corkConn struct {
 	net.Conn
 
@@ -43,8 +34,7 @@ type corkConn struct {
 	held    *[]byte
 }
 
-// heldBufs keeps the buffers between writes, so that a connection with
-// nothing to say holds none.
+// Pooled, so an idle connection holds no buffer.
 var heldBufs = sync.Pool{New: func() any { return new([]byte) }}
 
 func (s *corkConn) Write(p []byte) (int, error) {
@@ -60,7 +50,7 @@ func (s *corkConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// cork starts a write that has to be on the wire within timeout.
+// On the socket, not a context, which would cost an allocation per frame.
 func (s *corkConn) cork(timeout time.Duration) {
 	s.mu.Lock()
 	s.writers++
@@ -68,8 +58,7 @@ func (s *corkConn) cork(timeout time.Duration) {
 	s.mu.Unlock()
 }
 
-// uncork ends one. The last writer out sends what all of them wrote, so the
-// error it gets back may be about somebody else's frames.
+// Its error may belong to another writer: the last one out flushes for all.
 func (s *corkConn) uncork() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

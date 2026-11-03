@@ -16,8 +16,6 @@
 // rather than finding them, so Recv hands back everything that has piled up
 // since the last call. A write pump that wakes once and writes twenty
 // frames costs a twentieth of the wakeups of one that wakes twenty times.
-// The server sends the twenty in one socket write as well, but that is its
-// corkConn's doing, not this package's.
 //
 // MapChan is the reference implementation — a map of subscribers behind an
 // RWMutex, one buffered channel each. It is the obvious solution and the

@@ -84,8 +84,7 @@ const benchFanoutBudget = 1 << 20
 // it, it is copying, which is worth knowing.
 var benchMsg = []byte(`MSG {"nick":"someone","channel":"#general","data":"hello world"}`)
 
-// benchBatch is the number of frames a drainer takes per wakeup, the
-// server's default WriteBatch.
+// The server's default WriteBatch.
 const benchBatch = 16
 
 // counter is a per-drainer delivery count on its own cache line, so ten

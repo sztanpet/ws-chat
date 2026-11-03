@@ -44,8 +44,6 @@ type conn struct {
 	ws   *websocket.Conn
 	priv chan []byte
 
-	// sock is the connection under ws, where every write is corked so that
-	// a batch goes out in one write(2) under one deadline.
 	sock *corkConn
 
 	// memberships is the channels this connection is in, each with its own
@@ -502,35 +500,16 @@ func (c *conn) send(ctx context.Context, frame []byte) {
 	c.write(ctx, frame)
 }
 
-// write puts one frame on the socket under a deadline, reporting whether
-// it worked. A client that stops reading must not wedge
-// the goroutine writing to it.
-//
-// ctx is deliberately unused: the deadline does the bounding, and handing
-// the library a cancellable context would put its per-frame timer back.
 func (c *conn) write(ctx context.Context, frame []byte) bool {
 	c.cork()
 	return c.uncork(c.writeTo(frame))
 }
 
-// cork starts a write, bounded by WriteTimeout with a deadline on the socket
-// rather than a context.
-//
-// A socket deadline allocates nothing. A context costs a WithTimeout here
-// and a context.AfterFunc inside the library, per frame — which for a
-// broadcast is per member, and measured at ~700 bytes of garbage per
-// delivered message, none of it the message. See state/loadgen.md.
-//
-// The library never learns of the deadline, so one that passes mid-frame
-// leaves its stream at an unknown offset. That costs nothing: a failed
-// write closes the connection, so nothing is written to that stream again.
 func (c *conn) cork() {
 	c.sock.cork(c.app.cfg.WriteTimeout.Duration())
 }
 
-// uncork finishes a write, given what the library said while it lasted.
-// The socket is uncorked before anything is closed, so what was held still
-// goes out: a close frame with a reason, say.
+// Uncorked before closing, or a held close frame would go down with the socket.
 func (c *conn) uncork(err error) bool {
 	if serr := c.sock.uncork(); err == nil {
 		err = serr
@@ -543,20 +522,7 @@ func (c *conn) uncork(err error) bool {
 	return true
 }
 
-// writeBatch writes a wakeup's worth of frames under ONE deadline, and in
-// one write(2).
-//
-// It bounds a wakeup rather than a write, which is the stricter of the two
-// where it matters. A batch of sixteen frames would otherwise be allowed
-// sixteen times WriteTimeout to drain, so a client that reads just fast
-// enough to keep restarting the clock could hold its pump indefinitely.
-//
-// What originally forced one deadline per batch was its cost — a context, a
-// timer and three allocations, paid once per member of the room. That cost
-// is gone now that a deadline is an instant (see cork), so this is
-// kept for the stricter bound alone, which is the better reason anyway.
-//
-// ctx is unused here for the same reason it is unused in write.
+// One deadline per batch, not per frame, so a slow reader cannot restart it.
 func (c *conn) writeBatch(ctx context.Context, frames [][]byte) bool {
 	if len(frames) == 0 {
 		return true
@@ -572,13 +538,7 @@ func (c *conn) writeBatch(ctx context.Context, frames [][]byte) bool {
 	return c.uncork(err)
 }
 
-// writeTo hands one frame to the library, between a cork and an uncork.
-//
-// The context is deliberately context.Background(). A cancellable one makes
-// the library arm a context.AfterFunc per frame, which is the allocation the
-// deadline exists to avoid. Nothing is lost: the write is bounded by the
-// deadline instead, and shutdown still unblocks a stuck write, because it
-// closes the connection and every wait inside the library selects on that.
+// Background, not ctx: a cancellable one costs an AfterFunc per frame.
 func (c *conn) writeTo(frame []byte) error {
 	return c.ws.Write(context.Background(), c.msgType(), frame)
 }

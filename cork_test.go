@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-// recordingConn is a socket that writes down what it is asked to do.
 type recordingConn struct {
 	net.Conn
 	log []string
@@ -27,9 +26,7 @@ func (r *recordingConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-// Whatever is written while anybody is corked reaches the socket as one
-// write when the last of them uncorks, and the deadline is cleared only
-// after it. How many writes a frame took cannot be seen from the wire.
+// A unit test: the wire cannot show how many writes there were.
 func TestCorkSendsOneWriteForEveryone(t *testing.T) {
 	rec := &recordingConn{}
 	s := &corkConn{Conn: rec}
@@ -53,7 +50,7 @@ func TestCorkSendsOneWriteForEveryone(t *testing.T) {
 	uncork()
 	write("c")
 	uncork()
-	write("d") // nobody is corked: straight through
+	write("d")
 
 	want := []string{"deadline", "deadline", "write abc", "clear", "write d"}
 	if !slices.Equal(rec.log, want) {

@@ -169,8 +169,7 @@ func (c *client) send(cmd proto.Command) {
 	c.sendRaw(c.encode(cmd), c.msgType())
 }
 
-// encode is the half of send that may call Fatalf, for a test that writes
-// from goroutines of its own.
+// For writing from other goroutines: encode here, where Fatalf is allowed.
 func (c *client) encode(cmd proto.Command) []byte {
 	c.t.Helper()
 

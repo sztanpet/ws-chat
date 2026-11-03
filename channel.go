@@ -28,13 +28,7 @@ type channel struct {
 	bcs   map[string]broadcast.Broadcaster
 	limit *ratelimit.Bucket
 
-	// sendMu is held while a message is assigned its id, encoded and
-	// written to every codec's ring. Without it two senders could reach the
-	// rings in different orders and clients on different codecs would
-	// disagree about what happened first. Per channel, because nothing
-	// orders one channel against another, and the section holds both
-	// encodes and the History append — a microsecond or two, which as a
-	// server-wide lock would cap every channel's messages combined.
+	// Same order in every codec's ring; channels need none between them.
 	sendMu sync.Mutex
 
 	mu      sync.RWMutex
@@ -68,13 +62,7 @@ const (
 	maxNames = 1000
 )
 
-// channelFor returns a channel with c already in its member list, creating
-// the channel if nobody has been in it yet.
-//
-// The member is added under channelsMu, which is what sweepChannels holds
-// while it decides a channel is empty. Adding it any later leaves a window
-// in which the sweep reclaims the channel out from under the joiner, who
-// ends up in a room nobody else can reach.
+// c joins under channelsMu, or the sweep could reclaim the channel mid-join.
 //
 // Creation is on demand because the alternative is a list of channels in
 // the config, which is a deployment's business and is what the Channels
@@ -201,10 +189,6 @@ func (a *app) closeChannels() {
 	}
 }
 
-// broadcastTo fans a frame out to one channel, encoded once per codec.
-//
-// The id is assigned and the rings are written under the channel's sendMu,
-// so clients on different codecs cannot disagree about what happened first.
 func (ch *channel) broadcastTo(a *app, build func(id uint64) proto.Outbound, after func(uint64)) (uint64, error) {
 	frames := make(map[string][]byte, len(ch.bcs))
 

@@ -283,10 +283,7 @@ func TestPrivateMessageToSilentRecipientDoesNotStallSender(t *testing.T) {
 	}
 }
 
-// Every writer on a connection shares its one deadline. One finishing must
-// not clear it while another is still writing, or that one writes to a
-// client that has stopped reading with nothing bounding it. Driven from in
-// here because a client cannot produce the interleaving on demand.
+// Driven from inside: no client can make two writers overlap on demand.
 func TestWriteDeadlineOutlivesTheFirstWriter(t *testing.T) {
 	ta := newTestApp(t, func(c *config.Config) {
 		c.WriteTimeout = config.Duration(200 * time.Millisecond)
@@ -302,9 +299,9 @@ func TestWriteDeadlineOutlivesTheFirstWriter(t *testing.T) {
 		defer close(done)
 		frame := make([]byte, 64<<10)
 		for {
-			c.cork()      // one writer starts
-			c.cork()      // so does another
-			c.uncork(nil) // the first is done
+			c.cork()
+			c.cork()
+			c.uncork(nil)
 			if !c.uncork(c.writeTo(frame)) {
 				return
 			}
@@ -317,9 +314,6 @@ func TestWriteDeadlineOutlivesTheFirstWriter(t *testing.T) {
 	}
 }
 
-// A connection in several busy channels has a pump per channel writing to
-// one socket, and their batches are held and sent together. Every frame has
-// to come out whole, and each channel's in the order it was sent.
 func TestPumpsShareOneSocket(t *testing.T) {
 	ta := newTestApp(t)
 	obs := ta.dial(t)
@@ -499,10 +493,7 @@ func TestOrderIsConsistentAcrossCodecs(t *testing.T) {
 	}
 }
 
-// The same with everybody talking at once, on both codecs, while another
-// channel is busy too. Ordering a channel's rings takes a lock that two
-// senders in this channel contend on and a sender in another channel does
-// not; a single sender, as above, would pass with no lock at all.
+// Concurrent on purpose: a single sender, as above, passes with no lock at all.
 func TestOrderHoldsUnderConcurrentSenders(t *testing.T) {
 	ta := newTestApp(t)
 	jsonObs := ta.dialCodec(t, proto.JSON{})

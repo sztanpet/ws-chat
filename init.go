@@ -85,9 +85,7 @@ type app struct {
 	connsMu sync.RWMutex
 	conns   map[string]*conn
 
-	// seq numbers messages, server-wide so an id names one message
-	// whichever channel it was in. Within a channel ids rise in delivery
-	// order because they are taken under that channel's sendMu.
+	// Server-wide, so an id names one message whichever channel it was in.
 	seq atomic.Uint64
 	// anon names unauthenticated connections until there is a login to do
 	// it properly.

@@ -485,14 +485,7 @@ func TestChannelsAreIsolatedUnderLoad(t *testing.T) {
 	}
 }
 
-// A join must never land in a channel the janitor is reclaiming.
-//
-// The window was between finding the channel and joining its member list:
-// a sweep in between saw it empty, closed its rings and dropped it, and
-// the joiner was left in a room nobody else could reach — it never heard
-// its own JOIN, and everything it said went nowhere. Rejoining an emptied
-// room while sweeping as fast as possible finds it within a few hundred
-// iterations without the fix.
+// The window is narrow, hence a sweep spinning flat out and 1000 joins.
 func TestJoinDoesNotRaceTheSweep(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)

@@ -73,20 +73,14 @@ func (c *conn) join(ctx context.Context, name string, force bool) string {
 		return proto.ErrTooManyChans
 	}
 
-	// Nothing else can have joined this name since the check above: join
-	// runs only on the connection's own goroutine, autojoin before the read
-	// pump starts and JOIN on it. Other goroutines only ever remove
-	// memberships, through a channel ban.
+	// Only this goroutine adds memberships, so the name is still free.
 	m := &membership{ch: ch, sub: ch.bcs[c.codec.Name()].Subscribe(), done: make(chan struct{})}
 	c.membersMu.Lock()
 	c.memberships[name] = m
 	c.membersMu.Unlock()
 
-	// Again, now that there is a membership for a ban to find. A ban is
-	// stored before its part looks for the membership, and the membership
-	// is stored before this looks for the ban, so a ban that landed since
-	// the first check is seen by one side or the other. If the part got
-	// there first it has the cleanup, and is waiting on done.
+	// Again: a ban and a membership are each stored before looking for the
+	// other, so whichever lands second sees the first.
 	if banned, _ := c.app.mod.Banned(name, c.id.Key()); banned {
 		c.membersMu.Lock()
 		mine := c.memberships[name] == m
@@ -215,10 +209,6 @@ func (c *conn) channelPump(ctx context.Context, m *membership) {
 	for {
 		n, err := m.sub.Recv(batch)
 
-		// The whole batch goes out under one deadline and in one write(2).
-		// This is the hot path — one broadcast is one of these per member —
-		// and a deadline per frame was the single biggest thing the server
-		// allocated.
 		if !c.writeBatch(ctx, batch[:n]) {
 			return
 		}
