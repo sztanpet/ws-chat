@@ -185,6 +185,18 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   `std-error-handling` exclusion preset cannot hide any of it: it is a
   single rule scoped to `errcheck`.
 
+- **`make update-deps` run 2026-11-03** (`0d684e2`). Nothing in
+  `require` moved, for a fourth run: coder/websocket is still v1.8.15,
+  and upstream `master` (seven commits on, all CI/docs/Go 1.26) adds
+  nothing to `Conn`, so the fork stays. The toolchain pin went go1.27.1
+  -> go1.27.3. `go fix` clean, vendor/
+  byte-identical. golangci-lint is v2.15.0 bundling honnef v0.8.2, and
+  before its "0 issues" was believed a seeded file got govet (printf),
+  ineffassign, unused and staticcheck (SA4017, SA9003) reports out of
+  it. A file that does not compile proves nothing, because it stops at
+  `typecheck`. CI's `golang:1.27` image fetches the newer pin itself
+  under `GOTOOLCHAIN=auto`, the same way go1.27.1 arrived.
+
 ## Decisions
 
 - **Every step shells out to the Makefile, never to `go` directly.** The

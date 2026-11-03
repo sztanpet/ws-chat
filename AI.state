@@ -6,41 +6,12 @@ only when you are touching that track.
 
 ## Latest
 
-**Dependency and toolchain update, 2026-09-02.** Nothing in `require`
-moved: hujson and msgpack are current, and coder/websocket upstream is
-still v1.8.15, so the `SetWriteDeadline` fork replace in go.mod stays.
-The toolchain pin went go1.27.0 -> go1.27.1 — a patch release, and Go's
-patch releases are mostly security fixes, which is why `update-deps`
-bumps it at all. The `go` directive stays `1.27`: that is the language
-version and has no patch to move. `go fix ./...` reported nothing, which
-is the expected answer now that 1.27's fix tool *is* the modernizers and
-`dcc35d8` already ran them.
-
-**The staticcheck pin came off**, as the comment holding it had said it
-would: 2026.2 shipped as v0.8.1, so `@latest` resolves to something that
-can read 1.27 export data.
-
-Then **the standalone binary went too, and there is now one linter**.
-staticcheck and `unused` run from inside golangci-lint, which
-redistributes the same honnef.co/go/tools; running both was two copies of
-one analyser. The disagreement that had kept them apart has a cause worth
-knowing: `cmd/staticcheck` does not *register* the `quickfix` analysers
-without `-debug.run-quickfix-analyzers`, so the QF reports golangci-lint
-made are debug output in honnef's own command. `.golangci.yml` sets
-`checks: [all, -QF*]`, which is honnef's set in both directions —
-golangci-lint's default also drops several `ST` checks this keeps. The
-"internal error in importing" grep went with the binary it guarded; that
-exit-0 failure was `cmd/staticcheck`'s alone, and golangci-lint reports a
-package it cannot type-check as a `typecheck` issue with a non-zero
-status.
-
-**`go vet` went the same way**, and `make lint` is now a single command.
-golangci-lint's `govet` generates its default analyser set from
-`cmd/vet/main.go`, which the diff against `go tool vet help` on 1.27
-bears out exactly — plus `inline`, out of `cmd/fix`. Nothing here was
-assumed: every claim above was checked against a seeded package before
-the step it justified was deleted. Lint, `test-race` and govulncheck
-clean. Detail in `state/ci.md`.
+**Dependency and toolchain update, 2026-11-03.** Only the toolchain pin
+moved, go1.27.1 -> go1.27.3. Every `require` is current, and
+coder/websocket is still v1.8.15: upstream `master` has no
+`Conn.SetWriteDeadline`, so the fork `replace` stays. Lint was proven
+live with a seeded file before "0 issues" was believed. -race tests and
+govulncheck clean. Detail in `state/ci.md`.
 
 ## State file index
 
@@ -61,6 +32,8 @@ clean. Detail in `state/ci.md`.
 - **2026-09-02** — toolchain go1.27.1; no module moved; `go fix` clean;
   staticcheck unpinned, then it and `go vet` folded into golangci-lint —
   `make lint` is one command over one binary.
+- **2026-11-03** — toolchain go1.27.3; no module moved; websocket fork
+  stays.
 
 ## Key decisions
 
