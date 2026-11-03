@@ -70,14 +70,24 @@ gets `context.Background()`, because a context per frame cost a
 of garbage per delivered message, *per member* of the room, and 99% of
 everything the server allocated. A socket deadline allocates nothing.
 `coder/websocket` has no write deadline of its own, so `handleWS` hands
-`Accept` a `ResponseWriter` whose `Hijack` keeps the connection it gives
-the library. The library never learns of the deadline, which is harmless:
+`Accept` a `ResponseWriter` whose `Hijack` puts a `corkConn` (`cork.go`)
+between the library and the connection, and the deadline is set on that.
+The library never learns of the deadline, which is harmless:
 one that passes mid-frame leaves the stream at an unknown offset, and a
 failed write closes the connection anyway.
 The deadline belongs to the connection, not to a write, and several
 goroutines write to one connection at once, so **they count themselves in
 and out and only the last one clears it**. Clearing it out from under a
 writer that is still going leaves that write with no bound at all.
+
+**A batch is one `write(2)`.** coder/websocket flushes every message, and
+a frame is a message, so a pump draining sixteen frames made sixteen
+system calls — and `write(2)` is most of what this server spends its CPU
+on. While any writer is between `cork` and `uncork`, `corkConn` holds what
+the library writes, and the last one out sends it all at once and only
+then clears the deadline. At 400k deliveries/s that is a fifth less CPU
+and half the latency; at light load a batch is one frame and nothing
+changes.
 
 Fan-out is `internal/broadcast`. The shape is a shared buffer with each
 subscriber reading at its own position, so a broadcast is O(1) in the

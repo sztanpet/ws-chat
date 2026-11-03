@@ -297,22 +297,74 @@ func TestWriteDeadlineOutlivesTheFirstWriter(t *testing.T) {
 		t.Fatal("connection is not in the directory")
 	}
 
-	c.armDeadline()    // one writer starts
-	c.armDeadline()    // so does another
-	c.disarmDeadline() // the first is done
-	defer c.disarmDeadline()
-
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		frame := make([]byte, 64<<10)
-		for c.writeTo(frame) {
+		for {
+			c.cork()      // one writer starts
+			c.cork()      // so does another
+			c.uncork(nil) // the first is done
+			if !c.uncork(c.writeTo(frame)) {
+				return
+			}
 		}
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("a write to a client that stopped reading outlived its deadline")
+	}
+}
+
+// A connection in several busy channels has a pump per channel writing to
+// one socket, and their batches are held and sent together. Every frame has
+// to come out whole, and each channel's in the order it was sent.
+func TestPumpsShareOneSocket(t *testing.T) {
+	ta := newTestApp(t)
+	obs := ta.dial(t)
+
+	const rooms, n = 4, 200
+	var senders []*client
+	for i := range rooms {
+		room := fmt.Sprint("room", i)
+		s := ta.dial(t)
+		s.send(proto.Command{Verb: proto.VerbJoin, Channel: room})
+		s.expectJoined(room)
+		obs.send(proto.Command{Verb: proto.VerbJoin, Channel: room})
+		obs.expectJoined(room)
+		senders = append(senders, s)
+	}
+
+	errs := make(chan error, rooms)
+	for i, s := range senders {
+		var frames [][]byte
+		for j := range n {
+			frames = append(frames, s.encode(proto.Command{Verb: proto.VerbMsg, Channel: fmt.Sprint("room", i), Data: fmt.Sprint(j)}))
+		}
+		go func() {
+			for _, frame := range frames {
+				if err := s.ws.Write(context.Background(), s.msgType(), frame); err != nil {
+					errs <- err
+					return
+				}
+			}
+			errs <- nil
+		}()
+	}
+	for range senders {
+		if err := <-errs; err != nil {
+			t.Fatalf("send: %v", err)
+		}
+	}
+
+	next := map[string]int{}
+	for range rooms * n {
+		msg := obs.expectMsg("", "")
+		if want := fmt.Sprint(next[msg.Channel]); msg.Data != want {
+			t.Fatalf("%s: got %q, want %q", msg.Channel, msg.Data, want)
+		}
+		next[msg.Channel]++
 	}
 }
 

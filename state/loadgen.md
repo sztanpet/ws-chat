@@ -728,9 +728,49 @@ generator on the same box:
 CPU is level. The p99s at 399k lean the fork's way, but tails at that load
 are wide run to run, and batching the writes (below) takes them to ~25ms
 either way. Garbage stays at a few bytes per delivery for both: 3-27MB per
-20s window against 1-8 million deliveries. The whole suite passes under
+15s window against 0.7-6 million deliveries. The whole suite passes under
 `-race`, the stalled-reader tests included, and `govulncheck` covers the
 module again.
+
+## One write(2) per batch (3 Nov 2026)
+
+coder/websocket flushes its `bufio.Writer` after every message, and a frame
+is a message, so a pump draining a batch of sixteen made sixteen
+`write(2)`s. At steady load that costs nothing, because a batch is one
+frame: 1.04 frames per wakeup on average at 49k deliveries/s. Under load it
+adds up: 1.28 at 199k, 2.22 at 399k, 2.97 at 517k.
+
+`corkConn` sits under the library, where the hijack puts it, and holds what
+the library writes while any writer is between `cork` and `uncork`. The last
+one out sends it all in one write, then clears the deadline. Interleaved
+against the commit before it, two runs each, 500 connections, same box and
+generator:
+
+| offered | | before | corked |
+|---|---|---|---|
+| 49k/s | server cores | 0.55, 0.54 | 0.53, 0.51 |
+| | p50 / p99 | 1.92/5.12, 1.92/6.14ms | 1.92/6.14, 1.92/6.66ms |
+| 399k/s | server cores | 2.46, 2.49 | 1.98, 1.90 |
+| | p50 / p99 | 3.84/37, 4.61/57ms | 2.56/23, 3.07/31ms |
+| ~600k/s | delivered | 528k, 513k/s | 591k, 586k/s |
+| | server cores | 2.90, 2.87 | 2.29, 2.25 |
+| | p50 / p99 | 53/360, 57/393ms | 25/147, 27/164ms |
+
+A fifth of the CPU at 399k, all of it system time (1.64 sys cores down to
+1.12, user unchanged), and half the latency. At the knee it delivers 13%
+more for 21% less CPU. Nothing at light load, which is what a batch of one
+frame predicts. RSS is level at all three loads (39MB, 58MB, 60-63MB), and
+garbage stays at a few bytes per delivery.
+
+The hold buffer comes from a `sync.Pool` rather than living in the
+connection. A connection's own buffer would stay the size of the biggest
+thing it was ever sent, which for most is its `BACKLOG`, for as long as it
+is connected.
+
+It was first built inside the library, as a `WriteBatch` on the fork that
+wrote a batch's frames and flushed once. The wrapper measured the same
+(2.00 and 1.94 cores at 399k, against 1.97 and 1.95) and needs nothing from
+the library, which decided it.
 
 ## Pending
 

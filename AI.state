@@ -191,10 +191,13 @@ go1.27.3, nothing else moved (`state/ci.md`).
   exactly one place. It skips `make vendor`: a CI run checks the tree it was handed
   rather than rewriting it.
 - **The write pump takes batches, not single messages.** `Sub.Recv` fills a
-  slice, so one wakeup drains everything pending and can coalesce it into a
-  single socket write. This is what makes shared-storage fan-out possible
-  at all — and it is why cost per delivery *falls* 3.5x as load rises,
-  measured 13.2µs at 50k deliveries/s down to 3.8µs at 773k.
+  slice, so one wakeup drains everything pending. This is what makes
+  shared-storage fan-out possible at all — and it is why cost per delivery
+  *falls* 3.5x as load rises, measured 13.2µs at 50k deliveries/s down to
+  3.8µs at 773k. Since 2026-11-03 a batch is also one `write(2)`: the
+  library flushes every message, so `corkConn` holds the flushes until the
+  batch is done. A fifth of the CPU and half the latency at 400k
+  deliveries/s; nothing at light load, where a batch is one frame.
 - **The capacity limit is the kernel's network path, and it is a product.**
   ~600k deliveries/s on a 4-vCPU guest at p50 18ms, where the box is 0% idle
   with 69% of it system time and the process itself is 2.9 of 4 cores. Size

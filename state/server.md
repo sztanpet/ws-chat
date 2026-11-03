@@ -280,9 +280,23 @@ extension points, and a single-channel WebSocket chat server.
     later in 2 runs of 40, with a 200ms `WriteTimeout`; a channel ban
     against it would have hung the moderator's read pump too. Writers
     now count themselves in and out and only the last one clears it: 0
-    of 120. `TestWriteDeadlineOutlivesTheFirstWriter` arms twice and
-    disarms once from inside the server, since no client can produce the
-    interleaving on demand.
+    of 120. `TestWriteDeadlineOutlivesTheFirstWriter` starts two writers
+    and finishes one from inside the server, since no client can produce
+    the interleaving on demand. The count lives in `corkConn` now (16).
+16. **A batch is one `write(2)` because `corkConn` holds the library's
+    flushes.** coder/websocket flushes after every message, so the hijack
+    puts a `corkConn` under it: while any writer is between `cork` and
+    `uncork` the library's writes are held, and the last one out sends
+    them, then clears the deadline. A write the library reports done may
+    therefore not be on the wire yet, and an error from `uncork` can be
+    about somebody else's frames. `conn.uncork` uncorks before it closes,
+    or a close frame held behind a batch (a ban's, with its reason) would
+    go down with the socket. The hold buffer comes from a `sync.Pool`: one
+    per connection would sit at the size of that connection's biggest
+    `BACKLOG` for its whole life. `TestCorkSendsOneWriteForEveryone`
+    counts the writes, which the wire cannot show, and
+    `TestPumpsShareOneSocket` runs four busy pumps into one socket under
+    `-race`.
 
 ## Pending
 

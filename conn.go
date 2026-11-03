@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"runtime/pprof"
 	"sync"
@@ -46,12 +44,9 @@ type conn struct {
 	ws   *websocket.Conn
 	priv chan []byte
 
-	// sock is the connection under ws, which is where the write deadline
-	// lives. writers is how many goroutines are writing to it right now:
-	// they share its one deadline, so only the last of them may clear it.
-	sock       net.Conn
-	deadlineMu sync.Mutex
-	writers    int
+	// sock is the connection under ws, where every write is corked so that
+	// a batch goes out in one write(2) under one deadline.
+	sock *corkConn
 
 	// memberships is the channels this connection is in, each with its own
 	// subscription and its own write pump.
@@ -169,19 +164,6 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 	// pumps started inside inherit it through the context and label
 	// themselves over the top.
 	pprof.Do(a.ctx, c.labels(taskConn), c.serve)
-}
-
-// hijackCapture is what websocket.Accept is handed instead of the
-// ResponseWriter, to keep hold of the connection the library hijacks.
-type hijackCapture struct {
-	http.ResponseWriter
-	sock net.Conn
-}
-
-func (h *hijackCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	sock, brw, err := http.NewResponseController(h.ResponseWriter).Hijack()
-	h.sock = sock
-	return sock, brw, err
 }
 
 // serve runs the connection until either side gives up.
@@ -520,20 +502,19 @@ func (c *conn) send(ctx context.Context, frame []byte) {
 	c.write(ctx, frame)
 }
 
-// write puts one frame on the socket under a deadline of its own,
-// reporting whether it worked. A client that stops reading must not wedge
+// write puts one frame on the socket under a deadline, reporting whether
+// it worked. A client that stops reading must not wedge
 // the goroutine writing to it.
 //
 // ctx is deliberately unused: the deadline does the bounding, and handing
 // the library a cancellable context would put its per-frame timer back.
 func (c *conn) write(ctx context.Context, frame []byte) bool {
-	c.armDeadline()
-	defer c.disarmDeadline()
-	return c.writeTo(frame)
+	c.cork()
+	return c.uncork(c.writeTo(frame))
 }
 
-// armDeadline bounds everything written until disarmDeadline by
-// WriteTimeout, with a deadline on the socket rather than a context.
+// cork starts a write, bounded by WriteTimeout with a deadline on the socket
+// rather than a context.
 //
 // A socket deadline allocates nothing. A context costs a WithTimeout here
 // and a context.AfterFunc inside the library, per frame — which for a
@@ -543,23 +524,27 @@ func (c *conn) write(ctx context.Context, frame []byte) bool {
 // The library never learns of the deadline, so one that passes mid-frame
 // leaves its stream at an unknown offset. That costs nothing: a failed
 // write closes the connection, so nothing is written to that stream again.
-func (c *conn) armDeadline() {
-	c.deadlineMu.Lock()
-	c.writers++
-	_ = c.sock.SetWriteDeadline(time.Now().Add(c.app.cfg.WriteTimeout.Duration()))
-	c.deadlineMu.Unlock()
+func (c *conn) cork() {
+	c.sock.cork(c.app.cfg.WriteTimeout.Duration())
 }
 
-func (c *conn) disarmDeadline() {
-	c.deadlineMu.Lock()
-	c.writers--
-	if c.writers == 0 {
-		_ = c.sock.SetWriteDeadline(time.Time{})
+// uncork finishes a write, given what the library said while it lasted.
+// The socket is uncorked before anything is closed, so what was held still
+// goes out: a close frame with a reason, say.
+func (c *conn) uncork(err error) bool {
+	if serr := c.sock.uncork(); err == nil {
+		err = serr
 	}
-	c.deadlineMu.Unlock()
+	if err != nil {
+		c.log.Debug("write failed", "err", err)
+		_ = c.ws.CloseNow() // unblocks the read pump
+		return false
+	}
+	return true
 }
 
-// writeBatch writes a wakeup's worth of frames under ONE deadline.
+// writeBatch writes a wakeup's worth of frames under ONE deadline, and in
+// one write(2).
 //
 // It bounds a wakeup rather than a write, which is the stricter of the two
 // where it matters. A batch of sixteen frames would otherwise be allowed
@@ -568,7 +553,7 @@ func (c *conn) disarmDeadline() {
 //
 // What originally forced one deadline per batch was its cost — a context, a
 // timer and three allocations, paid once per member of the room. That cost
-// is gone now that a deadline is an instant (see armDeadline), so this is
+// is gone now that a deadline is an instant (see cork), so this is
 // kept for the stricter bound alone, which is the better reason anyway.
 //
 // ctx is unused here for the same reason it is unused in write.
@@ -577,31 +562,25 @@ func (c *conn) writeBatch(ctx context.Context, frames [][]byte) bool {
 		return true
 	}
 
-	c.armDeadline()
-	defer c.disarmDeadline()
-
+	c.cork()
+	var err error
 	for _, frame := range frames {
-		if !c.writeTo(frame) {
-			return false
+		if err = c.writeTo(frame); err != nil {
+			break
 		}
 	}
-	return true
+	return c.uncork(err)
 }
 
-// writeTo puts one frame on the socket under the deadline armDeadline set.
+// writeTo hands one frame to the library, between a cork and an uncork.
 //
 // The context is deliberately context.Background(). A cancellable one makes
 // the library arm a context.AfterFunc per frame, which is the allocation the
 // deadline exists to avoid. Nothing is lost: the write is bounded by the
 // deadline instead, and shutdown still unblocks a stuck write, because it
 // closes the connection and every wait inside the library selects on that.
-func (c *conn) writeTo(frame []byte) bool {
-	if err := c.ws.Write(context.Background(), c.msgType(), frame); err != nil {
-		c.log.Debug("write failed", "err", err)
-		_ = c.ws.CloseNow() // unblocks the read pump
-		return false
-	}
-	return true
+func (c *conn) writeTo(frame []byte) error {
+	return c.ws.Write(context.Background(), c.msgType(), frame)
 }
 
 // close sends a close frame with a reason, falling back to dropping the
