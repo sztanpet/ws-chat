@@ -262,14 +262,18 @@ extension points, and a single-channel WebSocket chat server.
     on the server. `seq` stays a global atomic: ids are unique across
     channels and rise within one, which is all the backlog dedup needs.
     `History.Append` now runs concurrently for different channels.
+14. **`join` checks for a channel ban twice**: once up front, so a banned
+    client costs nothing, and again after inserting the membership. The
+    second is what makes a ban race-free against a join in flight. A ban
+    is stored before its part looks for the membership, and the
+    membership is stored before the second check, so one side always
+    sees the other. Whichever side removes the membership does the
+    cleanup, and `join` closes `done` either way, since it never started
+    a pump. `TestChannelBanCatchesAJoinInFlight` parks the join in
+    `CanJoin` to land the ban in the gap.
 
 ## Pending
 
-- **A channel ban can miss a join already in flight.** `join` checks the
-  ban first and inserts the membership after `CanJoin`, which may be a
-  slow hook. A ban landing in between finds no membership to part, and
-  the join then completes. Noticed in the 2026-11-03 review and not
-  fixed; re-checking the ban after the insert would close it.
 - **Nothing sweeps on a timer except the janitor**, which runs once a
   minute. Expired mutes and unreferenced limiters therefore linger for up
   to that long; every read already treats them as absent, so this is

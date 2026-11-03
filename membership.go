@@ -82,6 +82,26 @@ func (c *conn) join(ctx context.Context, name string, force bool) string {
 	c.memberships[name] = m
 	c.membersMu.Unlock()
 
+	// Again, now that there is a membership for a ban to find. A ban is
+	// stored before its part looks for the membership, and the membership
+	// is stored before this looks for the ban, so a ban that landed since
+	// the first check is seen by one side or the other. If the part got
+	// there first it has the cleanup, and is waiting on done.
+	if banned, _ := c.app.mod.Banned(name, c.id.Key()); banned {
+		c.membersMu.Lock()
+		mine := c.memberships[name] == m
+		if mine {
+			delete(c.memberships, name)
+		}
+		c.membersMu.Unlock()
+		if mine {
+			ch.remove(c)
+			m.sub.Close()
+		}
+		close(m.done) // no pump was started
+		return proto.ErrBanned
+	}
+
 	// The order of the next three matters, and it is why the pump starts
 	// last.
 	//

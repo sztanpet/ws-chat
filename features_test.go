@@ -1073,6 +1073,56 @@ func TestChannelBanPartsAndBars(t *testing.T) {
 	user.expectErr(proto.ErrBanned)
 }
 
+// gateChannels parks a JOIN to one channel inside CanJoin until released,
+// which holds a join open at the point it has checked for a ban and not
+// yet become a member.
+type gateChannels struct {
+	channel string
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g gateChannels) Autojoin(ctx context.Context, id hook.Identity) []string { return nil }
+
+func (g gateChannels) CanJoin(ctx context.Context, id hook.Identity, channel string) (bool, string) {
+	if channel == g.channel {
+		g.entered <- struct{}{}
+		<-g.release
+	}
+	return true, ""
+}
+
+// A ban that lands while a join is in flight still keeps them out. The
+// join checked for a ban before CanJoin and became a member after it, so a
+// ban in between found nobody to part and the join then went through.
+func TestChannelBanCatchesAJoinInFlight(t *testing.T) {
+	gate := gateChannels{channel: "backroom", entered: make(chan struct{}), release: make(chan struct{})}
+	_, mod, user := modApp(t, hook.Hooks{Channels: gate})
+	released := false
+	defer func() {
+		if !released {
+			close(gate.release)
+		}
+	}()
+
+	user.send(proto.Command{Verb: proto.VerbJoin, Channel: "backroom"})
+	<-gate.entered
+
+	mod.send(proto.Command{Verb: proto.VerbBan, Nick: "auser", Channel: "backroom"})
+	mod.sync()
+
+	// Told directly, as for any channel ban, before its JOIN is answered.
+	user.expectMod(proto.ActionBan, "auser")
+
+	close(gate.release)
+	released = true
+	user.expectErr(proto.ErrBanned)
+
+	// And it is not in there behind the error, either.
+	user.send(proto.Command{Verb: proto.VerbMsg, Channel: "backroom", Data: "am I in?"})
+	user.expectErr(proto.ErrNotJoined)
+}
+
 // A channel ban outranks an autojoin: a layer putting somebody somewhere
 // does not overrule a moderator who threw them out of it.
 func TestChannelBanBeatsAutojoin(t *testing.T) {

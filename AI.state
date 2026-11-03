@@ -15,9 +15,9 @@ member list under `channelsMu`. **The lock ordering a channel's rings
 was server-wide** (`d6e137f`), despite a comment saying per channel. It
 is per channel now, with `seq` still global. Also: the package no longer
 claims a batch is one socket write (`ce78ec9`, it is one `write(2)` per
-frame), and the rejected `CondRing` is gone (`22b4bfb`). One adjacent
-race was found and left open: a channel ban can miss a join already in
-flight (`state/server.md`, Pending). Earlier the same day: toolchain
+frame), and the rejected `CondRing` is gone (`22b4bfb`). A third, found
+alongside them, is fixed too: a channel ban could miss a join already in
+flight, and `join` now checks the ban again after it has a membership. Earlier the same day: toolchain
 go1.27.3, nothing else moved (`state/ci.md`).
 
 ## State file index
