@@ -78,7 +78,6 @@ func TestRecentCaps(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("asked for 2, got %d", len(got))
 	}
-	// The most recent two, not the oldest two.
 	if got[0].Data != "m4" || got[1].Data != "m5" {
 		t.Fatalf("got %q and %q, want m4 and m5", got[0].Data, got[1].Data)
 	}
@@ -95,7 +94,6 @@ func TestRecentOfNothing(t *testing.T) {
 	}
 }
 
-// A non-positive max is how the backlog is switched off.
 func TestZeroMaxKeepsNothing(t *testing.T) {
 	for _, max := range []int{0, -1} {
 		m := NewMemory(max)
@@ -110,8 +108,6 @@ func TestZeroMaxKeepsNothing(t *testing.T) {
 	}
 }
 
-// Channels get their own windows, which is the whole reason the key is
-// there before channels exist.
 func TestChannelsAreSeparate(t *testing.T) {
 	m := NewMemory(10)
 	m.Append(context.Background(), "one", msg(1, "in one"))
@@ -130,13 +126,12 @@ func TestChannelsAreSeparate(t *testing.T) {
 	}
 }
 
-// The caller holds the snapshot while the window keeps moving.
 func TestRecentIsASnapshot(t *testing.T) {
 	m := NewMemory(3)
 	fill(m, 3)
 
 	got, _ := m.Recent(context.Background(), "main", 3)
-	fill(m, 3) // pushes every one of them out
+	fill(m, 3)
 
 	if got[0].Data != "m0" {
 		t.Fatalf("the snapshot changed underneath the caller: [0] = %q", got[0].Data)

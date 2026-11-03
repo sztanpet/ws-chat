@@ -54,8 +54,6 @@ func TestGauge(t *testing.T) {
 	}
 }
 
-// A gauge read at scrape time is how something already counted elsewhere
-// gets exported without being counted twice.
 func TestGaugeFunc(t *testing.T) {
 	r := New("test_")
 	live := []string{"a", "b", "c"}
@@ -88,13 +86,11 @@ func TestCounterVec(t *testing.T) {
 			t.Errorf("scrape is missing %q:\n%s", want, out)
 		}
 	}
-	// One HELP and TYPE for the whole vector, not one per label value.
 	if n := strings.Count(out, "# TYPE test_refusals_total"); n != 1 {
 		t.Errorf("the vector emitted %d TYPE lines, want 1:\n%s", n, out)
 	}
 }
 
-// Label values come out sorted, so two scrapes can be diffed.
 func TestCounterVecOutputIsStable(t *testing.T) {
 	r := New("test_")
 	v := r.CounterVec("things_total", "Things.", "kind")
@@ -114,8 +110,6 @@ func TestCounterVecOutputIsStable(t *testing.T) {
 	}
 }
 
-// Metrics come out in registration order, so the output reads like the
-// code that declares it.
 func TestRegistrationOrder(t *testing.T) {
 	r := New("test_")
 	r.Counter("first_total", "First.")
@@ -137,8 +131,6 @@ func TestLabelEscaping(t *testing.T) {
 	}
 }
 
-// A duplicate name would silently shadow another metric. Failing at
-// startup, which is the only time this can happen, is better.
 func TestDuplicateNamePanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {
