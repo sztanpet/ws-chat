@@ -15,8 +15,9 @@
 // thirds of the cost of a broadcast is waking the receiver goroutines
 // rather than finding them, so Recv hands back everything that has piled up
 // since the last call. A write pump that wakes once and writes twenty
-// frames costs a twentieth of the wakeups of one that wakes twenty times,
-// and it can coalesce them into a single socket write.
+// frames costs a twentieth of the wakeups of one that wakes twenty times.
+// It is still twenty socket writes: coder/websocket flushes every message,
+// and one chat message is one message.
 //
 // MapChan is the reference implementation — a map of subscribers behind an
 // RWMutex, one buffered channel each. It is the obvious solution and the

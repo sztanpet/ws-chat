@@ -32,7 +32,11 @@ behind one interface, and the harness that decides between them.
 - **Receiving is batch-oriented** (`Recv(dst [][]byte) (int, error)`), not a
   channel of messages. A chan-per-message API forces one wakeup per message
   and makes shared storage impossible to express. A write pump wants to wake
-  once, take everything pending, and coalesce it into one socket write.
+  once and take everything pending. It does not get one socket write out of
+  it: coder/websocket flushes per message, so a batch of sixteen is sixteen
+  `write(2)`s. That only costs anything under overload, since at steady load
+  a batch is one frame (`state/loadgen.md`), and fixing it needs the library
+  to hold the flush across messages.
 - **`Broadcast` returns nothing; `Drops()` is a cumulative counter.** An
   implementation is free to notice a lagging subscriber lazily, on the
   reading side, rather than checking every subscriber on every send — which
