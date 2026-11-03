@@ -69,6 +69,10 @@ The deadline is set with `Conn.SetWriteDeadline` and the write itself gets
 here and a `context.AfterFunc` in the library — ~700 bytes of garbage per
 delivered message, *per member* of the room, and 99% of everything the
 server allocated. An instant costs one atomic store.
+The deadline belongs to the connection, not to a write, and several
+goroutines write to one connection at once, so **they count themselves in
+and out and only the last one clears it**. Clearing it out from under a
+writer that is still going leaves that write with no bound at all.
 **`SetWriteDeadline` is not in a released `coder/websocket`**: `go.mod`
 pins a fork of it pending the PR in `code-websocket-pr/`, and the revert
 instructions live beside that `replace` directive. The code is vendored, so

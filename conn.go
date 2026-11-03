@@ -44,6 +44,11 @@ type conn struct {
 	ws   *websocket.Conn
 	priv chan []byte
 
+	// writers is how many goroutines are writing to the socket right now.
+	// They share its one deadline, so only the last of them may clear it.
+	deadlineMu sync.Mutex
+	writers    int
+
 	// memberships is the channels this connection is in, each with its own
 	// subscription and its own write pump.
 	membersMu   sync.RWMutex
@@ -521,11 +526,19 @@ func (c *conn) write(ctx context.Context, frame []byte) bool {
 // go.mod pins a fork. The revert instructions are the TODO beside that
 // replace directive.
 func (c *conn) armDeadline() {
+	c.deadlineMu.Lock()
+	c.writers++
 	_ = c.ws.SetWriteDeadline(time.Now().Add(c.app.cfg.WriteTimeout.Duration()))
+	c.deadlineMu.Unlock()
 }
 
 func (c *conn) disarmDeadline() {
-	_ = c.ws.SetWriteDeadline(time.Time{})
+	c.deadlineMu.Lock()
+	c.writers--
+	if c.writers == 0 {
+		_ = c.ws.SetWriteDeadline(time.Time{})
+	}
+	c.deadlineMu.Unlock()
 }
 
 // writeBatch writes a wakeup's worth of frames under ONE deadline.

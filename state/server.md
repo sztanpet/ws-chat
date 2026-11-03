@@ -271,6 +271,18 @@ extension points, and a single-channel WebSocket chat server.
     cleanup, and `join` closes `done` either way, since it never started
     a pump. `TestChannelBanCatchesAJoinInFlight` parks the join in
     `CanJoin` to land the ban in the gap.
+15. **Every writer on a connection shares its one write deadline**: the
+    channel pumps, the private pump, the read pump's replies, and a
+    moderator's goroutine telling a ban target why. Each used to clear it
+    when it finished, so one finishing while another waited for the
+    library's lock left the second writing with no bound. A client in
+    eight busy channels that stopped reading was still connected 10s
+    later in 2 runs of 40, with a 200ms `WriteTimeout`; a channel ban
+    against it would have hung the moderator's read pump too. Writers
+    now count themselves in and out and only the last one clears it: 0
+    of 120. `TestWriteDeadlineOutlivesTheFirstWriter` arms twice and
+    disarms once from inside the server, since no client can produce the
+    interleaving on demand.
 
 ## Pending
 

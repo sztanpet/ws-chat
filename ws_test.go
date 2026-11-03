@@ -283,6 +283,39 @@ func TestPrivateMessageToSilentRecipientDoesNotStallSender(t *testing.T) {
 	}
 }
 
+// Every writer on a connection shares its one deadline. One finishing must
+// not clear it while another is still writing, or that one writes to a
+// client that has stopped reading with nothing bounding it. Driven from in
+// here because a client cannot produce the interleaving on demand.
+func TestWriteDeadlineOutlivesTheFirstWriter(t *testing.T) {
+	ta := newTestApp(t, func(c *config.Config) {
+		c.WriteTimeout = config.Duration(200 * time.Millisecond)
+	})
+	silent := ta.dial(t) // never reads again after this
+	c, ok := ta.app.lookup(silent.nick)
+	if !ok {
+		t.Fatal("connection is not in the directory")
+	}
+
+	c.armDeadline()    // one writer starts
+	c.armDeadline()    // so does another
+	c.disarmDeadline() // the first is done
+	defer c.disarmDeadline()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		frame := make([]byte, 64<<10)
+		for c.writeTo(frame) {
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a write to a client that stopped reading outlived its deadline")
+	}
+}
+
 // Shutting the server down closes the connections. net/http's Shutdown
 // ignores hijacked connections, so this is entirely our own doing and worth
 // a test.
