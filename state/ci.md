@@ -197,6 +197,21 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   `typecheck`. CI's `golang:1.27` image fetches the newer pin itself
   under `GOTOOLCHAIN=auto`, the same way go1.27.1 arrived.
 
+- **`make build` no longer ships the race detector.** It had built with
+  `-race` since the skeleton, so CI's build step did too.
+  `kikapcsologo/backend` dropped it on 2026-10-05 (`7ebc4fb`) and this
+  repo never followed. Same box, same load (500 connections, ~49k
+  deliveries/s):
+
+  | build | server cores | p50 | p99 |
+  |---|---|---|---|
+  | `CGO_ENABLED=0` | 0.56 | 1.9ms | 4.6ms |
+  | `-race` | 1.33 | 3.8ms | 12.3ms |
+
+  `make run` keeps `-race`, where it earns its cost. The production build
+  is `CGO_ENABLED=0` like the sibling's: statically linked, no C toolchain.
+  The Debian image stays, because `make test-race` still needs cgo.
+
 ## Decisions
 
 - **Every step shells out to the Makefile, never to `go` directly.** The

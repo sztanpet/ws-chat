@@ -53,7 +53,8 @@ steps:
       - make lint
 
   # go test compiles every package, so this is only here to catch the
-  # production build itself breaking: -trimpath, the ldflags, generate.
+  # production build itself breaking: -trimpath, the ldflags, cgo off,
+  # generate.
   - name: build
     image: *golang
     environment: *goenv

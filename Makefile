@@ -14,9 +14,11 @@ help: ## list available targets
 run: ## build with -race and run the server
 	$(GO) build -race && ./ws-chat
 
+# No -race outside make run: it more than doubles the CPU a delivery costs,
+# and it needs cgo where everything here is pure Go.
 .PHONY: build
 build: generate ## full production build
-	$(GO) build -ldflags="-buildid=" -trimpath -race
+	CGO_ENABLED=0 $(GO) build -ldflags="-buildid=" -trimpath
 
 .PHONY: generate
 generate: ## go generate ./...
