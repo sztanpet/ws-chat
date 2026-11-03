@@ -14,15 +14,12 @@ func TestEmptyStore(t *testing.T) {
 	if banned, _ := s.Banned(Global, "id:u1"); banned {
 		t.Error("a fresh store has somebody banned")
 	}
-	// The zero value works too.
 	var z Store
 	if muted, _ := z.Muted("main", "id:u1"); muted {
 		t.Error("the zero Store has somebody muted")
 	}
 }
 
-// A channel mute silences somebody there and nowhere else. This is the
-// whole point of the scope.
 func TestChannelMuteIsLocal(t *testing.T) {
 	s := New()
 	s.Mute("main", "id:u1", time.Time{})
@@ -41,8 +38,6 @@ func TestChannelMuteIsLocal(t *testing.T) {
 	}
 }
 
-// A global mute counts everywhere, without having to be written into each
-// channel.
 func TestGlobalMuteAppliesEverywhere(t *testing.T) {
 	s := New()
 	s.Mute(Global, "id:u1", time.Time{})
@@ -64,7 +59,6 @@ func TestGlobalBanAppliesEverywhere(t *testing.T) {
 	if banned, _ := s.Banned(Global, "id:u1"); !banned {
 		t.Error("a global ban does not apply globally")
 	}
-	// A ban is not a mute.
 	if muted, _ := s.Muted("main", "id:u1"); muted {
 		t.Error("a ban also muted")
 	}
@@ -85,7 +79,6 @@ func TestChannelBanIsLocal(t *testing.T) {
 	}
 }
 
-// Lifting one scope leaves the other alone: they were separate decisions.
 func TestUnmuteIsPerScope(t *testing.T) {
 	s := New()
 	s.Mute(Global, "id:u1", time.Time{})
@@ -127,11 +120,10 @@ func TestExpiry(t *testing.T) {
 	}
 }
 
-// An expired channel mute must not hide a global one that is still live.
 func TestExpiredScopeFallsThroughToGlobal(t *testing.T) {
 	s := New()
-	s.Mute("main", "id:u1", time.Now().Add(-time.Second)) // expired
-	s.Mute(Global, "id:u1", time.Time{})                  // still standing
+	s.Mute("main", "id:u1", time.Now().Add(-time.Second))
+	s.Mute(Global, "id:u1", time.Time{})
 
 	if muted, _ := s.Muted("main", "id:u1"); !muted {
 		t.Fatal("an expired channel mute hid a live global one")
@@ -167,7 +159,6 @@ func TestSweep(t *testing.T) {
 	}
 }
 
-// The same person in two channels is two entries, not one.
 func TestScopesDoNotCollide(t *testing.T) {
 	s := New()
 	s.Mute("main", "id:u1", time.Time{})
