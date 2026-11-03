@@ -7,13 +7,7 @@ import (
 	"time"
 )
 
-// impls is the table every test and benchmark runs over. Adding an
-// alternative implementation means adding one line here, nothing else.
-//
-// The size argument means "how much slack a subscriber gets before it is
-// dropped for lagging" — a per-subscriber buffer for MapChan, the shared
-// ring capacity for Ring. It is not the same mechanism, but it is the same
-// promise, which is what makes them comparable.
+// size is a lagging subscriber's slack, however each one keeps it.
 var impls = []struct {
 	name string
 	new  func(size int) Broadcaster
@@ -36,8 +30,6 @@ func eachImpl(t *testing.T, fn func(t *testing.T, b Broadcaster)) {
 	}
 }
 
-// recvWithin runs Recv with a deadline, so a broken implementation fails
-// the test instead of hanging until the package timeout.
 func recvWithin(t *testing.T, s Sub, dst [][]byte, d time.Duration) (int, error) {
 	t.Helper()
 	type result struct {
@@ -58,7 +50,6 @@ func recvWithin(t *testing.T, s Sub, dst [][]byte, d time.Duration) (int, error)
 	}
 }
 
-// recvOne reads a single message, requiring one to arrive.
 func recvOne(t *testing.T, s Sub) []byte {
 	t.Helper()
 	dst := make([][]byte, 1)
@@ -72,7 +63,6 @@ func recvOne(t *testing.T, s Sub) []byte {
 	return dst[0]
 }
 
-// expectEnd drains until the subscription ends and asserts how it ended.
 func expectEnd(t *testing.T, s Sub, want error) {
 	t.Helper()
 	dst := make([][]byte, 4)
@@ -80,7 +70,7 @@ func expectEnd(t *testing.T, s Sub, want error) {
 	for time.Now().Before(deadline) {
 		_, err := recvWithin(t, s, dst, 2*time.Second)
 		if err == nil {
-			continue // messages already in flight; keep draining
+			continue
 		}
 		if !errors.Is(err, want) {
 			t.Fatalf("subscription ended with %v, want %v", err, want)
@@ -104,7 +94,6 @@ func TestBroadcastDelivers(t *testing.T) {
 			t.Fatalf("Drops() = %d, want 0", got)
 		}
 
-		// Every subscriber sees every message, in order.
 		for i, s := range subs {
 			for want := range 5 {
 				if got := recvOne(t, s)[0]; got != byte(want) {
@@ -115,8 +104,6 @@ func TestBroadcastDelivers(t *testing.T) {
 	})
 }
 
-// Recv returns everything that piled up since the last call, which is the
-// property the whole batch API exists for.
 func TestRecvBatches(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
 		s := b.Subscribe()
@@ -140,8 +127,6 @@ func TestRecvBatches(t *testing.T) {
 	})
 }
 
-// A batch is capped by the destination slice, and the remainder stays
-// queued for the next call.
 func TestRecvRespectsDstLen(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
 		s := b.Subscribe()
@@ -186,14 +171,10 @@ func TestBroadcastToNobody(t *testing.T) {
 	})
 }
 
-// Half the point of the package: a subscriber that stops reading must not
-// stall the sender.
 func TestBroadcastNeverBlocks(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
-		lagging := b.Subscribe() // never read
+		lagging := b.Subscribe()
 
-		// Overrun whatever slack the implementation gives a subscriber,
-		// several times over.
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
@@ -217,16 +198,10 @@ func TestBroadcastNeverBlocks(t *testing.T) {
 	})
 }
 
-// The other half: dropping the subscriber that fell behind must not cost
-// the ones that did not.
-//
-// The healthy subscriber reads once per broadcast, which can never block
-// because a message was just sent, and never lets it fall more than one
-// message behind. That keeps the test deterministic — no sleeps, no
-// reliance on a drainer goroutine being scheduled promptly.
+// Reading once per broadcast keeps the healthy one in step with no sleeps.
 func TestLaggingSubscriberDoesNotAffectOthers(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
-		lagging := b.Subscribe() // never read
+		lagging := b.Subscribe()
 		healthy := b.Subscribe()
 
 		const sent = testSize * 4
@@ -250,7 +225,6 @@ func TestLaggingSubscriberDoesNotAffectOthers(t *testing.T) {
 			t.Fatalf("healthy subscriber got %d messages, want %d", got, sent)
 		}
 
-		// The lagging one is gone, and only it.
 		expectEnd(t, lagging, ErrLagged)
 		if got := b.Drops(); got != 1 {
 			t.Fatalf("Drops() = %d, want 1", got)
@@ -261,18 +235,7 @@ func TestLaggingSubscriberDoesNotAffectOthers(t *testing.T) {
 	})
 }
 
-// The drop threshold is exactly the promised slack, and it is the same
-// promise for every implementation however differently they keep it: a
-// subscriber that is `size` messages behind is still owed all of them, and
-// one that is size+1 behind is gone.
-//
-// This is worth pinning deterministically rather than inferring it from a
-// benchmark's delivery ratio. The capacity findings in state/broadcast.md —
-// that 256 slots collapses at ten thousand subscribers and 4096 does not —
-// only transfer between implementations if they all drop at the same
-// distance. One that dropped a message early would show up here as an
-// off-by-one, and in a benchmark as a slightly worse delivery ratio that
-// reads as slowness.
+// Capacity numbers measured on one implementation only transfer if all drop here.
 func TestDropThresholdIsExactlyTheSlack(t *testing.T) {
 	t.Run("survives at the limit", func(t *testing.T) {
 		eachImpl(t, func(t *testing.T, b Broadcaster) {
@@ -281,8 +244,6 @@ func TestDropThresholdIsExactlyTheSlack(t *testing.T) {
 				b.Broadcast([]byte{byte(i)})
 			}
 
-			// Every message is still owed, in order, and the subscription is
-			// intact.
 			dst := make([][]byte, testSize)
 			for got := 0; got < testSize; {
 				n, err := recvWithin(t, s, dst[:testSize-got], 2*time.Second)
@@ -342,14 +303,12 @@ func TestSubCloseIsIdempotent(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
 		s := b.Subscribe()
 		s.Close()
-		s.Close() // must not panic on the already-ended subscription
+		s.Close()
 		expectEnd(t, s, ErrClosed)
 	})
 }
 
-// A lagging subscriber that the consumer then closes is the normal shutdown
-// order in the server: the write pump sees ErrLagged and cleans up. It must
-// not double-close, and it must keep reporting the real reason.
+// The server's own order: a pump sees ErrLagged, then closes its Sub.
 func TestCloseAfterLagged(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
 		s := b.Subscribe()
@@ -368,7 +327,7 @@ func TestBroadcasterClose(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
 		subs := []Sub{b.Subscribe(), b.Subscribe()}
 		b.Close()
-		b.Close() // idempotent
+		b.Close()
 
 		if got := b.Len(); got != 0 {
 			t.Fatalf("Len() = %d, want 0", got)
@@ -377,8 +336,6 @@ func TestBroadcasterClose(t *testing.T) {
 			expectEnd(t, s, ErrClosed)
 		}
 
-		// Subscribing to a closed broadcaster yields a finished Sub, not a
-		// live one that would never receive anything.
 		after := b.Subscribe()
 		expectEnd(t, after, ErrClosed)
 		if got := b.Len(); got != 0 {
@@ -388,8 +345,7 @@ func TestBroadcasterClose(t *testing.T) {
 	})
 }
 
-// The race detector is the point of this one: broadcasters, subscribers
-// churning, and consumers draining, all at once.
+// For the race detector: it asserts little itself.
 func TestConcurrentChurn(t *testing.T) {
 	eachImpl(t, func(t *testing.T, b Broadcaster) {
 		const (
@@ -402,9 +358,7 @@ func TestConcurrentChurn(t *testing.T) {
 		var drainWG, sendWG, churnWG sync.WaitGroup
 		stop := make(chan struct{})
 
-		// Long-lived subscribers with drainers, so the fan-out actually
-		// delivers instead of instantly dropping everyone. They exit when
-		// Close ends their subscriptions.
+		// Drained, or the fan-out would drop everyone and exercise nothing.
 		for range subscribed {
 			s := b.Subscribe()
 			drainWG.Go(func() {
@@ -426,9 +380,7 @@ func TestConcurrentChurn(t *testing.T) {
 			})
 		}
 
-		// Subscribe/close churn against the same state the senders are
-		// walking. These subscribers are never read, so some get dropped
-		// mid-broadcast, which is exactly the race worth hunting.
+		// Never read, so some are dropped mid-broadcast: the race worth hunting.
 		for range churners {
 			churnWG.Go(func() {
 				for {
@@ -444,9 +396,6 @@ func TestConcurrentChurn(t *testing.T) {
 			})
 		}
 
-		// Shut down in dependency order, no sleeps: the senders bound
-		// themselves, the churners stop on the signal, and Close is what
-		// releases the drainers.
 		waitOrFail(t, &sendWG, "senders")
 		close(stop)
 		waitOrFail(t, &churnWG, "churners")
@@ -455,8 +404,6 @@ func TestConcurrentChurn(t *testing.T) {
 	})
 }
 
-// waitOrFail waits for wg, failing instead of hanging the whole test binary
-// until the package timeout if something deadlocked.
 func waitOrFail(t *testing.T, wg *sync.WaitGroup, what string) {
 	t.Helper()
 	done := make(chan struct{})
