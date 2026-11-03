@@ -28,8 +28,6 @@ func TestUTF8(t *testing.T) {
 		}
 	}
 
-	// Byte sequences no encoder should produce, which is exactly why a
-	// binary-framed client can send them.
 	invalid := []string{
 		"\xff",
 		"\xc3\x28",         // bad continuation
@@ -61,18 +59,14 @@ func TestZalgo(t *testing.T) {
 		{"six marks", "e" + strings.Repeat(combining, 6), false},
 		{"far too many", "e" + strings.Repeat(combining, 200), false},
 
-		// The count is per run, so a long message that uses marks normally
-		// throughout is fine.
 		{"many separate marks", strings.Repeat("e"+combining+" ", 100), true},
 		{"two short runs", "e" + strings.Repeat(combining, 3) + "a" + strings.Repeat(combining, 3), true},
 
-		// Real text that stacks marks legitimately.
 		{"vietnamese", "Tiếng Việt", true},
 		{"hebrew with niqqud", "בְּרֵאשִׁית", true},
 		{"thai", "ภาษาไทย", true},
 		{"devanagari", "हिन्दी", true},
 
-		// A run at the very end still counts.
 		{"trailing run", "ok" + strings.Repeat(combining, 9), false},
 	}
 
@@ -99,7 +93,6 @@ func TestZalgoDisabled(t *testing.T) {
 	}
 }
 
-// The boundary is "more than Max", so exactly Max is allowed.
 func TestZalgoBoundary(t *testing.T) {
 	for max := 1; max <= 8; max++ {
 		z := Zalgo{Max: max}
@@ -156,8 +149,6 @@ func TestChainRunsAllWhenAllowed(t *testing.T) {
 	}
 }
 
-// A chain is built with an optional hook on the end, so nils have to be
-// skipped rather than panic.
 func TestChainSkipsNils(t *testing.T) {
 	n := 0
 	c := Chain(nil, count{&n}, nil)
@@ -169,8 +160,6 @@ func TestChainSkipsNils(t *testing.T) {
 	}
 }
 
-// An empty chain is nil, so the caller can skip the call entirely rather
-// than paying for a loop over nothing on every message.
 func TestEmptyChainIsNil(t *testing.T) {
 	if c := Chain(); c != nil {
 		t.Errorf("Chain() = %v, want nil", c)
@@ -180,8 +169,6 @@ func TestEmptyChainIsNil(t *testing.T) {
 	}
 }
 
-// The order the server installs them in: text validity before anything
-// that assumes valid text.
 func TestDefaultOrder(t *testing.T) {
 	c := Chain(UTF8{}, Zalgo{Max: 5})
 
