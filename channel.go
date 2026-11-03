@@ -28,6 +28,15 @@ type channel struct {
 	bcs   map[string]broadcast.Broadcaster
 	limit *ratelimit.Bucket
 
+	// sendMu is held while a message is assigned its id, encoded and
+	// written to every codec's ring. Without it two senders could reach the
+	// rings in different orders and clients on different codecs would
+	// disagree about what happened first. Per channel, because nothing
+	// orders one channel against another, and the section holds both
+	// encodes and the History append — a microsecond or two, which as a
+	// server-wide lock would cap every channel's messages combined.
+	sendMu sync.Mutex
+
 	mu      sync.RWMutex
 	members map[string]*conn // by nick
 }
@@ -194,15 +203,13 @@ func (a *app) closeChannels() {
 
 // broadcastTo fans a frame out to one channel, encoded once per codec.
 //
-// The id is assigned and the rings are written under one lock, as before,
+// The id is assigned and the rings are written under the channel's sendMu,
 // so clients on different codecs cannot disagree about what happened first.
-// The lock is per channel now: two channels do not serialize against each
-// other.
 func (ch *channel) broadcastTo(a *app, build func(id uint64) proto.Outbound, after func(uint64)) (uint64, error) {
 	frames := make(map[string][]byte, len(ch.bcs))
 
-	a.sendMu.Lock()
-	defer a.sendMu.Unlock()
+	ch.sendMu.Lock()
+	defer ch.sendMu.Unlock()
 
 	id := a.seq.Add(1)
 	payload := build(id)

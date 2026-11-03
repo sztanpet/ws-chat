@@ -289,7 +289,8 @@ type Moderation struct {
 type History interface {
 	// Append records a delivered message. It runs on the sender's path,
 	// under the lock that orders the fan-out, so it must not block: this is
-	// bookkeeping, not persistence.
+	// bookkeeping, not persistence. That lock is per channel: one channel's
+	// appends arrive in id order, and different channels' may run at once.
 	Append(ctx context.Context, channel string, m Message)
 
 	// Recent returns up to n messages, oldest first. It runs once per

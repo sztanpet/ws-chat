@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -407,6 +408,85 @@ func TestOrderIsConsistentAcrossCodecs(t *testing.T) {
 	}
 	if !slices.Equal(jsonIDs, packIDs) {
 		t.Fatalf("the two clients saw different id orders:\n%v\n%v", jsonIDs, packIDs)
+	}
+	if !slices.IsSorted(jsonIDs) {
+		t.Fatalf("ids arrived out of order: %v", jsonIDs)
+	}
+}
+
+// The same with everybody talking at once, on both codecs, while another
+// channel is busy too. Ordering a channel's rings takes a lock that two
+// senders in this channel contend on and a sender in another channel does
+// not; a single sender, as above, would pass with no lock at all.
+func TestOrderHoldsUnderConcurrentSenders(t *testing.T) {
+	ta := newTestApp(t)
+	jsonObs := ta.dialCodec(t, proto.JSON{})
+	packObs := ta.dialCodec(t, proto.MsgPack{})
+
+	var senders, elsewhere []*client
+	for i := range 4 {
+		var codec proto.Codec = proto.JSON{}
+		if i%2 == 1 {
+			codec = proto.MsgPack{}
+		}
+		senders = append(senders, ta.dialCodec(t, codec))
+	}
+	for range 2 {
+		c := ta.dial(t)
+		c.send(proto.Command{Verb: proto.VerbJoin, Channel: "elsewhere"})
+		c.expectJoined("elsewhere")
+		elsewhere = append(elsewhere, c)
+	}
+
+	const n = 50
+	type job struct {
+		c      *client
+		frames [][]byte
+	}
+	var jobs []job
+	for i, c := range senders {
+		var frames [][]byte
+		for j := range n {
+			frames = append(frames, c.encode(proto.Command{Verb: proto.VerbMsg, Data: fmt.Sprintf("%d/%d", i, j)}))
+		}
+		jobs = append(jobs, job{c, frames})
+	}
+	for _, c := range elsewhere {
+		var frames [][]byte
+		for range n {
+			frames = append(frames, c.encode(proto.Command{Verb: proto.VerbMsg, Channel: "elsewhere", Data: "noise"}))
+		}
+		jobs = append(jobs, job{c, frames})
+	}
+
+	errs := make(chan error, len(jobs))
+	for _, j := range jobs {
+		go func() {
+			for _, frame := range j.frames {
+				if err := j.c.ws.Write(context.Background(), j.c.msgType(), frame); err != nil {
+					errs <- err
+					return
+				}
+			}
+			errs <- nil
+		}()
+	}
+	for range jobs {
+		if err := <-errs; err != nil {
+			t.Fatalf("send: %v", err)
+		}
+	}
+
+	ids := func(c *client) []uint64 {
+		var got []uint64
+		for range len(senders) * n {
+			got = append(got, c.expectMsg("", "").ID)
+		}
+		return got
+	}
+	jsonIDs, packIDs := ids(jsonObs), ids(packObs)
+	if !slices.Equal(jsonIDs, packIDs) {
+		t.Fatalf("the two codecs saw different orders:\n%v\n%v", jsonIDs, packIDs)
 	}
 	if !slices.IsSorted(jsonIDs) {
 		t.Fatalf("ids arrived out of order: %v", jsonIDs)

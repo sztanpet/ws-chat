@@ -166,6 +166,13 @@ func (c *client) msgType() websocket.MessageType {
 // there is one document and one encode.
 func (c *client) send(cmd proto.Command) {
 	c.t.Helper()
+	c.sendRaw(c.encode(cmd), c.msgType())
+}
+
+// encode is the half of send that may call Fatalf, for a test that writes
+// from goroutines of its own.
+func (c *client) encode(cmd proto.Command) []byte {
+	c.t.Helper()
 
 	var frame []byte
 	var err error
@@ -177,7 +184,7 @@ func (c *client) send(cmd proto.Command) {
 	if err != nil {
 		c.t.Fatalf("encode %s: %v", cmd.Verb, err)
 	}
-	c.sendRaw(frame, c.msgType())
+	return frame
 }
 
 // sendRaw sends bytes as-is, for the tests that are about malformed input.

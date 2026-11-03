@@ -62,13 +62,6 @@ type app struct {
 	limitersMu sync.Mutex
 	limiters   map[string]*limiterEntry
 
-	// sendMu is held while a message is assigned its id and written to
-	// every codec's ring. Without it two senders could reach the rings in
-	// different orders and clients on different codecs would disagree about
-	// what happened first. The critical section is a couple of ring writes,
-	// tens of nanoseconds; consistent ordering is worth that.
-	sendMu sync.Mutex
-
 	mux       *http.ServeMux
 	srv       *http.Server
 	debug     *http.Server
@@ -92,7 +85,9 @@ type app struct {
 	connsMu sync.RWMutex
 	conns   map[string]*conn
 
-	// seq numbers messages. Per-channel once channels exist.
+	// seq numbers messages, server-wide so an id names one message
+	// whichever channel it was in. Within a channel ids rise in delivery
+	// order because they are taken under that channel's sendMu.
 	seq atomic.Uint64
 	// anon names unauthenticated connections until there is a login to do
 	// it properly.

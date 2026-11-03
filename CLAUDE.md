@@ -204,8 +204,9 @@ the wire. Strings, slices and maps mean the same under either and keep
 The consequence to keep in mind: **a ring holds encoded bytes**, so there
 is one broadcaster per codec and a message is encoded once per codec
 rather than once per subscriber — O(codecs), not O(members). A message id
-is assigned and written to every ring under one small lock, so clients on
-different codecs cannot disagree about what happened first. Private
+is assigned and written to every ring under the channel's own lock, so
+clients on different codecs cannot disagree about what happened first, and
+two channels never wait on each other. Private
 messages are encoded with the **recipient's** codec, since the two ends
 negotiate separately.
 
