@@ -7,8 +7,7 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// marshalAs encodes a value the way a client speaking this codec would. It
-// is not Codec.Encode, which only takes outbound frames.
+// Not Codec.Encode, which takes only outbound frames.
 func marshalAs(c Codec, v any) ([]byte, error) {
 	if c.Binary() {
 		return msgpack.Marshal(v)

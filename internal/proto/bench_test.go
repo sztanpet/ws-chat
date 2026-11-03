@@ -2,21 +2,6 @@ package proto
 
 import "testing"
 
-// What a codec costs, per frame, on the shapes the server actually moves.
-//
-// Both families run over Codecs(), so a new wire format is measured against
-// the others the moment it is added to that table — and so is a change to
-// how an existing one is implemented.
-//
-// The two directions are separate benchmarks because they are paid by
-// different people. Encoding a broadcast happens once per codec per
-// message, however many members are in the room; decoding happens once per
-// frame a client sends. A change that trades one for the other has to be
-// visible as such.
-
-// benchMsg is the frame that dominates a busy server: a chat message with a
-// sender who has roles and attrs attached, which is the expensive case
-// because both ride on every message.
 var benchMsg = NewMsg(Msg{
 	Channel:   "main",
 	ID:        4294967295,
@@ -27,13 +12,9 @@ var benchMsg = NewMsg(Msg{
 	Attrs:     map[string]string{"colour": "#ff0000"},
 })
 
-// benchCmd is the inbound side: one command, the common one.
 var benchCmd = Command{Verb: VerbMsg, Channel: "main", Data: "hello everyone"}
 
-// benchPlain is the same message from a server with no directory
-// installed: no roles, no attrs, nothing omitted-but-present. Both shapes
-// are measured because the difference between them is what the roles and
-// attrs on every message actually cost.
+// Against benchMsg, what roles and attrs on every message cost.
 var benchPlain = NewMsg(Msg{
 	Channel:   "main",
 	ID:        4294967295,

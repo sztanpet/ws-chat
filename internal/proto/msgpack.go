@@ -6,8 +6,6 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// MsgPack is the binary wire format: the same document as the text one, at
-// a fraction of the bytes and none of the number parsing.
 type MsgPack struct{}
 
 func (MsgPack) Name() string { return NameMsgPack }

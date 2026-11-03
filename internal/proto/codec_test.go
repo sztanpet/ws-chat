@@ -7,9 +7,7 @@ import (
 	"testing"
 )
 
-// Both codecs answer to the same tests. That is the entire point of the
-// interface: if one of them needs its own test to pass, they are not
-// interchangeable and a client cannot rely on choosing either.
+// A codec that needs a test of its own is not interchangeable.
 func eachCodec(t *testing.T, fn func(t *testing.T, c Codec)) {
 	t.Helper()
 	for _, c := range Codecs() {
@@ -17,8 +15,6 @@ func eachCodec(t *testing.T, fn func(t *testing.T, c Codec)) {
 	}
 }
 
-// A command is one document, so it decodes in one pass — the verb and its
-// arguments come out together.
 func TestCommandRoundTrip(t *testing.T) {
 	eachCodec(t, func(t *testing.T, c Codec) {
 		for _, want := range []Command{
@@ -32,7 +28,6 @@ func TestCommandRoundTrip(t *testing.T) {
 			{Verb: VerbNames, Channel: "main"},
 			{Verb: VerbMsg, Channel: "other", Data: "in another room"},
 		} {
-			// A client encodes the same struct the server decodes into.
 			frame := mustMarshal(t, c, want)
 
 			var got Command
@@ -46,7 +41,6 @@ func TestCommandRoundTrip(t *testing.T) {
 	})
 }
 
-// Every outbound type survives the trip and arrives naming itself.
 func TestOutboundRoundTrip(t *testing.T) {
 	eachCodec(t, func(t *testing.T, c Codec) {
 		msg := NewMsg(Msg{
@@ -69,8 +63,6 @@ func TestOutboundRoundTrip(t *testing.T) {
 	})
 }
 
-// Every outbound frame carries a verb, and the constructors are what makes
-// that true.
 func TestEveryOutboundNamesItself(t *testing.T) {
 	outbound := []struct {
 		want    string
@@ -105,8 +97,6 @@ func TestEveryOutboundNamesItself(t *testing.T) {
 	})
 }
 
-// A payload built without a constructor has no verb, and encoding it is a
-// programming error rather than a frame no client can dispatch.
 func TestEncodeRefusesAVerblessFrame(t *testing.T) {
 	eachCodec(t, func(t *testing.T, c Codec) {
 		if _, err := c.Encode(Msg{Data: "no verb here"}); !errors.Is(err, ErrNoVerb) {
@@ -126,7 +116,6 @@ func TestDecodeRejectsGarbage(t *testing.T) {
 	})
 }
 
-// A well-formed document with no verb is not a command.
 func TestDecodeRejectsAVerblessCommand(t *testing.T) {
 	eachCodec(t, func(t *testing.T, c Codec) {
 		frame := mustMarshal(t, c, Command{Data: "who am i for"})
@@ -154,8 +143,7 @@ func TestAwkwardBodiesSurvive(t *testing.T) {
 	})
 }
 
-// A frame from one codec must not be readable as the other's, or a
-// mis-negotiated connection would silently half-work.
+// A mis-negotiated connection would otherwise silently half-work.
 func TestCodecsDoNotOverlap(t *testing.T) {
 	jsonFrame := mustMarshal(t, JSON{}, Command{Verb: VerbMsg, Data: "hi"})
 	packed := mustMarshal(t, MsgPack{}, Command{Verb: VerbMsg, Data: "hi"})
@@ -187,7 +175,6 @@ func TestByName(t *testing.T) {
 	}
 }
 
-// MessagePack is offered first, and it had better actually be smaller.
 func TestMsgPackIsSmaller(t *testing.T) {
 	msg := NewMsg(Msg{ID: 4294967295, Nick: "someone", Data: "hello world", Timestamp: 1700000000000})
 
@@ -205,14 +192,7 @@ func TestMsgPackIsSmaller(t *testing.T) {
 	t.Logf("msgpack %d bytes, json %d bytes", len(packed), len(jsonFrame))
 }
 
-// An optional scalar stays off the wire when it is zero, and appears when
-// it is not.
-//
-// This is the "omitzero" rule from the package doc, and it is worth a test
-// of its own because the failure is silent: with "omitempty" under
-// encoding/json/v2 every private message would carry "sent":false and
-// every MOD frame "until":0, and every round-trip test in this file would
-// still pass.
+// Round trips cannot see this: an omitted false decodes to false all the same.
 func TestZeroOptionalsStayOffTheWire(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -256,8 +236,6 @@ func TestZeroOptionalsStayOffTheWire(t *testing.T) {
 	}
 }
 
-// The JSON form is meant to be readable by a person, which is most of the
-// reason it is the default.
 func TestJSONFrameIsReadable(t *testing.T) {
 	frame, err := (JSON{}).Encode(NewErr(ErrTooLong))
 	if err != nil {
