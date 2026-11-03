@@ -249,8 +249,27 @@ extension points, and a single-channel WebSocket chat server.
     selects nothing and `-tags` on one prints size classes rather than
     tasks. "Which goroutine allocated this" is still a call-graph question.
 
+12. **A joiner is in the member list before `channelFor` returns**
+    (`78844cc`), added under `channelsMu`, the lock `sweepChannels` holds
+    while it decides a channel is empty. Adding it later, as `join` used
+    to, let the sweep reclaim the channel mid-join and left the joiner in
+    a room nobody else could reach, with no error. `join` runs only on
+    the connection's own goroutine, which is why it no longer guards
+    against a second join of the same name.
+13. **The lock that orders a channel's rings is the channel's**
+    (`d6e137f`), not the app's. It covers the id, both encodes and the
+    History append, so as a server-wide lock it serialized every message
+    on the server. `seq` stays a global atomic: ids are unique across
+    channels and rise within one, which is all the backlog dedup needs.
+    `History.Append` now runs concurrently for different channels.
+
 ## Pending
 
+- **A channel ban can miss a join already in flight.** `join` checks the
+  ban first and inserts the membership after `CanJoin`, which may be a
+  slow hook. A ban landing in between finds no membership to part, and
+  the join then completes. Noticed in the 2026-11-03 review and not
+  fixed; re-checking the ban after the insert would close it.
 - **Nothing sweeps on a timer except the janitor**, which runs once a
   minute. Expired mutes and unreferenced limiters therefore linger for up
   to that long; every read already treats them as absent, so this is

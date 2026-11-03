@@ -373,6 +373,15 @@ and why it has further to fall when it does not.
 
 ## Pending
 
+- **Reviewed 2026-11-03 and fit for purpose.** The seqlock validation
+  matches the overwrite boundary exactly (a slot is replaced only once
+  `begin` passes it plus capacity, and that is the check), the sleep
+  protocol cannot lose a wakeup under Go's sequentially consistent
+  atomics, and 30 `-race` runs of the suite were clean. One known
+  imperfection, harmless: a reader whose validation fails spins without
+  yielding until the writer that tripped it stores `published`, so a
+  writer descheduled between its two stores is waited out on a core.
+  The bugs that review found were all in the caller (`state/server.md`).
 - **Settled: `SeqRing` is what `channel.go` builds** (`04f0e8a`). The
   shared-history fairness property never turned out to matter.
 - **Read this before optimising the fan-out again.** Profiled at the wire

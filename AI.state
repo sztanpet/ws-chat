@@ -6,12 +6,19 @@ only when you are touching that track.
 
 ## Latest
 
-**Dependency and toolchain update, 2026-11-03.** Only the toolchain pin
-moved, go1.27.1 -> go1.27.3. Every `require` is current, and
-coder/websocket is still v1.8.15: upstream `master` has no
-`Conn.SetWriteDeadline`, so the fork `replace` stays. Lint was proven
-live with a seeded file before "0 issues" was believed. -race tests and
-govulncheck clean. Detail in `state/ci.md`.
+**Fan-out review, 2026-11-03.** `SeqRing` reviewed and fit for purpose.
+The two bugs were in the caller. **A join could land in a channel the
+janitor was reclaiming** (`78844cc`): the member was added after the
+channel was found, so a sweep in between dropped the channel and left
+the joiner talking into a closed ring with no error. It now joins the
+member list under `channelsMu`. **The lock ordering a channel's rings
+was server-wide** (`d6e137f`), despite a comment saying per channel. It
+is per channel now, with `seq` still global. Also: the package no longer
+claims a batch is one socket write (`ce78ec9`, it is one `write(2)` per
+frame), and the rejected `CondRing` is gone (`22b4bfb`). One adjacent
+race was found and left open: a channel ban can miss a join already in
+flight (`state/server.md`, Pending). Earlier the same day: toolchain
+go1.27.3, nothing else moved (`state/ci.md`).
 
 ## State file index
 
@@ -33,7 +40,8 @@ govulncheck clean. Detail in `state/ci.md`.
   staticcheck unpinned, then it and `go vet` folded into golangci-lint —
   `make lint` is one command over one binary.
 - **2026-11-03** — toolchain go1.27.3; no module moved; websocket fork
-  stays.
+  stays. Fan-out review: join/sweep race fixed, ring ordering lock made
+  per channel, `CondRing` deleted.
 
 ## Key decisions
 
@@ -45,8 +53,9 @@ govulncheck clean. Detail in `state/ci.md`.
   kikapcsologo backend, so the tooling and query conventions carry over.
 - **Hand-written SQL in `internal/model/`**, no code generation.
 - **Fan-out is per-channel, never global.** Each channel owns its member
-  set and does its own broadcast; the hub's map is only touched on
-  join/part/lookup.
+  set, its broadcast and the lock that orders it; the hub's map is only
+  touched on join/part/lookup, and a joiner enters the member list under
+  that map's lock so the sweep never sees a channel half-joined.
 - **Backpressure never propagates into the hub.** A full outbound buffer
   disconnects that client; it must not block the sender.
 - **Swappable `Broadcaster` interface in `internal/broadcast`.** The fan-out
