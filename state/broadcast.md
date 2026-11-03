@@ -17,7 +17,9 @@ behind one interface, and the harness that decides between them.
   **This is the one to use**; `channel.go` builds these (`04f0e8a`).
   Commits `aca8576`, `04f0e8a`.
 - `ring_cond.go` — `CondRing`, Ring with a `sync.Cond` instead of the
-  notify channel. Measured and rejected; see below.
+  notify channel. Measured and rejected; see below. Deleted afterwards,
+  since nothing used it and the numbers below are what it was for; it is
+  in `7cf97aa` for anyone who wants to re-measure.
 - `broadcast_test.go` — contract tests, table-driven over the `impls` list,
   plus `TestConcurrentChurn` for `-race`. Both implementations pass the
   same suite.
