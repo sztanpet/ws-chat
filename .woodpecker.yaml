@@ -1,35 +1,19 @@
-# CI runs what `make pre-commit` runs, and nothing it does not.
-#
-# Everything goes through the Makefile on purpose: the flags a step needs
-# are written down once, where somebody running it by hand gets them too.
-# A pipeline spelling them out itself is a second copy to keep in sync,
-# and the copy that is wrong is always the one nobody runs by hand.
-#
-# `make vendor` is the one pre-commit step left out: it rewrites go.mod
-# and vendor/, and a CI run must check the tree it was given rather than
-# fix it. A stale vendor/ breaks the build in the next step anyway.
+# Every step is a make target, so its flags live in one place. `make vendor`
+# is left out: CI checks the tree it was given rather than rewriting it.
 
 when:
   - event: [push, pull_request, manual, cron]
 
 variables:
-  # Debian-based, not alpine: `go test -race` needs cgo and a C
-  # toolchain, and alpine ships neither. The race detector is the point
-  # of this repository's test suite, so this is not negotiable.
+  # Not alpine: -race needs cgo and a C toolchain.
   - &golang 'golang:1.27'
-  # The homelab agent mounts a persistent /cache into every step. Every
-  # cache Go has goes there, or each run recompiles every vendored
-  # dependency and rebuilds the linters from source -- which is most of
-  # the pipeline. GOPATH holds both the module cache and the binaries
-  # `make tools` installs, so they survive to the next run.
+  # Every Go cache on the agent's persistent /cache, or each run rebuilds it all.
   - &goenv
     GOCACHE: /cache/go-build
     GOPATH: /cache/gopath
     GOLANGCI_LINT_CACHE: /cache/golangci-lint
 
 steps:
-  # First, because it is the answer people actually want, and because a
-  # concurrency bug in the fan-out is the failure that matters here.
   - name: test
     image: *golang
     environment: *goenv
@@ -40,15 +24,8 @@ steps:
     image: *golang
     environment: *goenv
     commands:
-      # Unconditionally, despite `make tools` building the linter from
-      # source. With GOPATH and GOCACHE on /cache a re-run relinks what is
-      # already built and takes no measurable time; only a version that
-      # actually moved costs anything. Running it only when the binary is
-      # MISSING is what broke this step on the Go 1.27 bump: /cache held a
-      # linter older than the image's toolchain, and being present it was
-      # never replaced. The Makefile puts $(go env GOPATH)/bin on PATH for
-      # its own recipes; this shell needs it too.
       - export PATH="/cache/gopath/bin:$PATH"
+      # Every run: a linter merely present on /cache can predate the toolchain.
       - make tools
       - make lint
 
@@ -61,11 +38,7 @@ steps:
       - make build
       - make loadgen
 
-  # Kept off pushes for the same reason it is kept out of the pre-commit
-  # hook: it talks to the vulnerability database over the network, so it
-  # fails for reasons that have nothing to do with the commit. Nightly is
-  # often enough to hear about a CVE in a dependency. Needs a cron adding
-  # in the repository's Woodpecker settings; without one this never runs.
+  # Off pushes, as it needs the network; it runs only if the repository has a cron.
   - name: vulncheck
     image: *golang
     environment: *goenv
