@@ -6,11 +6,8 @@ import (
 	"time"
 )
 
-// Every test drives the clock explicitly. A rate limiter tested against
-// real time is a test that fails on a busy machine.
 var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// Unlimited is the default, so it is the first thing that has to work.
 func TestNilBucketAllowsEverything(t *testing.T) {
 	var b *Bucket
 
@@ -45,7 +42,6 @@ func TestNonPositiveMeansUnlimited(t *testing.T) {
 func TestBurstThenRefill(t *testing.T) {
 	b := New(3, time.Second)
 
-	// The burst is available immediately: a new connection may talk.
 	for i := range 3 {
 		if !b.AllowAt(epoch) {
 			t.Fatalf("call %d refused inside the burst", i)
@@ -55,11 +51,9 @@ func TestBurstThenRefill(t *testing.T) {
 		t.Fatal("the fourth call was allowed with an empty bucket")
 	}
 
-	// Half an interval is not a token.
 	if b.AllowAt(epoch.Add(500 * time.Millisecond)) {
 		t.Fatal("half an interval bought a token")
 	}
-	// A whole one is.
 	if !b.AllowAt(epoch.Add(time.Second)) {
 		t.Fatal("a full interval did not refill a token")
 	}
@@ -71,13 +65,11 @@ func TestBurstThenRefill(t *testing.T) {
 func TestRefillCapsAtBurst(t *testing.T) {
 	b := New(2, time.Second)
 
-	// Drain, then wait far longer than it takes to refill.
 	b.AllowAt(epoch)
 	b.AllowAt(epoch)
 	later := epoch.Add(time.Hour)
 
-	// Both calls have to happen: the point is that an hour buys exactly
-	// two tokens back, so they are spent one at a time and then checked.
+	// Both, before checking: && would skip the second call.
 	first, second := b.AllowAt(later), b.AllowAt(later)
 	if !first || !second {
 		t.Fatal("the bucket did not refill")
@@ -90,7 +82,6 @@ func TestRefillCapsAtBurst(t *testing.T) {
 func TestSustainedRate(t *testing.T) {
 	b := New(1, 100*time.Millisecond)
 
-	// One per interval, exactly, over a stretch.
 	now := epoch
 	for i := range 10 {
 		if !b.AllowAt(now) {
@@ -103,7 +94,6 @@ func TestSustainedRate(t *testing.T) {
 	}
 }
 
-// A clock that jumps backwards must not drain the bucket or strand it.
 func TestClockGoingBackwards(t *testing.T) {
 	b := New(2, time.Second)
 
@@ -113,7 +103,6 @@ func TestClockGoingBackwards(t *testing.T) {
 	if !b.AllowAt(epoch.Add(-time.Hour)) {
 		t.Fatal("a backwards clock refused a token that was available")
 	}
-	// And the bucket still refills normally afterwards.
 	if !b.AllowAt(epoch.Add(time.Second)) {
 		t.Fatal("the bucket stopped refilling after the clock went backwards")
 	}
@@ -135,8 +124,6 @@ func TestTokens(t *testing.T) {
 	}
 }
 
-// One bucket, many senders: the total handed out must be exactly the burst,
-// not "about" it.
 func TestConcurrentAllowIsExact(t *testing.T) {
 	const (
 		burst   = 50
