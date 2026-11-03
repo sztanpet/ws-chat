@@ -68,28 +68,19 @@ func (c *conn) join(ctx context.Context, name string, force bool) string {
 		}
 	}
 
-	ch, ok := c.app.channelFor(ctx, name)
+	ch, ok := c.app.channelFor(ctx, name, c)
 	if !ok {
 		return proto.ErrTooManyChans
 	}
 
+	// Nothing else can have joined this name since the check above: join
+	// runs only on the connection's own goroutine, autojoin before the read
+	// pump starts and JOIN on it. Other goroutines only ever remove
+	// memberships, through a channel ban.
 	m := &membership{ch: ch, sub: ch.bcs[c.codec.Name()].Subscribe(), done: make(chan struct{})}
-
 	c.membersMu.Lock()
-	if _, exists := c.memberships[name]; exists {
-		// Somebody else's JOIN won the race. Only one read pump per
-		// connection sends commands, so this can only happen between an
-		// autojoin and a JOIN in flight; give up the subscription rather
-		// than leak it.
-		c.membersMu.Unlock()
-		m.sub.Close()
-		close(m.done)
-		return proto.ErrAlreadyJoined
-	}
 	c.memberships[name] = m
 	c.membersMu.Unlock()
-
-	ch.add(c)
 
 	// The order of the next three matters, and it is why the pump starts
 	// last.

@@ -484,3 +484,39 @@ func TestChannelsAreIsolatedUnderLoad(t *testing.T) {
 		t.Fatalf("saw %v, want %d in main and 1 in quiet", seen, n)
 	}
 }
+
+// A join must never land in a channel the janitor is reclaiming.
+//
+// The window was between finding the channel and joining its member list:
+// a sweep in between saw it empty, closed its rings and dropped it, and
+// the joiner was left in a room nobody else could reach — it never heard
+// its own JOIN, and everything it said went nowhere. Rejoining an emptied
+// room while sweeping as fast as possible finds it within a few hundred
+// iterations without the fix.
+func TestJoinDoesNotRaceTheSweep(t *testing.T) {
+	ta := newTestApp(t)
+	c := ta.dial(t)
+
+	stop := make(chan struct{})
+	swept := make(chan struct{})
+	go func() {
+		defer close(swept)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				ta.app.sweepChannels()
+			}
+		}
+	}()
+	defer func() { close(stop); <-swept }()
+
+	for range 1000 {
+		c.send(proto.Command{Verb: proto.VerbJoin, Channel: "revolving"})
+		c.expectJoined("revolving")
+		c.send(proto.Command{Verb: proto.VerbPart, Channel: "revolving"})
+		c.expectPart("revolving", c.nick)
+		c.sync()
+	}
+}

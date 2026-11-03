@@ -59,16 +59,25 @@ const (
 	maxNames = 1000
 )
 
-// channelFor returns a channel, creating it if nobody has been in it yet.
+// channelFor returns a channel with c already in its member list, creating
+// the channel if nobody has been in it yet.
+//
+// The member is added under channelsMu, which is what sweepChannels holds
+// while it decides a channel is empty. Adding it any later leaves a window
+// in which the sweep reclaims the channel out from under the joiner, who
+// ends up in a room nobody else can reach.
 //
 // Creation is on demand because the alternative is a list of channels in
 // the config, which is a deployment's business and is what the Channels
 // hook is for. The cap is what stops a client inventing channels until the
 // server runs out of memory; a deployment that cares about which names
 // exist refuses the rest in CanJoin.
-func (a *app) channelFor(ctx context.Context, name string) (*channel, bool) {
+func (a *app) channelFor(ctx context.Context, name string, c *conn) (*channel, bool) {
 	a.channelsMu.RLock()
 	ch, ok := a.channels[name]
+	if ok {
+		ch.add(c)
+	}
 	a.channelsMu.RUnlock()
 	if ok {
 		return ch, true
@@ -78,6 +87,7 @@ func (a *app) channelFor(ctx context.Context, name string) (*channel, bool) {
 	defer a.channelsMu.Unlock()
 
 	if ch, ok = a.channels[name]; ok {
+		ch.add(c)
 		return ch, true
 	}
 	if len(a.channels) >= a.cfg.MaxChannels {
@@ -88,7 +98,7 @@ func (a *app) channelFor(ctx context.Context, name string) (*channel, bool) {
 		name:    name,
 		bcs:     make(map[string]broadcast.Broadcaster, len(proto.Codecs())),
 		limit:   a.channelLimiter(ctx, name),
-		members: make(map[string]*conn),
+		members: map[string]*conn{c.nick(): c},
 	}
 	for _, codec := range proto.Codecs() {
 		ch.bcs[codec.Name()] = broadcast.NewSeqRing(a.cfg.Capacity)
