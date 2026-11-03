@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/pprof"
 	"sync"
@@ -44,8 +46,10 @@ type conn struct {
 	ws   *websocket.Conn
 	priv chan []byte
 
-	// writers is how many goroutines are writing to the socket right now.
-	// They share its one deadline, so only the last of them may clear it.
+	// sock is the connection under ws, which is where the write deadline
+	// lives. writers is how many goroutines are writing to it right now:
+	// they share its one deadline, so only the last of them may clear it.
+	sock       net.Conn
 	deadlineMu sync.Mutex
 	writers    int
 
@@ -119,7 +123,8 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+	hc := &hijackCapture{ResponseWriter: w}
+	ws, err := websocket.Accept(hc, r, &websocket.AcceptOptions{
 		OriginPatterns: a.cfg.AllowedOrigins,
 		Subprotocols:   proto.Subprotocols(),
 	})
@@ -147,6 +152,7 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 	c := &conn{
 		app:         a,
 		ws:          ws,
+		sock:        hc.sock,
 		priv:        make(chan []byte, a.cfg.PrivBuffer),
 		id:          id,
 		codec:       codec,
@@ -163,6 +169,19 @@ func (a *app) handleWS(w http.ResponseWriter, r *http.Request) {
 	// pumps started inside inherit it through the context and label
 	// themselves over the top.
 	pprof.Do(a.ctx, c.labels(taskConn), c.serve)
+}
+
+// hijackCapture is what websocket.Accept is handed instead of the
+// ResponseWriter, to keep hold of the connection the library hijacks.
+type hijackCapture struct {
+	http.ResponseWriter
+	sock net.Conn
+}
+
+func (h *hijackCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	sock, brw, err := http.NewResponseController(h.ResponseWriter).Hijack()
+	h.sock = sock
+	return sock, brw, err
 }
 
 // serve runs the connection until either side gives up.
@@ -505,30 +524,29 @@ func (c *conn) send(ctx context.Context, frame []byte) {
 // reporting whether it worked. A client that stops reading must not wedge
 // the goroutine writing to it.
 //
-// ctx is deliberately unused while a deadline does the bounding. It stays in
-// the signature because putting the context back is what reverting to the
-// released coder/websocket means — see the TODO in go.mod.
+// ctx is deliberately unused: the deadline does the bounding, and handing
+// the library a cancellable context would put its per-frame timer back.
 func (c *conn) write(ctx context.Context, frame []byte) bool {
 	c.armDeadline()
 	defer c.disarmDeadline()
 	return c.writeTo(frame)
 }
 
-// armDeadline bounds every frame written until disarmDeadline by
-// WriteTimeout, using the connection's own deadline rather than a context.
+// armDeadline bounds everything written until disarmDeadline by
+// WriteTimeout, with a deadline on the socket rather than a context.
 //
-// An instant costs one atomic store. A context costs a WithTimeout here and
-// a context.AfterFunc inside the library, per frame — which for a broadcast
-// is per member, and measured at ~700 bytes of garbage per delivered
-// message, none of it the message. See state/loadgen.md.
+// A socket deadline allocates nothing. A context costs a WithTimeout here
+// and a context.AfterFunc inside the library, per frame — which for a
+// broadcast is per member, and measured at ~700 bytes of garbage per
+// delivered message, none of it the message. See state/loadgen.md.
 //
-// TODO: Conn.SetWriteDeadline is not in a released coder/websocket yet, so
-// go.mod pins a fork. The revert instructions are the TODO beside that
-// replace directive.
+// The library never learns of the deadline, so one that passes mid-frame
+// leaves its stream at an unknown offset. That costs nothing: a failed
+// write closes the connection, so nothing is written to that stream again.
 func (c *conn) armDeadline() {
 	c.deadlineMu.Lock()
 	c.writers++
-	_ = c.ws.SetWriteDeadline(time.Now().Add(c.app.cfg.WriteTimeout.Duration()))
+	_ = c.sock.SetWriteDeadline(time.Now().Add(c.app.cfg.WriteTimeout.Duration()))
 	c.deadlineMu.Unlock()
 }
 
@@ -536,7 +554,7 @@ func (c *conn) disarmDeadline() {
 	c.deadlineMu.Lock()
 	c.writers--
 	if c.writers == 0 {
-		_ = c.ws.SetWriteDeadline(time.Time{})
+		_ = c.sock.SetWriteDeadline(time.Time{})
 	}
 	c.deadlineMu.Unlock()
 }

@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"time"
 
 	"github.com/coder/websocket/internal/bpool"
@@ -293,25 +292,13 @@ func (c *Conn) writeFrame(ctx context.Context, fin bool, flate bool, opcode opco
 	}
 	defer c.writeFrameMu.unlock()
 
-	// Set once the write deadline has been armed for this frame, below.
-	var deadlineArmed bool
 	defer func() {
-		// Disarming reports whether the frame beat its deadline. It has to
-		// happen here rather than in a defer of its own so that it is
-		// ordered before the error mapping that consults it.
-		deadlineExceeded := deadlineArmed && !c.stopWriteDeadline()
-
 		if c.isClosed() && opcode == opClose {
 			err = nil
 		}
 		if err != nil {
 			if ctx.Err() != nil {
 				err = ctx.Err()
-			} else if deadlineExceeded {
-				// The connection is being closed by the timer, so without
-				// this the caller would see net.ErrClosed and could not tell
-				// a write deadline from a peer that hung up.
-				err = os.ErrDeadlineExceeded
 			} else if c.isClosed() {
 				err = net.ErrClosed
 			}
@@ -334,16 +321,6 @@ func (c *Conn) writeFrame(ctx context.Context, fin bool, flate bool, opcode opco
 	if c.setupWriteTimeout(ctx) {
 		defer c.clearWriteTimeout()
 	}
-
-	// Armed here rather than in SetWriteDeadline so that it is under
-	// writeFrameMu together with the frame it bounds. Nothing has been
-	// written yet if the deadline has already passed, so the frame is simply
-	// refused and the connection left usable.
-	expired, armed := c.armWriteDeadline()
-	if expired {
-		return 0, os.ErrDeadlineExceeded
-	}
-	deadlineArmed = armed
 
 	c.writeHeader.fin = fin
 	c.writeHeader.opcode = opcode

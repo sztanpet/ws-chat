@@ -8,14 +8,12 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"reflect"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall/js"
-	"time"
 
 	"github.com/coder/websocket/internal/bpool"
 	"github.com/coder/websocket/internal/wsjs"
@@ -66,39 +64,6 @@ type Conn struct {
 	readSignal chan struct{}
 	readBufMu  sync.Mutex
 	readBuf    []wsjs.MessageEvent
-
-	// writeDeadline is the deadline set by SetWriteDeadline as unix nanos,
-	// or noDeadline.
-	writeDeadline atomic.Int64
-}
-
-// SetWriteDeadline sets a deadline for writes on the connection, as
-// net.Conn.SetWriteDeadline does. A zero t clears the deadline. The returned
-// error is always nil.
-//
-// A write started after the deadline has passed fails with
-// os.ErrDeadlineExceeded and leaves the connection open, so a later
-// SetWriteDeadline puts the connection back to work.
-//
-// Writes here are handed to the browser and never block, so unlike the
-// native implementation there is nothing to interrupt once a write is
-// underway: the deadline is checked when a write is attempted, and a
-// deadline can never pass mid-write. That is the only way in which this
-// differs from the native implementation, which closes the connection in
-// that case.
-func (c *Conn) SetWriteDeadline(t time.Time) error {
-	if t.IsZero() {
-		c.writeDeadline.Store(noDeadline)
-		return nil
-	}
-	c.writeDeadline.Store(deadlineNanos(t))
-	return nil
-}
-
-// writeDeadlineExceeded reports whether a deadline is set and has passed.
-func (c *Conn) writeDeadlineExceeded() bool {
-	deadline := c.writeDeadline.Load()
-	return deadline != noDeadline && !time.Now().Before(time.Unix(0, deadline))
 }
 
 func (c *Conn) close(err error, wasClean bool) {
@@ -248,9 +213,6 @@ func (c *Conn) Write(ctx context.Context, typ MessageType, p []byte) error {
 func (c *Conn) write(typ MessageType, p []byte) error {
 	if c.isClosed() {
 		return net.ErrClosed
-	}
-	if c.writeDeadlineExceeded() {
-		return os.ErrDeadlineExceeded
 	}
 	switch typ {
 	case MessageBinary:

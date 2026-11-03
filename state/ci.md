@@ -212,6 +212,13 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   is `CGO_ENABLED=0` like the sibling's: statically linked, no C toolchain.
   The Debian image stays, because `make test-race` still needs cgo.
 
+- **No `replace` directive any more.** The write deadline moved from the
+  fork's `Conn.SetWriteDeadline` to the socket under the library
+  (`state/loadgen.md`), so coder/websocket is upstream v1.8.15 again,
+  vendored with its `go.sum` lines back. `make vendor` no longer needs
+  `../coder-websocket` checked out beside the repo, and `make vulncheck`
+  sees the module again: clean.
+
 ## Decisions
 
 - **Every step shells out to the Makefile, never to `go` directly.** The

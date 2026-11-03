@@ -7,13 +7,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // MessageType represents the type of a WebSocket message.
@@ -55,20 +53,6 @@ type Conn struct {
 
 	readTimeoutStop  atomic.Pointer[func() bool]
 	writeTimeoutStop atomic.Pointer[func() bool]
-
-	// writeDeadline is the deadline set by SetWriteDeadline as unix nanos,
-	// or noDeadline. writeDeadlineTimer is created once per connection and
-	// thereafter only Reset and Stopped, neither of which allocates — the
-	// same approach netconn.go takes for net.Conn deadlines.
-	//
-	// The timer is armed by writeFrame rather than by SetWriteDeadline, so
-	// that it is armed under writeFrameMu together with the frame it
-	// bounds. That keeps it safe when several goroutines write to one
-	// connection: setting a deadline cannot disturb a frame already in
-	// flight, and frames written under one deadline share it instead of
-	// restarting the clock per frame.
-	writeDeadline      atomic.Int64
-	writeDeadlineTimer *time.Timer
 
 	// Read state.
 	readMu         *mu
@@ -151,8 +135,6 @@ func newConn(cfg connConfig) *Conn {
 		}
 	}
 
-	c.initWriteDeadline()
-
 	runtime.SetFinalizer(c, func(c *Conn) {
 		c.close()
 	})
@@ -198,96 +180,6 @@ func (c *Conn) setupWriteTimeout(ctx context.Context) bool {
 	swapTimeoutStop(&c.writeTimeoutStop, &stop)
 	return true
 }
-
-// initWriteDeadline creates the connection's write deadline timer.
-//
-// One timer for the life of the connection, so that arming a write deadline
-// is a Reset and disarming it a Stop, neither of which allocates. The
-// duration is irrelevant because it is stopped immediately: there is no
-// constructor for a stopped timer, and this is how netconn.go makes one.
-// Unlike netconn.go's timers there is no need to drain the channel after
-// Stop, because an AfterFunc timer has none.
-func (c *Conn) initWriteDeadline() {
-	c.writeDeadlineTimer = time.AfterFunc(math.MaxInt64, func() {
-		c.close()
-	})
-	c.writeDeadlineTimer.Stop()
-}
-
-// SetWriteDeadline sets a deadline for writes on the connection, as
-// net.Conn.SetWriteDeadline does. A zero t clears the deadline. The returned
-// error is always nil.
-//
-// A write started after the deadline has passed fails with
-// os.ErrDeadlineExceeded and leaves the connection open, so a later
-// SetWriteDeadline puts the connection back to work. A deadline that passes
-// while a frame is already in flight closes the connection, because a
-// half-written frame cannot be abandoned without corrupting the stream; that
-// write also fails with os.ErrDeadlineExceeded. This is the same distinction
-// NetConn documents, and it is the only way in which this differs from the
-// net.Conn contract.
-//
-// It exists so that a deadline can be expressed without allocating. Bounding
-// a write with a context costs a context.WithTimeout in the caller and a
-// context.AfterFunc inside this package, per frame; a deadline is an
-// instant, and an instant is one atomic store against a timer that is reused
-// for the life of the connection. Callers that pass a non-cancellable
-// context to Write and set the deadline here allocate nothing on the write
-// path, which matters for a server fanning one message out to many
-// connections, where that per-frame cost is paid per recipient.
-//
-// The deadline belongs to the connection, not to a call, so where several
-// goroutines write to one connection the last to set it wins. Frames written
-// under one deadline all wait for that same instant rather than restarting
-// the clock, and setting or clearing a deadline never disturbs a frame
-// already in flight: the deadline that bounds a frame is the one in effect
-// when the frame started.
-//
-// There is no SetReadDeadline. Reads are bounded by the context passed to
-// Reader, and an idle connection waiting on its peer is normal, so the read
-// side has no equivalent.
-func (c *Conn) SetWriteDeadline(t time.Time) error {
-	if t.IsZero() {
-		c.writeDeadline.Store(noDeadline)
-		return nil
-	}
-	c.writeDeadline.Store(deadlineNanos(t))
-	return nil
-}
-
-// armWriteDeadline prepares the write deadline for one frame. It reports
-// whether the deadline has already passed, and whether the timer was armed
-// and so needs stopping once the frame is done. The caller must hold
-// writeFrameMu.
-//
-// A deadline that has already passed is reported back rather than acted on
-// here. Closing inline is not an option — close takes writeFrameMu for a
-// client connection, via msgWriter.close, and this runs with that lock held
-// — and closing is not wanted anyway: nothing has been written, so failing
-// the write leaves the connection in a state the caller can recover by
-// setting a new deadline, as net.Conn does.
-//
-// It reports bools rather than returning the stop func it would rather
-// return, because a closure over c is a heap allocation on every frame,
-// which would defeat the point of the mechanism.
-func (c *Conn) armWriteDeadline() (expired, armed bool) {
-	deadline := c.writeDeadline.Load()
-	if deadline == noDeadline {
-		return false, false
-	}
-
-	d := time.Until(time.Unix(0, deadline))
-	if d <= 0 {
-		return true, false
-	}
-	c.writeDeadlineTimer.Reset(d)
-	return false, true
-}
-
-// stopWriteDeadline disarms the deadline of a frame that is done, and reports
-// whether it beat the timer. False means the deadline passed mid-frame and
-// the timer has closed, or is about to close, the connection.
-func (c *Conn) stopWriteDeadline() bool { return c.writeDeadlineTimer.Stop() }
 
 func (c *Conn) clearWriteTimeout() {
 	swapTimeoutStop(&c.writeTimeoutStop, nil)

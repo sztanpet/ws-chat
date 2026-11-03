@@ -324,9 +324,9 @@ needs a fork, and forking drops the module out of `govulncheck`.** The
 difference is that this one is worth taking upstream on the strength of the
 numbers rather than filed as a curiosity.
 
-**Both halves of it are in
-[`code-websocket-pr/`](../code-websocket-pr/README.md)**, and the library
-half is now a pushed branch — `feat/conn-set-write-deadline` at `9f84ce4`
+**Both halves of it were in `code-websocket-pr/`**, removed with the fork
+(see "The deadline moved to the socket" below; it is in git history), and
+the library half is a pushed branch — `feat/conn-set-write-deadline` at `9f84ce4`
 in the fork, off upstream `master` at `9c8faad`. That directory holds the
 patch, the caller-side patch, the PR description and the commands to
 reproduce every number. Measured against the pushed commit: **zero sampled
@@ -700,6 +700,37 @@ body encodes to **163 bytes as JSON and 140 as MessagePack** (envelope 99
 and 76), so 600k deliveries/s is ~99MB/s or ~790Mbit/s: **a 1GbE link is
 the wall within a few percent of where this VM's CPU is**. On better
 hardware the NIC is what needs sizing first.
+
+## The deadline moved to the socket, and the fork went (3 Nov 2026)
+
+`SetWriteDeadline` turned out not to need the library. Stock v1.8.15
+already skips its timeout machinery when `Write` gets
+`context.Background()` (#566), so all the fork added was somewhere to keep
+the deadline, and the socket under the library keeps one too. `handleWS`
+hands `Accept` a `ResponseWriter` whose `Hijack` remembers the `net.Conn`
+it gives the library, and `armDeadline` sets the deadline there.
+
+What the fork did better is cosmetic here: a socket deadline that passes
+mid-frame leaves the stream at an unknown offset, where the fork closed the
+connection cleanly. A failed write closes it in either case, so nothing is
+written to that stream again.
+
+Interleaved against the fork, two runs each, 500 connections, 6 vCPUs, the
+generator on the same box:
+
+| deliveries/s | | fork | socket deadline |
+|---|---|---|---|
+| 49k | server cores | 0.54, 0.54 | 0.52, 0.53 |
+| | p50 / p99 | 1.92/6.14, 1.79/5.63ms | 2.05/6.66, 2.05/6.14ms |
+| 399k | server cores | 2.48, 2.53 | 2.47, 2.47 |
+| | p50 / p99 | 5.12/53, 4.61/53ms | 5.12/66, 5.12/131ms |
+
+CPU is level. The p99s at 399k lean the fork's way, but tails at that load
+are wide run to run, and batching the writes (below) takes them to ~25ms
+either way. Garbage stays at a few bytes per delivery for both: 3-27MB per
+20s window against 1-8 million deliveries. The whole suite passes under
+`-race`, the stalled-reader tests included, and `govulncheck` covers the
+module again.
 
 ## Pending
 

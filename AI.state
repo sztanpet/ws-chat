@@ -40,8 +40,9 @@ go1.27.3, nothing else moved (`state/ci.md`).
   staticcheck unpinned, then it and `go vet` folded into golangci-lint —
   `make lint` is one command over one binary.
 - **2026-11-03** — toolchain go1.27.3; no module moved; websocket fork
-  stays. Fan-out review: join/sweep race fixed, ring ordering lock made
-  per channel, `CondRing` deleted.
+  dropped, the write deadline moved to the socket under the library.
+  Fan-out review: join/sweep race fixed, ring ordering lock made per
+  channel, `CondRing` deleted.
 
 ## Key decisions
 
@@ -84,31 +85,19 @@ go1.27.3, nothing else moved (`state/ci.md`).
   `Ring` stays as the reference implementation.
 - **The fan-out is not the bottleneck and further fan-out work will not
   move the server.** Profiled at both loads: under 5% of CPU healthy, under
-  1% collapsing, no attributable allocation. The server is `write(2)` (two
-  thirds of CPU) and `coder/websocket`'s per-`Write` deadline context
-  (~700 bytes per delivered message, 87% of garbage under overload). The
-  library has no `SetWriteDeadline`, so that allocation needs the library
-  changed, not the server. Spend optimisation effort there or on a second
-  machine, not here.
-- **The server now bounds writes with `Conn.SetWriteDeadline`, on a pinned
-  fork of `coder/websocket`, and that pin is temporary.** `go.mod` carries a
-  directory `replace` to the fork with the revert instructions beside it;
-  the code is vendored, so CI and a fresh clone build without the fork and
-  only `make vendor` needs it. This is the one place the repo knowingly
-  depends on unreleased upstream code — revert it the moment
-  `SetWriteDeadline` is in a release. Why it was worth doing:
-- **`SetWriteDeadline` on `coder/websocket`'s `Conn` is the one
-  optimisation left that is worth real effort — upstream, not as a fork.**
-  Built and measured: garbage per delivered message goes from 729 bytes to
-  **4.9**, CPU for identical work drops 12%, and mean latency 15%, at the
-  STEADY load where every other change in this repo has been a wash. The
-  write path ends up allocating nothing; what is left is connection setup.
-  A deadline is an instant, and an instant needs no allocation, where a
-  context needs a `WithTimeout` in the caller and an `AfterFunc` in the
-  library. Not adopted only because a fork leaves `govulncheck`'s view of
-  RFC 6455 parsing code. **The submittable PR — patch, tests, written
-  message, reproduction steps — is in `code-websocket-pr/`**; the numbers
-  and the two gotchas are in `state/loadgen.md`.
+  1% collapsing, no attributable allocation. The server is `write(2)`, two
+  thirds of CPU then and more once the per-write context below went. Spend
+  optimisation effort there or on a second machine, not here.
+- **Writes are bounded by a deadline on the socket under `coder/websocket`,
+  not by a context and not by a fork.** A context per write cost 729 bytes
+  of garbage per delivered message; a deadline costs nothing, and took CPU
+  for identical work down 12% and mean latency 15% at the STEADY load where
+  every other change in this repo has been a wash. It ran on a fork adding
+  `Conn.SetWriteDeadline` until 2026-11-03, when the same deadline set on
+  the hijacked `net.Conn` measured the same on stock v1.8.15 and the module
+  came back into `govulncheck`'s view. The deadline is shared by every
+  writer on the connection, so the last one out clears it. Numbers in
+  `state/loadgen.md`.
 - **The cheaper variant, memoising the armed context, is not worth it.**
   It removes the per-frame amplification under overload and changes
   nothing at steady load, where batches are one frame. Superseded by the

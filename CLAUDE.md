@@ -64,19 +64,20 @@ private message arrives on *somebody else's* read pump, so this is not
 theoretical: without it, one person who stopped reading would stall
 everyone who messages them.
 
-The deadline is set with `Conn.SetWriteDeadline` and the write itself gets
-`context.Background()`, because a context per frame cost a `WithTimeout`
-here and a `context.AfterFunc` in the library — ~700 bytes of garbage per
-delivered message, *per member* of the room, and 99% of everything the
-server allocated. An instant costs one atomic store.
+The deadline is set on the socket under the library and the write itself
+gets `context.Background()`, because a context per frame cost a
+`WithTimeout` here and a `context.AfterFunc` in the library — ~700 bytes
+of garbage per delivered message, *per member* of the room, and 99% of
+everything the server allocated. A socket deadline allocates nothing.
+`coder/websocket` has no write deadline of its own, so `handleWS` hands
+`Accept` a `ResponseWriter` whose `Hijack` keeps the connection it gives
+the library. The library never learns of the deadline, which is harmless:
+one that passes mid-frame leaves the stream at an unknown offset, and a
+failed write closes the connection anyway.
 The deadline belongs to the connection, not to a write, and several
 goroutines write to one connection at once, so **they count themselves in
 and out and only the last one clears it**. Clearing it out from under a
 writer that is still going leaves that write with no bound at all.
-**`SetWriteDeadline` is not in a released `coder/websocket`**: `go.mod`
-pins a fork of it pending the PR in `code-websocket-pr/`, and the revert
-instructions live beside that `replace` directive. The code is vendored, so
-only `make vendor` needs the fork checked out beside this repo.
 
 Fan-out is `internal/broadcast`. The shape is a shared buffer with each
 subscriber reading at its own position, so a broadcast is O(1) in the
