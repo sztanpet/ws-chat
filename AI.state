@@ -6,22 +6,19 @@ only when you are touching that track.
 
 ## Latest
 
-**Optimisation round, 2026-11-03.** Four commits, each measured on the
-same box at 500 connections. **The production build had shipped `-race`
-since the skeleton**; `make build` is `CGO_ENABLED=0` now (`07f8035`), 0.56
-cores instead of 1.33 at 49k deliveries/s (`state/ci.md`). **Found while
-measuring:** every writer on a connection shares one write deadline and
-each cleared it on the way out, so a client that stopped reading could
-hold a write with no bound, and a channel ban against it would hang the
-moderator (`a6bb49b`, gotcha 15 in `state/server.md`). **The websocket
-fork is gone**: the deadline is set on the hijacked socket under stock
-v1.8.15 at the same cost, and govulncheck covers the module again
-(`cc40cba`). **A batch is one `write(2)`** through `corkConn`
-(`7c4b0e9`): a fifth less CPU and half the latency at 400k deliveries/s,
-13% more delivered at the knee, nothing at light load
-(`state/loadgen.md`). The comments that work added were then cut to
-the why. Earlier the same day: the fan-out review
-(`state/broadcast.md`) and toolchain go1.27.3 (`state/ci.md`).
+**Every comment cut to the why, 2026-11-03.** The whole tree, not just
+new code: Go, the Makefile, the pipeline, the lint config and
+`config_default.hujson`. Each comment is the one non-obvious why, in a
+line (two for a concurrency argument). Narration, history, doc comments
+restating a name, and banners are gone, and so are the stale notes:
+"once channels exist", "until there is a login". Go comment lines went
+from 2,754 to 347. One commit per package, `ae6a7a6` (proto) to
+`6d30a78` (build). Each was checked by stripping comments and comparing
+the token stream with its parent's, so no code moved. No track file:
+the reasoning the comments carried is in CLAUDE.md and `state/`, and
+the stories are in the log. Before that, the same day: the optimisation
+round (`state/server.md` gotchas 15-16, `state/loadgen.md`,
+`state/ci.md`) and the fan-out review (`state/broadcast.md`).
 
 ## State file index
 
@@ -47,7 +44,7 @@ the why. Earlier the same day: the fan-out review
   Fan-out review: join/sweep race fixed, ring ordering lock made per
   channel, `CondRing` deleted. Production build without `-race`; the
   shared write deadline no longer cleared under a writer still going;
-  one `write(2)` per batch.
+  one `write(2)` per batch. Every comment in the tree cut to the why.
 
 ## Key decisions
 
