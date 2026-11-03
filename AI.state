@@ -6,19 +6,21 @@ only when you are touching that track.
 
 ## Latest
 
-**Fan-out review, 2026-11-03.** `SeqRing` reviewed and fit for purpose.
-The two bugs were in the caller. **A join could land in a channel the
-janitor was reclaiming** (`78844cc`): the member was added after the
-channel was found, so a sweep in between dropped the channel and left
-the joiner talking into a closed ring with no error. It now joins the
-member list under `channelsMu`. **The lock ordering a channel's rings
-was server-wide** (`d6e137f`), despite a comment saying per channel. It
-is per channel now, with `seq` still global. Also: the package no longer
-claims a batch is one socket write (`ce78ec9`, it is one `write(2)` per
-frame), and the rejected `CondRing` is gone (`22b4bfb`). A third, found
-alongside them, is fixed too: a channel ban could miss a join already in
-flight, and `join` now checks the ban again after it has a membership. Earlier the same day: toolchain
-go1.27.3, nothing else moved (`state/ci.md`).
+**Optimisation round, 2026-11-03.** Four commits, each measured on the
+same box at 500 connections. **The production build had shipped `-race`
+since the skeleton**; `make build` is `CGO_ENABLED=0` now (`07f8035`), 0.56
+cores instead of 1.33 at 49k deliveries/s (`state/ci.md`). **Found while
+measuring:** every writer on a connection shares one write deadline and
+each cleared it on the way out, so a client that stopped reading could
+hold a write with no bound, and a channel ban against it would hang the
+moderator (`a6bb49b`, gotcha 15 in `state/server.md`). **The websocket
+fork is gone**: the deadline is set on the hijacked socket under stock
+v1.8.15 at the same cost, and govulncheck covers the module again
+(`cc40cba`). **A batch is one `write(2)`** through `corkConn`
+(`7c4b0e9`): a fifth less CPU and half the latency at 400k deliveries/s,
+13% more delivered at the knee, nothing at light load
+(`state/loadgen.md`). Earlier the same day: the fan-out review
+(`state/broadcast.md`) and toolchain go1.27.3 (`state/ci.md`).
 
 ## State file index
 
@@ -42,7 +44,9 @@ go1.27.3, nothing else moved (`state/ci.md`).
 - **2026-11-03** — toolchain go1.27.3; no module moved; websocket fork
   dropped, the write deadline moved to the socket under the library.
   Fan-out review: join/sweep race fixed, ring ordering lock made per
-  channel, `CondRing` deleted.
+  channel, `CondRing` deleted. Production build without `-race`; the
+  shared write deadline no longer cleared under a writer still going;
+  one `write(2)` per batch.
 
 ## Key decisions
 

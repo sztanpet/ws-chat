@@ -197,8 +197,8 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   `typecheck`. CI's `golang:1.27` image fetches the newer pin itself
   under `GOTOOLCHAIN=auto`, the same way go1.27.1 arrived.
 
-- **`make build` no longer ships the race detector.** It had built with
-  `-race` since the skeleton, so CI's build step did too.
+- **`make build` no longer ships the race detector** (`07f8035`). It
+  had built with `-race` since the skeleton, so CI's build step did too.
   `kikapcsologo/backend` dropped it on 2026-10-05 (`7ebc4fb`) and this
   repo never followed. Same box, same load (500 connections, ~49k
   deliveries/s):
@@ -212,12 +212,12 @@ Working state for `.woodpecker.yaml` and the Makefile targets around it.
   is `CGO_ENABLED=0` like the sibling's: statically linked, no C toolchain.
   The Debian image stays, because `make test-race` still needs cgo.
 
-- **No `replace` directive any more.** The write deadline moved from the
-  fork's `Conn.SetWriteDeadline` to the socket under the library
-  (`state/loadgen.md`), so coder/websocket is upstream v1.8.15 again,
-  vendored with its `go.sum` lines back. `make vendor` no longer needs
-  `../coder-websocket` checked out beside the repo, and `make vulncheck`
-  sees the module again: clean.
+- **No `replace` directive any more** (`cc40cba`). The write deadline
+  moved from the fork's `Conn.SetWriteDeadline` to the socket under the
+  library (`state/loadgen.md`), so coder/websocket is upstream v1.8.15
+  again, vendored with its `go.sum` lines back. `make vendor` no longer
+  needs `../coder-websocket` checked out beside the repo, and `make
+  vulncheck` sees the module again: clean.
 
 ## Decisions
 

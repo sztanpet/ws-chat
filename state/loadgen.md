@@ -701,7 +701,7 @@ and 76), so 600k deliveries/s is ~99MB/s or ~790Mbit/s: **a 1GbE link is
 the wall within a few percent of where this VM's CPU is**. On better
 hardware the NIC is what needs sizing first.
 
-## The deadline moved to the socket, and the fork went (3 Nov 2026)
+## The deadline moved to the socket, and the fork went (3 Nov 2026, `cc40cba`)
 
 `SetWriteDeadline` turned out not to need the library. Stock v1.8.15
 already skips its timeout machinery when `Write` gets
@@ -732,7 +732,7 @@ either way. Garbage stays at a few bytes per delivery for both: 3-27MB per
 `-race`, the stalled-reader tests included, and `govulncheck` covers the
 module again.
 
-## One write(2) per batch (3 Nov 2026)
+## One write(2) per batch (3 Nov 2026, `7c4b0e9`)
 
 coder/websocket flushes its `bufio.Writer` after every message, and a frame
 is a message, so a pump draining a batch of sixteen made sixteen
