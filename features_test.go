@@ -17,8 +17,6 @@ import (
 	"github.com/sztanpet/ws-chat/internal/proto"
 )
 
-// --- backlog ---------------------------------------------------------
-
 func TestBacklogReplay(t *testing.T) {
 	ta := newTestApp(t)
 	alice := ta.dial(t)
@@ -32,8 +30,6 @@ func TestBacklogReplay(t *testing.T) {
 		alice.expectMsg("", fmt.Sprintf("message %d", i))
 	}
 
-	// Somebody arriving now sees what was said, in order, before anything
-	// live.
 	bob := ta.dial(t)
 	if len(bob.backlog) != 3 {
 		t.Fatalf("backlog has %d messages, want 3", len(bob.backlog))
@@ -50,7 +46,6 @@ func TestBacklogReplay(t *testing.T) {
 		}
 	}
 
-	// And then live traffic follows it.
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "live"})
 	bob.expectMsg(alice.nick, "live")
 }
@@ -68,7 +63,6 @@ func TestBacklogIsCapped(t *testing.T) {
 	if len(bob.backlog) != 3 {
 		t.Fatalf("backlog has %d messages, want the cap of 3", len(bob.backlog))
 	}
-	// The LAST three, not the first three.
 	for i, msg := range bob.backlog {
 		if want := fmt.Sprintf("m%d", i+3); msg.Data != want {
 			t.Errorf("backlog[%d] = %q, want %q", i, msg.Data, want)
@@ -83,8 +77,7 @@ func TestBacklogDisabled(t *testing.T) {
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "said before you arrived"})
 	alice.expectMsg("", "said before you arrived")
 
-	// dial asserts the frame sequence, so getting here at all means no
-	// BACKLOG frame was sent. The next frame bob sees is live.
+	// dial asserts the frame sequence, so reaching here means no BACKLOG came.
 	bob := ta.dial(t)
 	if len(bob.backlog) != 0 {
 		t.Fatalf("backlog disabled but %d messages arrived", len(bob.backlog))
@@ -93,7 +86,6 @@ func TestBacklogDisabled(t *testing.T) {
 	bob.expectMsg(alice.nick, "live")
 }
 
-// Private messages are not channel history and must not turn up in it.
 func TestBacklogExcludesPrivateMessages(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
@@ -110,8 +102,6 @@ func TestBacklogExcludesPrivateMessages(t *testing.T) {
 	}
 }
 
-// The backlog is written under the lock that orders the fan-out, so what a
-// joining client is shown cannot disagree with what the room saw.
 func TestBacklogOrderMatchesDelivery(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
@@ -140,8 +130,6 @@ func TestBacklogOrderMatchesDelivery(t *testing.T) {
 		}
 	}
 }
-
-// --- data attached to a user's messages -------------------------------
 
 func TestMessagesCarryRolesAndAttrs(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
@@ -174,8 +162,6 @@ func TestMessagesCarryRolesAndAttrs(t *testing.T) {
 		}
 	}
 
-	// Somebody with nothing attached carries nothing, rather than empty
-	// collections on every message.
 	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "plain"})
 	msg := alice.expectMsg("bob", "plain")
 	if len(msg.Roles) != 0 || len(msg.Attrs) != 0 {
@@ -200,11 +186,9 @@ func TestPrivateMessagesCarryRolesAndAttrs(t *testing.T) {
 
 	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: "bob", Data: "hi"})
 
-	// The recipient's copy describes the sender.
 	if got := bob.expectPriv("hi"); len(got.Roles) != 1 || got.Roles[0] != "mod" {
 		t.Errorf("recipient sees roles %v, want the sender's [mod]", got.Roles)
 	}
-	// The sender's echo describes the recipient.
 	if echo := alice.expectPriv("hi"); len(echo.Roles) != 1 || echo.Roles[0] != "sub" {
 		t.Errorf("sender's echo has roles %v, want the recipient's [sub]", echo.Roles)
 	}
@@ -235,10 +219,7 @@ func TestBacklogCarriesRolesAndAttrs(t *testing.T) {
 	}
 }
 
-// --- filters ----------------------------------------------------------
-
-// A MessagePack client sends binary frames, which nothing validates, so
-// this is the path invalid UTF-8 can actually arrive by.
+// Over MessagePack: binary frames are the only way invalid UTF-8 arrives.
 func TestInvalidUTF8Refused(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dialCodec(t, proto.MsgPack{})
@@ -246,7 +227,6 @@ func TestInvalidUTF8Refused(t *testing.T) {
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "well \xff hello"})
 	c.expectErr(filter.ReasonInvalidUTF8)
 
-	// And the connection survives it.
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "fine now"})
 	c.expectMsg("", "fine now")
 }
@@ -259,11 +239,9 @@ func TestZalgoRefused(t *testing.T) {
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "h" + strings.Repeat(combining, 20)})
 	c.expectErr(filter.ReasonZalgo)
 
-	// Five is allowed; the default threshold is generous on purpose.
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "h" + strings.Repeat(combining, 5)})
 	c.expectMsg("", "h"+strings.Repeat(combining, 5))
 
-	// Normal text that uses marks is unaffected.
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "Tiếng Việt"})
 	c.expectMsg("", "Tiếng Việt")
 }
@@ -288,19 +266,15 @@ func TestFiltersCanBeDisabled(t *testing.T) {
 	c.expectMsg("", data)
 }
 
-// The built-in filters run in front of a hook filter, and the hook still
-// gets its say on what the built-ins allow.
 func TestBuiltInFiltersRunBeforeTheHook(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Filter: fakeFilter{deny: "badword", reason: "muted"},
 	})
 	c := ta.dial(t)
 
-	// Zalgo is caught by a built-in even though the hook would allow it.
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "h" + strings.Repeat("́", 20)})
 	c.expectErr(filter.ReasonZalgo)
 
-	// The hook still refuses what it refuses.
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "badword"})
 	c.expectErr("muted")
 
@@ -316,23 +290,12 @@ func TestFiltersApplyToPrivateMessages(t *testing.T) {
 	alice.expectErr(filter.ReasonZalgo)
 }
 
-// --- watching without talking ------------------------------------------
-
-// optionalAuth is the auth layer of a server anybody may watch: a token
-// names the connection, and no token leaves the identity zero instead of
-// refusing the upgrade. That zero identity is what "unregistered" means
-// below — nobody claimed this connection.
 type optionalAuth map[string]hook.Identity
 
 func (o optionalAuth) Authenticate(ctx context.Context, r hook.Request) (hook.Identity, error) {
 	return o[r.Query("token")], nil
 }
 
-// registeredOnly is the whole of the "logged out means read-only" policy.
-//
-// It is a Filter because who may talk is policy and the core has no opinion
-// about it, and the identity a filter is handed is the one Authenticate
-// produced — so the question is one field.
 type registeredOnly struct{}
 
 func (registeredOnly) Allow(ctx context.Context, from hook.Identity, data string) (bool, string) {
@@ -342,7 +305,6 @@ func (registeredOnly) Allow(ctx context.Context, from hook.Identity, data string
 	return true, ""
 }
 
-// An unregistered connection sees everything and says nothing.
 func TestUnregisteredMayWatchButNotTalk(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth:   optionalAuth{"a": {ID: "u1", Nick: "alice"}},
@@ -356,8 +318,6 @@ func TestUnregisteredMayWatchButNotTalk(t *testing.T) {
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "said before anybody watched"})
 	alice.expectMsg("alice", "said before anybody watched")
 
-	// No token and no refusal: the connection is served, and named as the
-	// anonymous connection it is.
 	watcher, err := ta.dialWith(t, "")
 	if err != nil {
 		t.Fatalf("dial the watcher: %v", err)
@@ -366,33 +326,25 @@ func TestUnregisteredMayWatchButNotTalk(t *testing.T) {
 		t.Fatalf("watcher nick = %q, want an assigned anonymous name", watcher.nick)
 	}
 
-	// It arrives with the history...
 	if len(watcher.backlog) != 1 || watcher.backlog[0].Data != "said before anybody watched" {
 		t.Fatalf("watcher backlog = %v, want the one message", watcher.backlog)
 	}
 
-	// ...and is fed the live traffic.
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "live"})
 	alice.expectMsg("alice", "live")
 	watcher.expectMsg("alice", "live")
 
-	// What it cannot do is talk, in the channel or privately.
 	watcher.send(proto.Command{Verb: proto.VerbMsg, Data: "let me in"})
 	watcher.expectErr(proto.ErrNeedLogin)
 	watcher.send(proto.Command{Verb: proto.VerbPriv, Nick: "alice", Data: "let me in"})
 	watcher.expectErr(proto.ErrNeedLogin)
 
-	// A refusal is a refusal and not a disconnection: it is still in the room
-	// and still being fed. Anything that had escaped the filter would be the
-	// frame these two read instead.
+	// Anything that escaped the filter would be what these two read instead.
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "still talking"})
 	alice.expectMsg("alice", "still talking")
 	watcher.expectMsg("alice", "still talking")
 }
 
-// Watching is more than receiving. The verbs that are not speech stay open,
-// or a read-only client cannot follow the conversation into another room or
-// see who is in it.
 func TestUnregisteredMayStillJoinAndSee(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth:   optionalAuth{"a": {ID: "u1", Nick: "alice"}},
@@ -425,11 +377,7 @@ func TestUnregisteredMayStillJoinAndSee(t *testing.T) {
 	}
 }
 
-// --- moderation -------------------------------------------------------
-
-// fakeAuthz answers per scope: the "mod" role runs a channel, and only
-// "admin" may act server-wide. Keeping those separate is the point of the
-// scope being passed in.
+// "mod" runs a channel; only "admin" acts server-wide.
 type fakeAuthz struct{}
 
 func (fakeAuthz) CanModerate(ctx context.Context, id hook.Identity, channel string) bool {
@@ -439,8 +387,6 @@ func (fakeAuthz) CanModerate(ctx context.Context, id hook.Identity, channel stri
 	return id.Has("mod") || id.Has("admin")
 }
 
-// modApp builds a server with a moderator, a normal user, and moderation
-// authorization wired up.
 func modApp(t *testing.T, hooks hook.Hooks, tweak ...func(*config.Config)) (*testApp, *client, *client) {
 	t.Helper()
 
@@ -472,7 +418,6 @@ func modApp(t *testing.T, hooks hook.Hooks, tweak ...func(*config.Config)) (*tes
 	return ta, mod, user
 }
 
-// expectMod reads one frame and requires it to be a moderation action.
 func (c *client) expectMod(action, nick string) proto.Mod {
 	c.t.Helper()
 	verb, payload := c.nextInteresting()
@@ -490,8 +435,6 @@ func (c *client) expectMod(action, nick string) proto.Mod {
 	return m
 }
 
-// Default deny: a server that has not been told who its moderators are has
-// none.
 func TestModerationDeniedByDefault(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
@@ -499,7 +442,6 @@ func TestModerationDeniedByDefault(t *testing.T) {
 	alice.send(proto.Command{Verb: proto.VerbMute, Nick: bob.nick, Channel: "main"})
 	alice.expectErr(proto.ErrForbidden)
 
-	// And nothing happened to bob.
 	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "still talking"})
 	bob.expectMsg("", "still talking")
 }
@@ -510,7 +452,6 @@ func TestNonModeratorRefused(t *testing.T) {
 	user.send(proto.Command{Verb: proto.VerbMute, Nick: "themod"})
 	user.expectErr(proto.ErrForbidden)
 
-	// The moderator saw nothing, because nothing happened.
 	mod.send(proto.Command{Verb: proto.VerbMsg, Data: "still here"})
 	mod.expectMsg("themod", "still here")
 }
@@ -520,7 +461,6 @@ func TestMuteSilences(t *testing.T) {
 
 	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main", Reason: "spam"})
 
-	// Everybody is told, including the person it is about.
 	for _, c := range []*client{mod, user} {
 		m := c.expectMod(proto.ActionMute, "auser")
 		if m.By != "themod" {
@@ -537,14 +477,10 @@ func TestMuteSilences(t *testing.T) {
 	user.send(proto.Command{Verb: proto.VerbMsg, Data: "can i talk"})
 	user.expectErr(proto.ErrMuted)
 
-	// A mute is not a disconnect: the user still receives.
 	mod.send(proto.Command{Verb: proto.VerbMsg, Data: "you cannot"})
 	user.expectMsg("themod", "you cannot")
 }
 
-// A channel mute is about that channel. Somebody silenced in one room may
-// still talk to people directly, because a channel mute is not a statement
-// that they may not talk to anybody at all.
 func TestChannelMuteDoesNotBlockPrivateMessages(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
@@ -557,7 +493,6 @@ func TestChannelMuteDoesNotBlockPrivateMessages(t *testing.T) {
 	user.expectPriv("let me out")
 }
 
-// A server-wide mute does block them.
 func TestGlobalMuteBlocksPrivateMessages(t *testing.T) {
 	ta, _, user := modApp(t, hook.Hooks{})
 
@@ -633,21 +568,16 @@ func TestServerWideBanDisconnectsAndRefusesReconnection(t *testing.T) {
 		t.Fatalf("dial the admin: %v", err)
 	}
 
-	// No channel means server-wide, which only an admin may do here.
+	// No channel: server-wide, which only an admin may do.
 	admin.send(proto.Command{Verb: proto.VerbBan, Nick: "auser", Reason: "enough"})
 
-	// The room is told.
 	mod.expectMod(proto.ActionBan, "auser")
 
-	// The banned client is disconnected with a reason. It may or may not
-	// see the MOD frame first — its write pump is racing its own socket
-	// being closed — so expectClosed drains whatever arrived and asserts
-	// on the close itself.
+	// It may see the MOD or not, so expectClosed drains and checks the close.
 	if code := user.expectClosed(); code != websocket.StatusPolicyViolation {
 		t.Fatalf("closed with %v, want %v", code, websocket.StatusPolicyViolation)
 	}
 
-	// And coming back is refused before the upgrade.
 	if _, err = ta.dialWith(t, "?token=user"); err == nil {
 		t.Fatal("a banned user reconnected")
 	} else if !strings.Contains(err.Error(), "403") {
@@ -655,9 +585,6 @@ func TestServerWideBanDisconnectsAndRefusesReconnection(t *testing.T) {
 	}
 }
 
-// Unbanning names somebody who is by definition not connected, which is
-// the case that could not work at all before the directory could resolve a
-// name.
 func TestUnbanSomebodyWhoIsGone(t *testing.T) {
 	ta, _, user := modApp(t, hook.Hooks{})
 
@@ -670,14 +597,8 @@ func TestUnbanSomebodyWhoIsGone(t *testing.T) {
 	admin.expectMod(proto.ActionBan, "auser")
 	user.expectClosed()
 
-	// expectClosed only proves the CLIENT saw the close frame. The server
-	// tears the connection down afterwards on its own goroutine, and until
-	// that finishes the banned user is still in the directory and still a
-	// member of main — which would make the unban below a server-wide
-	// action with a target to announce, and it would be broadcast into
-	// main. Its own PART is the last thing that teardown does, and it is
-	// broadcast after the connection has left the directory, so waiting for
-	// it here is what makes everything below deterministic.
+	// Wait for the teardown's PART, its last act: until then the banned user is
+	// still in the directory, and the unban below would have a target.
 	admin.expectPart("main", "auser")
 
 	if _, err = ta.dialWith(t, "?token=user"); err == nil {
@@ -686,15 +607,9 @@ func TestUnbanSomebodyWhoIsGone(t *testing.T) {
 
 	admin.send(proto.Command{Verb: proto.VerbUnban, Nick: "auser"})
 
-	// Wait for it to have happened before testing that it happened:
-	// dialling straight after sending races the read pump handling it, and
-	// fails on a loaded machine. There is no MOD frame to wait for instead
-	// — this unban is announced to nobody, because the person it concerns
-	// is not in the room, which is the point of the test.
+	// Synced, as there is no MOD to wait for: the unban is announced to nobody.
 	admin.sync()
 
-	// And they can come back, which is the whole point of being able to
-	// lift a ban.
 	back, err := ta.dialWith(t, "?token=user")
 	if err != nil {
 		t.Fatalf("an unbanned user still cannot connect: %v", err)
@@ -703,8 +618,6 @@ func TestUnbanSomebodyWhoIsGone(t *testing.T) {
 	back.expectMsg("auser", "back again")
 }
 
-// Without a directory the server can still only act on who it can see,
-// which is the behaviour a deployment that installs nothing gets.
 func TestModerationWithoutADirectoryIsLimitedToTheConnected(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth: fakeAuth{byToken: map[string]hook.Identity{
@@ -722,7 +635,6 @@ func TestModerationWithoutADirectoryIsLimitedToTheConnected(t *testing.T) {
 	mod.expectErr(proto.ErrNoSuch)
 }
 
-// Somebody who says something and disconnects is no longer out of reach.
 func TestModerationOfSomebodyWhoLeft(t *testing.T) {
 	ta, mod, user := modApp(t, hook.Hooks{})
 
@@ -732,15 +644,12 @@ func TestModerationOfSomebodyWhoLeft(t *testing.T) {
 	_ = user.ws.CloseNow()
 	mod.expectPart("main", "auser")
 
-	// Muted after leaving. The room is told, because the room is where the
-	// thing that earned it happened.
 	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
 	m := mod.expectMod(proto.ActionMute, "auser")
 	if m.Nick != "auser" {
 		t.Fatalf("the action names %q", m.Nick)
 	}
 
-	// And it is waiting for them when they come back.
 	back, err := ta.dialWith(t, "?token=user")
 	if err != nil {
 		t.Fatalf("reconnect: %v", err)
@@ -749,8 +658,6 @@ func TestModerationOfSomebodyWhoLeft(t *testing.T) {
 	back.expectErr(proto.ErrMuted)
 }
 
-// The action is filed against the resolved identity, not the name, so it
-// still applies when they reconnect under the same account.
 func TestOfflineModerationUsesTheStableIdentity(t *testing.T) {
 	store := newFakeSanctions()
 	ta, mod, user := modApp(t, hook.Hooks{Sanctions: store})
@@ -778,7 +685,6 @@ func TestOfflineModerationUsesTheStableIdentity(t *testing.T) {
 	back.expectErr(proto.ErrMuted)
 }
 
-// A directory that does not know the name is a miss, not a guess.
 func TestUnknownNickIsStillRefused(t *testing.T) {
 	_, mod, _ := modApp(t, hook.Hooks{})
 
@@ -822,8 +728,6 @@ func TestModerationIsRecorded(t *testing.T) {
 	}
 }
 
-// Moderation actions are announced to the channel but are not chat, so
-// they do not join the replay history.
 func TestModerationIsNotInTheBacklog(t *testing.T) {
 	ta, mod, user := modApp(t, hook.Hooks{})
 
@@ -840,9 +744,6 @@ func TestModerationIsNotInTheBacklog(t *testing.T) {
 	}
 }
 
-// --- the history hook -------------------------------------------------
-
-// fakeHistory serves a canned window and records what it was handed.
 type fakeHistory struct {
 	mu       sync.Mutex
 	appended []hook.Message
@@ -890,8 +791,6 @@ func TestHistoryHookReplacesTheDefault(t *testing.T) {
 	if c.backlog[0].Timestamp != 1700000000000 {
 		t.Errorf("timestamp = %d, want the hook's", c.backlog[0].Timestamp)
 	}
-	// Whatever the hook attached to the sender rides along, exactly as it
-	// does on a live message.
 	if roles := c.backlog[0].Roles; len(roles) != 1 || roles[0] != "mod" {
 		t.Errorf("roles = %v, want [mod]", roles)
 	}
@@ -926,7 +825,6 @@ func TestHistoryHookSeesDeliveredMessages(t *testing.T) {
 	if got.Data != "remember this" {
 		t.Errorf("data = %q", got.Data)
 	}
-	// The identity, not just the display name: a store wants the stable id.
 	if got.From.ID != "u1" {
 		t.Errorf("from = %q, want the stable id u1", got.From.ID)
 	}
@@ -935,7 +833,6 @@ func TestHistoryHookSeesDeliveredMessages(t *testing.T) {
 	}
 }
 
-// Private messages are not channel history.
 func TestHistoryHookDoesNotSeePrivateMessages(t *testing.T) {
 	hist := &fakeHistory{}
 	ta := newTestAppWith(t, hook.Hooks{History: hist})
@@ -952,7 +849,6 @@ func TestHistoryHookDoesNotSeePrivateMessages(t *testing.T) {
 	}
 }
 
-// A history that is having a bad day must not cost anybody a connection.
 func TestHistoryFailureIsNotFatal(t *testing.T) {
 	hist := &fakeHistory{fail: errors.New("archive on fire")}
 	ta := newTestAppWith(t, hook.Hooks{History: hist})
@@ -962,13 +858,10 @@ func TestHistoryFailureIsNotFatal(t *testing.T) {
 		t.Fatalf("a failing history produced %d messages", len(c.backlog))
 	}
 
-	// And the connection works.
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "still fine"})
 	c.expectMsg("", "still fine")
 }
 
-// Backlog=0 switches replay off whoever provides it, so a hook is not
-// consulted at all.
 func TestHistoryHookNotConsultedWhenDisabled(t *testing.T) {
 	hist := &fakeHistory{canned: []hook.Message{{ID: 1, Data: "would be replayed"}}}
 	ta := newTestAppWith(t, hook.Hooks{History: hist}, func(c *config.Config) { c.Backlog = 0 })
@@ -985,15 +878,10 @@ func TestHistoryHookNotConsultedWhenDisabled(t *testing.T) {
 	}
 }
 
-// --- moderation scope -------------------------------------------------
-
-// A mute in one channel is about that channel.
 func TestChannelMuteIsLocalToItsChannel(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
-	// Both move into a second room as well. Only the one already there
-	// sees the other arrive — presence is what happens while you are in
-	// the room, not a history of it.
+	// Only the one already there sees the other arrive: presence is not history.
 	for _, c := range []*client{mod, user} {
 		c.send(proto.Command{Verb: proto.VerbJoin, Channel: "second"})
 		c.expectJoined("second")
@@ -1004,19 +892,15 @@ func TestChannelMuteIsLocalToItsChannel(t *testing.T) {
 	mod.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
 
-	// Silenced in main...
 	user.send(proto.Command{Verb: proto.VerbMsg, Channel: "main", Data: "in main"})
 	user.expectErr(proto.ErrMuted)
 
-	// ...and not in second.
 	user.send(proto.Command{Verb: proto.VerbMsg, Channel: "second", Data: "in second"})
 	if got := user.expectMsg("auser", "in second"); got.Channel != "second" {
 		t.Fatalf("channel = %q, want second", got.Channel)
 	}
 }
 
-// A server-wide mute silences somebody in every channel, without having
-// been written into any of them.
 func TestGlobalMuteSilencesEverywhere(t *testing.T) {
 	ta, _, user := modApp(t, hook.Hooks{})
 
@@ -1028,7 +912,7 @@ func TestGlobalMuteSilencesEverywhere(t *testing.T) {
 	user.send(proto.Command{Verb: proto.VerbJoin, Channel: "second"})
 	user.expectJoined("second")
 
-	// Announced in every channel the target is in, so there are two.
+	// One announcement per channel the target is in: two.
 	admin.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
 	user.expectMod(proto.ActionMute, "auser")
 	user.expectMod(proto.ActionMute, "auser")
@@ -1039,36 +923,28 @@ func TestGlobalMuteSilencesEverywhere(t *testing.T) {
 	}
 }
 
-// Running one room is not permission to act across the server.
 func TestChannelModeratorCannotActGlobally(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
 	mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser"})
 	mod.expectErr(proto.ErrForbidden)
 
-	// And nothing happened.
 	user.send(proto.Command{Verb: proto.VerbMsg, Data: "still talking"})
 	user.expectMsg("auser", "still talking")
 }
 
-// A channel ban takes somebody out of that room and keeps them out,
-// without touching their connection or anywhere else they are.
 func TestChannelBanPartsAndBars(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 
 	mod.send(proto.Command{Verb: proto.VerbBan, Nick: "auser", Channel: "main", Reason: "enough"})
 	mod.expectMod(proto.ActionBan, "auser")
 
-	// The banned client is removed first and told why after, so the order
-	// is PART then MOD and there is exactly one of each.
 	user.expectPart("main", "auser")
 	user.expectMod(proto.ActionBan, "auser")
 
-	// Still connected — it can say so somewhere else.
 	user.send(proto.Command{Verb: proto.VerbJoin, Channel: "elsewhere"})
 	user.expectJoined("elsewhere")
 
-	// But it cannot come back.
 	user.send(proto.Command{Verb: proto.VerbJoin, Channel: "main"})
 	user.expectErr(proto.ErrBanned)
 }
@@ -1116,8 +992,6 @@ func TestChannelBanCatchesAJoinInFlight(t *testing.T) {
 	user.expectErr(proto.ErrNotJoined)
 }
 
-// A channel ban outranks an autojoin: a layer putting somebody somewhere
-// does not overrule a moderator who threw them out of it.
 func TestChannelBanBeatsAutojoin(t *testing.T) {
 	ta, mod, user := modApp(t, hook.Hooks{
 		Channels: fakeChannels{autojoin: []string{"main"}},
@@ -1128,8 +1002,6 @@ func TestChannelBanBeatsAutojoin(t *testing.T) {
 	user.expectPart("main", "auser")
 	user.expectMod(proto.ActionBan, "auser")
 
-	// The ban is filed against the identity, so reconnecting does not shake
-	// it off — the same account comes back and lands nowhere.
 	back, err := ta.dialWith(t, "?token=user")
 	if err != nil {
 		t.Fatalf("reconnect: %v", err)
@@ -1139,8 +1011,6 @@ func TestChannelBanBeatsAutojoin(t *testing.T) {
 	}
 }
 
-// The scope travels with the announcement, so a client can tell "muted
-// here" from "muted everywhere".
 func TestModFrameCarriesItsScope(t *testing.T) {
 	ta, mod, user := modApp(t, hook.Hooks{})
 
@@ -1168,10 +1038,6 @@ func TestModFrameCarriesItsScope(t *testing.T) {
 	}
 }
 
-// --- sanctions surviving a restart ------------------------------------
-
-// fakeSanctions is a store that keeps what it is told, so a second server
-// can be handed the first one's state.
 type fakeSanctions struct {
 	mu       sync.Mutex
 	active   map[string]hook.Moderation // by scope+key+action
@@ -1221,7 +1087,6 @@ func (f *fakeSanctions) Active(ctx context.Context) ([]hook.Moderation, error) {
 	return out, nil
 }
 
-// waitFor blocks until the background worker has persisted n actions.
 func (f *fakeSanctions) waitFor(t *testing.T, n int) {
 	t.Helper()
 	for range n {
@@ -1233,12 +1098,9 @@ func (f *fakeSanctions) waitFor(t *testing.T, n int) {
 	}
 }
 
-// The point of the whole hook: a mute issued by one server is still in
-// force on the next one.
 func TestMutesSurviveARestart(t *testing.T) {
 	store := newFakeSanctions()
 
-	// First server: mute somebody, and let it reach the store.
 	func() {
 		_, mod, user := modApp(t, hook.Hooks{Sanctions: store})
 		mod.send(proto.Command{Verb: proto.VerbMute, Nick: "auser", Channel: "main"})
@@ -1247,15 +1109,11 @@ func TestMutesSurviveARestart(t *testing.T) {
 		store.waitFor(t, 1)
 	}()
 
-	// Second server, same store. The user comes back to find it still
-	// applies, without anybody having to re-issue it.
 	_, _, user := modApp(t, hook.Hooks{Sanctions: store})
 	user.send(proto.Command{Verb: proto.VerbMsg, Data: "am i free"})
 	user.expectErr(proto.ErrMuted)
 }
 
-// And its scope survives with it: a mute in one channel does not come back
-// as a mute everywhere.
 func TestScopeSurvivesARestart(t *testing.T) {
 	store := newFakeSanctions()
 
@@ -1277,8 +1135,6 @@ func TestScopeSurvivesARestart(t *testing.T) {
 	user.expectMsg("auser", "in second")
 }
 
-// A server-wide ban survives too, and is enforced where it always was:
-// before the upgrade.
 func TestBansSurviveARestart(t *testing.T) {
 	store := newFakeSanctions()
 
@@ -1305,7 +1161,6 @@ func TestBansSurviveARestart(t *testing.T) {
 	}
 }
 
-// Lifting a sanction has to be persisted too, or it comes back.
 func TestUnmuteSurvivesARestart(t *testing.T) {
 	store := newFakeSanctions()
 
@@ -1326,7 +1181,6 @@ func TestUnmuteSurvivesARestart(t *testing.T) {
 	user.expectMsg("auser", "free again")
 }
 
-// An expired sanction handed back is ignored rather than re-applied.
 func TestExpiredSanctionsAreIgnoredOnLoad(t *testing.T) {
 	store := newFakeSanctions()
 	store.active["expired"] = hook.Moderation{
@@ -1341,8 +1195,6 @@ func TestExpiredSanctionsAreIgnoredOnLoad(t *testing.T) {
 	user.expectMsg("auser", "long over")
 }
 
-// A store that cannot say who is banned stops the server, rather than
-// starting one that lets everybody in.
 func TestStartupFailsIfSanctionsCannotBeLoaded(t *testing.T) {
 	store := newFakeSanctions()
 	store.failLoad = errors.New("the database is on fire")
@@ -1354,7 +1206,6 @@ func TestStartupFailsIfSanctionsCannotBeLoaded(t *testing.T) {
 	}
 }
 
-// No Sanctions installed is still a working server; it just forgets.
 func TestNoSanctionsHookStillWorks(t *testing.T) {
 	_, mod, user := modApp(t, hook.Hooks{})
 

@@ -16,12 +16,6 @@ import (
 	"github.com/sztanpet/ws-chat/internal/proto"
 )
 
-// The layers are exercised through the same public surface as everything
-// else: a real client connecting to a real server that happens to have
-// fakes installed. Nothing here reaches into the server to check that a
-// hook "was called" — it checks that installing one changed what a client
-// sees, which is the only reason to have them.
-
 type fakeAuth struct {
 	byToken map[string]hook.Identity
 }
@@ -34,8 +28,6 @@ func (f fakeAuth) Authenticate(ctx context.Context, r hook.Request) (hook.Identi
 	return id, nil
 }
 
-// fakeDirectory knows a set of people by their stable id, and can find
-// them by name the way a real one would — the same table read two ways.
 type fakeDirectory map[string]hook.Chatter
 
 func (f fakeDirectory) Chatter(ctx context.Context, id string) (hook.Chatter, error) {
@@ -90,7 +82,6 @@ func (f *fakeRecorder) Private(ctx context.Context, p hook.Private) error {
 	return f.fail
 }
 
-// dialWith connects with extra query parameters, for the auth fake.
 func (ta *testApp) dialWith(t *testing.T, query string) (*client, error) {
 	t.Helper()
 
@@ -137,8 +128,6 @@ func TestAuthNamesTheConnection(t *testing.T) {
 	}
 }
 
-// A refusal happens before the upgrade, so the client gets an HTTP status
-// it can actually read rather than a socket that opens and shuts.
 func TestAuthRefusalIsAnHTTPError(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth: fakeAuth{byToken: map[string]hook.Identity{"good": {ID: "u1"}}},
@@ -170,7 +159,6 @@ func TestDirectoryFillsInChatterData(t *testing.T) {
 	}
 }
 
-// A directory that has nothing on file is not a failure.
 func TestDirectoryMissIsNotFatal(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth: fakeAuth{byToken: map[string]hook.Identity{
@@ -197,7 +185,6 @@ func TestFilterRefusesMessages(t *testing.T) {
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "this has badword in it"})
 	c.expectErr("muted")
 
-	// And the refusal is per message, not per connection.
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "this one is fine"})
 	c.expectMsg("", "this one is fine")
 }
@@ -267,8 +254,6 @@ func TestRecorderSeesMessages(t *testing.T) {
 	}
 }
 
-// Persistence is behind delivery, not in front of it: a store that is
-// failing must not cost anybody a message.
 func TestRecorderFailureDoesNotAffectDelivery(t *testing.T) {
 	rec := newFakeRecorder()
 	rec.fail = errors.New("database on fire")
@@ -281,8 +266,6 @@ func TestRecorderFailureDoesNotAffectDelivery(t *testing.T) {
 	bob.expectMsg("", "still delivered")
 }
 
-// The zero Hooks is a working server. This is the configuration every other
-// test in the package runs under, but it is worth saying out loud.
 func TestNoHooksInstalled(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{})
 	c := ta.dial(t)
@@ -308,7 +291,6 @@ func TestIdentityHelpers(t *testing.T) {
 		t.Error("Has does not report roles correctly")
 	}
 
-	// Apply overlays only what the chatter has an opinion about.
 	got := hook.Identity{ID: "u1", Nick: "old", Roles: []string{"user"}}.
 		Apply(hook.Chatter{Roles: []string{"mod"}, Attrs: map[string]string{"colour": "red"}})
 	if got.Nick != "old" {
@@ -322,8 +304,6 @@ func TestIdentityHelpers(t *testing.T) {
 	}
 }
 
-// fakeLimiter hands out fixed limits, and records which identities it was
-// asked about so a test can prove it was consulted per connection.
 type fakeLimiter struct {
 	client  hook.Limits
 	channel hook.Limits
@@ -343,8 +323,6 @@ func (f *fakeLimiter) ChannelLimits(ctx context.Context, channel string) hook.Li
 	return f.channel
 }
 
-// No Limiter installed is unlimited, which is the default every other test
-// in this package runs under.
 func TestNoLimiterIsUnlimited(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
@@ -355,8 +333,6 @@ func TestNoLimiterIsUnlimited(t *testing.T) {
 	}
 }
 
-// A Limiter with no opinion is also unlimited: the zero Limits must not
-// throttle somebody to nothing.
 func TestZeroLimitsAreUnlimited(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{Limiter: &fakeLimiter{}})
 	c := ta.dial(t)
@@ -368,8 +344,7 @@ func TestZeroLimitsAreUnlimited(t *testing.T) {
 }
 
 func TestClientRateLimit(t *testing.T) {
-	// Three messages, then one an hour: the refill never happens during
-	// the test, so there is nothing timing-dependent about it.
+	// One an hour: no refill during the test, so nothing depends on timing.
 	ta := newTestAppWith(t, hook.Hooks{
 		Limiter: &fakeLimiter{client: hook.Limits{Burst: 3, Interval: time.Hour}},
 	})
@@ -379,21 +354,18 @@ func TestClientRateLimit(t *testing.T) {
 		want := fmt.Sprintf("burst %d", i)
 		alice.send(proto.Command{Verb: proto.VerbMsg, Data: want})
 		alice.expectMsg(alice.nick, want)
-		bob.expectMsg(alice.nick, want) // bob is in the room the whole time
+		bob.expectMsg(alice.nick, want)
 	}
 
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "one too many"})
 	alice.expectErr(proto.ErrThrottled)
 
-	// The limit is the sender's alone: bob still has his whole budget.
 	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "bob is fine"})
 	bob.expectMsg(bob.nick, "bob is fine")
 
-	// And alice's next frame is bob's message, not her own refused one.
 	alice.expectMsg(bob.nick, "bob is fine")
 }
 
-// A throttled message must not reach anybody.
 func TestThrottledMessageIsNotDelivered(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Limiter: &fakeLimiter{client: hook.Limits{Burst: 1, Interval: time.Hour}},
@@ -407,13 +379,10 @@ func TestThrottledMessageIsNotDelivered(t *testing.T) {
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "refused"})
 	alice.expectErr(proto.ErrThrottled)
 
-	// bob's next frame is the following message, not the refused one.
 	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "next"})
 	bob.expectMsg(bob.nick, "next")
 }
 
-// The channel's bucket is shared: one person can exhaust it for everybody,
-// which is the point of having it.
 func TestChannelRateLimit(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Limiter: &fakeLimiter{channel: hook.Limits{Burst: 2, Interval: time.Hour}},
@@ -428,8 +397,6 @@ func TestChannelRateLimit(t *testing.T) {
 	alice.expectMsg("", "two")
 	bob.expectMsg("", "two")
 
-	// The channel's two are gone, so the next message from anybody is
-	// refused — and refused as the channel's fault, not the sender's.
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "three"})
 	alice.expectErr(proto.ErrChanThrottled)
 
@@ -437,8 +404,6 @@ func TestChannelRateLimit(t *testing.T) {
 	bob.expectErr(proto.ErrChanThrottled)
 }
 
-// The client's limit is checked first, so a client over its own budget is
-// told it is the one at fault.
 func TestClientLimitIsReportedBeforeChannelLimit(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Limiter: &fakeLimiter{
@@ -455,9 +420,6 @@ func TestClientLimitIsReportedBeforeChannelLimit(t *testing.T) {
 	c.expectErr(proto.ErrThrottled)
 }
 
-// Private messages spend the sender's budget but not the channel's: a busy
-// room must not stop two people talking, and two people talking must not
-// use up the room.
 func TestPrivateMessagesUseTheClientLimitOnly(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Limiter: &fakeLimiter{
@@ -467,12 +429,10 @@ func TestPrivateMessagesUseTheClientLimitOnly(t *testing.T) {
 	})
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	// Exhaust the channel with somebody else's message.
 	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "fills the channel"})
 	alice.expectMsg(bob.nick, "fills the channel")
 	bob.expectMsg(bob.nick, "fills the channel")
 
-	// alice can still send privately, twice, on her own budget.
 	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "one"})
 	bob.expectPriv("one")
 	alice.expectPriv("one")
@@ -481,13 +441,10 @@ func TestPrivateMessagesUseTheClientLimitOnly(t *testing.T) {
 	bob.expectPriv("two")
 	alice.expectPriv("two")
 
-	// And then her own limit stops her.
 	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "three"})
 	alice.expectErr(proto.ErrThrottled)
 }
 
-// The limit is asked for once per connection, with the identity, so a
-// layer can give different people different limits.
 func TestLimiterIsAskedPerConnectionWithIdentity(t *testing.T) {
 	lim := &fakeLimiter{}
 	ta := newTestAppWith(t, hook.Hooks{
@@ -512,8 +469,6 @@ func TestLimiterIsAskedPerConnectionWithIdentity(t *testing.T) {
 	}
 }
 
-// A refusal is per message, not per connection: a throttled client is
-// still connected and still receiving.
 func TestThrottlingDoesNotCloseTheConnection(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Limiter: &fakeLimiter{client: hook.Limits{Burst: 1, Interval: 50 * time.Millisecond}},
@@ -527,13 +482,11 @@ func TestThrottlingDoesNotCloseTheConnection(t *testing.T) {
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "too fast"})
 	alice.expectErr(proto.ErrThrottled)
 
-	// Still connected: alice receives what bob says.
 	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "still here"})
 	alice.expectMsg(bob.nick, "still here")
 	bob.expectMsg(bob.nick, "still here")
 
-	// And once the bucket refills, alice can talk again. This is the one
-	// place a real interval is used, so it is generous.
+	// The one real interval in these tests, so it is generous.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if time.Now().After(deadline) {
@@ -549,11 +502,6 @@ func TestThrottlingDoesNotCloseTheConnection(t *testing.T) {
 	}
 }
 
-// --- account-wide rate limits ------------------------------------------
-
-// keyedLimiter builds the bucket key out of whatever the auth layer
-// attached to the identity, which is the point of the key being a string
-// the hook chooses rather than a flag the core interprets.
 type keyedLimiter struct {
 	client  hook.Limits
 	channel hook.Limits
@@ -574,7 +522,6 @@ func (k keyedLimiter) ChannelLimits(ctx context.Context, channel string) hook.Li
 	return k.channel
 }
 
-// Two connections of one account share a budget.
 func TestAccountRateLimitIsSharedAcrossConnections(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth: fakeAuth{byToken: map[string]hook.Identity{
@@ -600,7 +547,6 @@ func TestAccountRateLimitIsSharedAcrossConnections(t *testing.T) {
 
 	room := []*client{first, second, bob}
 
-	// Two from one socket, one from the other: that is the account's three.
 	first.send(proto.Command{Verb: proto.VerbMsg, Data: "one"})
 	expectAll(room, "alice", "one")
 	first.send(proto.Command{Verb: proto.VerbMsg, Data: "two"})
@@ -608,19 +554,15 @@ func TestAccountRateLimitIsSharedAcrossConnections(t *testing.T) {
 	second.send(proto.Command{Verb: proto.VerbMsg, Data: "three"})
 	expectAll(room, "alice2", "three")
 
-	// A fourth is refused on EITHER socket — opening a second one bought
-	// nothing.
 	second.send(proto.Command{Verb: proto.VerbMsg, Data: "four"})
 	second.expectErr(proto.ErrThrottled)
 	first.send(proto.Command{Verb: proto.VerbMsg, Data: "also four"})
 	first.expectErr(proto.ErrThrottled)
 
-	// And it is that account's budget, not everybody's.
 	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "bob is fine"})
 	expectAll(room, "bob", "bob is fine")
 }
 
-// The key can come from anything the auth layer attached, not just the id.
 func TestAccountKeyFromAuthAttributes(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth: fakeAuth{byToken: map[string]hook.Identity{
@@ -640,7 +582,6 @@ func TestAccountKeyFromAuthAttributes(t *testing.T) {
 
 	room := []*client{alice, bob, carol}
 
-	// Two different people, one organisation, one budget.
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "one"})
 	expectAll(room, "alice", "one")
 	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "two"})
@@ -649,13 +590,10 @@ func TestAccountKeyFromAuthAttributes(t *testing.T) {
 	bob.send(proto.Command{Verb: proto.VerbMsg, Data: "three"})
 	bob.expectErr(proto.ErrThrottled)
 
-	// A different organisation is untouched.
 	carol.send(proto.Command{Verb: proto.VerbMsg, Data: "different org"})
 	expectAll(room, "carol", "different org")
 }
 
-// Reconnecting must not hand back a full bucket, which is the first thing
-// somebody being throttled would try.
 func TestAccountLimitSurvivesReconnection(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth: fakeAuth{byToken: map[string]hook.Identity{
@@ -670,12 +608,8 @@ func TestAccountLimitSurvivesReconnection(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 
-	// Somebody has to stay in the room for the disconnect to be
-	// observable. A dropped socket is torn down on the server's own
-	// goroutine, and the PART that ends it is broadcast after the
-	// connection has already left the directory -- so an alice who
-	// reconnects immediately can be subscribed in time to be handed her
-	// own departure, which is not what the next dial is asserting about.
+	// Someone stays to see the PART: teardown runs after the socket drops, so an
+	// instant reconnect could be handed its own departure.
 	watcher, err := ta.dialWith(t, "?token=w")
 	if err != nil {
 		t.Fatalf("dial watcher: %v", err)
@@ -687,7 +621,6 @@ func TestAccountLimitSurvivesReconnection(t *testing.T) {
 	first.send(proto.Command{Verb: proto.VerbMsg, Data: "refused"})
 	first.expectErr(proto.ErrThrottled)
 
-	// Go away, wait for the room to hear about it, and come back.
 	_ = first.ws.CloseNow()
 	watcher.expectPart("main", "alice")
 
@@ -699,8 +632,6 @@ func TestAccountLimitSurvivesReconnection(t *testing.T) {
 	second.expectErr(proto.ErrThrottled)
 }
 
-// Without a key it is one bucket per connection, which is the default and
-// the weaker guarantee.
 func TestPerConnectionIsTheDefault(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth: fakeAuth{byToken: map[string]hook.Identity{
@@ -720,14 +651,10 @@ func TestPerConnectionIsTheDefault(t *testing.T) {
 	first.send(proto.Command{Verb: proto.VerbMsg, Data: "refused"})
 	first.expectErr(proto.ErrThrottled)
 
-	// The same account's other socket has its own budget, because no key
-	// was given.
 	second.send(proto.Command{Verb: proto.VerbMsg, Data: "still allowed"})
 	expectAll(room, "alice2", "still allowed")
 }
 
-// A shared bucket is reclaimed once nobody holds it AND it has refilled,
-// never before.
 func TestSharedLimiterReclamation(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth:    fakeAuth{byToken: map[string]hook.Identity{"a": {ID: "u1", Nick: "alice"}}},
@@ -741,19 +668,15 @@ func TestSharedLimiterReclamation(t *testing.T) {
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "spend one"})
 	c.expectMsg("alice", "spend one")
 
-	// Held by a live connection: not reclaimable however long we wait.
 	if n := ta.app.sweepLimiters(time.Now().Add(24 * time.Hour)); n != 0 {
 		t.Fatalf("swept %d buckets that are still held", n)
 	}
 
-	// Released but still spent: not reclaimable either, which is what
-	// stops a reconnect refilling it.
 	ta.app.releaseLimiter("u1")
 	if n := ta.app.sweepLimiters(time.Now()); n != 0 {
 		t.Fatalf("swept %d buckets that still had spent tokens", n)
 	}
 
-	// Released and refilled: now it holds nothing a new bucket would not.
 	if n := ta.app.sweepLimiters(time.Now().Add(24 * time.Hour)); n != 1 {
 		t.Fatalf("swept %d buckets, want the 1 that had refilled", n)
 	}

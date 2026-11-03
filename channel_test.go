@@ -13,9 +13,6 @@ import (
 	"github.com/sztanpet/ws-chat/internal/proto"
 )
 
-// expectJoined is the answer to a JOIN command: the channel's backlog
-// first, then the JOIN itself. The order is deterministic — see
-// conn.join.
 func (c *client) expectJoined(channel string) proto.Backlog {
 	c.t.Helper()
 
@@ -29,7 +26,6 @@ func (c *client) expectJoined(channel string) proto.Backlog {
 			}
 			break
 		}
-		// Somebody else arriving or leaving is not what this is about.
 		if verb != proto.VerbJoin && verb != proto.VerbPart {
 			c.t.Fatalf("got %s %s, want %s first", verb, payload, proto.VerbBacklog)
 		}
@@ -39,13 +35,7 @@ func (c *client) expectJoined(channel string) proto.Backlog {
 	return backlog
 }
 
-// expectJoin waits for a particular person to arrive in a particular
-// channel, stepping over presence for anybody else.
-//
-// Skipping rather than asserting on the exact next frame, because a test
-// about one thing should not fail because a third client happened to
-// connect. The presence tests assert on what they are about and let the
-// rest through.
+// Steps over other presence: a third client connecting must not fail the test.
 func (c *client) expectJoin(channel, nick string) proto.Join {
 	c.t.Helper()
 	for {
@@ -64,7 +54,6 @@ func (c *client) expectJoin(channel, nick string) proto.Join {
 	}
 }
 
-// expectPart waits for a particular person to leave a particular channel.
 func (c *client) expectPart(channel, nick string) {
 	c.t.Helper()
 	for {
@@ -97,7 +86,6 @@ func (c *client) expectNames(channel string) proto.Names {
 	return names
 }
 
-// A connection lands in the default channel and is told so.
 func TestAutojoinsTheDefaultChannel(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
@@ -110,32 +98,25 @@ func TestAutojoinsTheDefaultChannel(t *testing.T) {
 	}
 }
 
-// The channel is the unit of delivery: a message reaches the room it was
-// sent to and nowhere else.
 func TestMessagesStayInTheirChannel(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
-	alice.expectJoin("main", bob.nick) // bob arriving
+	alice.expectJoin("main", bob.nick)
 
 	alice.send(proto.Command{Verb: proto.VerbJoin, Channel: "other"})
 	alice.expectJoined("other")
 
-	// bob is not in "other" and hears nothing said there.
 	alice.send(proto.Command{Verb: proto.VerbMsg, Channel: "other", Data: "in other"})
 	if got := alice.expectMsg(alice.nick, "in other"); got.Channel != "other" {
 		t.Fatalf("channel = %q, want other", got.Channel)
 	}
 
-	// The next thing bob sees is the main-channel message, not the one
-	// from a room he is not in.
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "in main"})
 	if got := bob.expectMsg(alice.nick, "in main"); got.Channel != "main" {
 		t.Fatalf("channel = %q, want main", got.Channel)
 	}
 }
 
-// Speaking into a room you are not in is refused rather than silently
-// joining you.
 func TestMessageToAChannelYouAreNotIn(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
@@ -149,7 +130,6 @@ func TestJoinAndPart(t *testing.T) {
 	alice, bob := ta.dial(t), ta.dial(t)
 	alice.expectJoin("main", bob.nick)
 
-	// Both move into a second room; each sees the other arrive.
 	alice.send(proto.Command{Verb: proto.VerbJoin, Channel: "second"})
 	alice.expectJoined("second")
 
@@ -157,12 +137,10 @@ func TestJoinAndPart(t *testing.T) {
 	bob.expectJoined("second")
 	alice.expectJoin("second", bob.nick)
 
-	// And leaving is announced to whoever is left.
 	bob.send(proto.Command{Verb: proto.VerbPart, Channel: "second"})
 	bob.expectPart("second", bob.nick)
 	alice.expectPart("second", bob.nick)
 
-	// bob is out: he can no longer speak there.
 	bob.send(proto.Command{Verb: proto.VerbMsg, Channel: "second", Data: "still here?"})
 	bob.expectErr(proto.ErrNotJoined)
 }
@@ -193,7 +171,6 @@ func TestBadChannelNames(t *testing.T) {
 	}
 }
 
-// Disconnecting parts every channel, and the rooms are told.
 func TestDisconnectPartsEverything(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
@@ -207,8 +184,7 @@ func TestDisconnectPartsEverything(t *testing.T) {
 
 	_ = bob.ws.CloseNow()
 
-	// alice is told bob left both, in whichever order the teardown got to
-	// them.
+	// In whichever order the teardown got to them.
 	var parted []string
 	for range 2 {
 		verb, payload := alice.recv()
@@ -243,7 +219,6 @@ func TestNames(t *testing.T) {
 	}
 }
 
-// Who is in a room is the room's business.
 func TestNamesRequiresMembership(t *testing.T) {
 	ta := newTestApp(t)
 	alice := ta.dial(t)
@@ -256,7 +231,6 @@ func TestNamesRequiresMembership(t *testing.T) {
 	bob.expectErr(proto.ErrNotJoined)
 }
 
-// Each channel has its own history.
 func TestBacklogIsPerChannel(t *testing.T) {
 	ta := newTestApp(t)
 	alice := ta.dial(t)
@@ -269,7 +243,6 @@ func TestBacklogIsPerChannel(t *testing.T) {
 	alice.send(proto.Command{Verb: proto.VerbMsg, Channel: "second", Data: "in second"})
 	alice.expectMsg("", "in second")
 
-	// A new connection lands in main and is replayed main, not second.
 	bob := ta.dial(t)
 	if len(bob.backlog) != 1 {
 		t.Fatalf("backlog has %d messages, want 1", len(bob.backlog))
@@ -281,7 +254,6 @@ func TestBacklogIsPerChannel(t *testing.T) {
 		t.Fatalf("backlog channel = %q, want main", bob.backlog[0].Channel)
 	}
 
-	// And joining second replays second.
 	bob.send(proto.Command{Verb: proto.VerbJoin, Channel: "second"})
 	backlog := bob.expectJoined("second")
 	if len(backlog.Messages) != 1 || backlog.Messages[0].Data != "in second" {
@@ -289,7 +261,6 @@ func TestBacklogIsPerChannel(t *testing.T) {
 	}
 }
 
-// The channel rate limit is per channel, not shared across all of them.
 func TestChannelRateLimitIsPerChannel(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Limiter: &fakeLimiter{channel: hook.Limits{Burst: 1, Interval: time.Hour}},
@@ -301,7 +272,6 @@ func TestChannelRateLimitIsPerChannel(t *testing.T) {
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "two"})
 	c.expectErr(proto.ErrChanThrottled)
 
-	// A different room has its own budget.
 	c.send(proto.Command{Verb: proto.VerbJoin, Channel: "second"})
 	c.expectJoined("second")
 	c.send(proto.Command{Verb: proto.VerbMsg, Channel: "second", Data: "elsewhere"})
@@ -327,9 +297,6 @@ func TestTooManyChannelsOnTheServer(t *testing.T) {
 	c.expectErr(proto.ErrTooManyChans)
 }
 
-// An empty channel is reclaimed, and it costs nothing to lose: its rings
-// held frames for subscribers that no longer exist, and the backlog lives
-// in the History hook.
 func TestEmptyChannelsAreReclaimed(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
@@ -349,9 +316,7 @@ func TestEmptyChannelsAreReclaimed(t *testing.T) {
 	c.send(proto.Command{Verb: proto.VerbPart, Channel: "temporary"})
 	c.expectPart("temporary", c.nick)
 
-	// The PART reaches the client before the membership is torn down —
-	// deliberately, or ending the subscription would discard it — so the
-	// member set is not empty yet just because the frame arrived.
+	// The PART arrives before the teardown, so the member set may not be empty yet.
 	c.sync()
 
 	if n := ta.app.sweepChannels(); n != 1 {
@@ -361,15 +326,12 @@ func TestEmptyChannelsAreReclaimed(t *testing.T) {
 		t.Fatalf("channels %v, want temporary gone", got)
 	}
 
-	// The history survived it, because the history is not in the channel.
 	c.send(proto.Command{Verb: proto.VerbJoin, Channel: "temporary"})
 	backlog := c.expectJoined("temporary")
 	if len(backlog.Messages) != 1 || backlog.Messages[0].Data != "remember me" {
 		t.Fatalf("the reclaimed channel lost its history: %v", backlog.Messages)
 	}
 }
-
-// --- the Channels hook ------------------------------------------------
 
 type fakeChannels struct {
 	autojoin []string
@@ -398,15 +360,12 @@ func TestAutojoinHook(t *testing.T) {
 		t.Fatalf("joined %v, want both channels the hook named", c.joined)
 	}
 
-	// And the connection is really in them.
 	c.send(proto.Command{Verb: proto.VerbMsg, Channel: "lobby", Data: "hello lobby"})
 	if got := c.expectMsg("", "hello lobby"); got.Channel != "lobby" {
 		t.Fatalf("channel = %q, want lobby", got.Channel)
 	}
 }
 
-// A hook that returns an empty slice puts the connection nowhere, which is
-// a deployment where clients JOIN explicitly.
 func TestAutojoinNothing(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Channels: fakeChannels{autojoin: []string{}},
@@ -419,7 +378,6 @@ func TestAutojoinNothing(t *testing.T) {
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "anybody there"})
 	c.expectErr(proto.ErrNotJoined)
 
-	// It can still join under its own steam.
 	c.send(proto.Command{Verb: proto.VerbJoin, Channel: "main"})
 	c.expectJoined("main")
 }
@@ -433,18 +391,14 @@ func TestCanJoinRefuses(t *testing.T) {
 	c.send(proto.Command{Verb: proto.VerbJoin, Channel: "staff"})
 	c.expectErr("inviteonly")
 
-	// The refusal is per channel, not per connection.
 	c.send(proto.Command{Verb: proto.VerbJoin, Channel: "public"})
 	c.expectJoined("public")
 
-	// And nothing was created for the refused one.
 	if got := ta.app.channelNames(); slices.Contains(got, "staff") {
 		t.Fatalf("channels %v, want no staff channel", got)
 	}
 }
 
-// Autojoin does not consult CanJoin: a layer that put somebody somewhere
-// has already decided they may be there.
 func TestAutojoinSkipsCanJoin(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Channels: fakeChannels{
@@ -467,8 +421,6 @@ func TestChannelsAreIsolatedUnderLoad(t *testing.T) {
 	alice.send(proto.Command{Verb: proto.VerbJoin, Channel: "quiet"})
 	alice.expectJoined("quiet")
 
-	// Traffic in main does not reach the quiet room, and alice can tell
-	// which is which because every message names its channel.
 	const n = 10
 	for i := range n {
 		bob.send(proto.Command{Verb: proto.VerbMsg, Data: fmt.Sprintf("main %d", i)})

@@ -26,16 +26,13 @@ func TestHealth(t *testing.T) {
 	}
 }
 
-// The walking skeleton, end to end: two clients connect, one talks, both
-// hear it.
 func TestBroadcast(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "hello everyone"})
 
-	// The sender sees its own message too — it is a broadcast, not an echo,
-	// and a client should render one stream rather than reconcile two.
+	// The sender hears itself too: one stream to render, not two to reconcile.
 	for _, c := range []*client{alice, bob} {
 		msg := c.expectMsg("", "hello everyone")
 		if msg.ID == 0 {
@@ -50,7 +47,6 @@ func TestBroadcast(t *testing.T) {
 	}
 }
 
-// Message ids come from the server and are monotonic, whoever sent them.
 func TestMessageIDsAreMonotonic(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
@@ -67,15 +63,10 @@ func TestMessageIDsAreMonotonic(t *testing.T) {
 	}
 }
 
-// Nicks are the server's to assign, and a client cannot claim someone
-// else's by putting one in the payload.
 func TestNickIsAssignedByServer(t *testing.T) {
 	ta := newTestApp(t)
 	alice, bob := ta.dial(t), ta.dial(t)
 
-	// A client naming itself in a MSG is ignored. The field exists — a
-	// PRIVMSG needs it — so this is a real thing a client could try, not a
-	// hypothetical.
 	alice.sendRaw([]byte(`{"verb":"MSG","data":"hi","nick":"root"}`), websocket.MessageText)
 	msg := alice.expectMsg("", "hi")
 	if msg.Nick != alice.nick {
@@ -130,13 +121,10 @@ func TestMessageTooLong(t *testing.T) {
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "123456789"})
 	c.expectErr(proto.ErrTooLong)
 
-	// The boundary itself is allowed.
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "12345678"})
 	c.expectMsg("", "12345678")
 }
 
-// A bad frame is a refusal, not a disconnect: one typo from a buggy client
-// should not cost it the connection.
 func TestErrorsDoNotCloseTheConnection(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
@@ -148,8 +136,6 @@ func TestErrorsDoNotCloseTheConnection(t *testing.T) {
 	c.expectMsg("", "still here")
 }
 
-// A frame arriving as the wrong WebSocket message type for the negotiated
-// codec is refused rather than guessed at.
 func TestWrongFramingRejected(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t) // JSON, so text
@@ -164,7 +150,6 @@ func TestPrivateMessage(t *testing.T) {
 
 	alice.send(proto.Command{Verb: proto.VerbPriv, Nick: bob.nick, Data: "just for you"})
 
-	// The recipient's copy names the sender and is not marked as sent.
 	got := bob.expectPriv("just for you")
 	if got.Nick != alice.nick {
 		t.Fatalf("recipient sees nick %q, want the sender %q", got.Nick, alice.nick)
@@ -173,7 +158,6 @@ func TestPrivateMessage(t *testing.T) {
 		t.Error("recipient's copy is marked as sent")
 	}
 
-	// The sender's echo names the recipient and is marked as sent.
 	echo := alice.expectPriv("just for you")
 	if echo.Nick != bob.nick {
 		t.Fatalf("sender's echo names %q, want the recipient %q", echo.Nick, bob.nick)
@@ -185,9 +169,7 @@ func TestPrivateMessage(t *testing.T) {
 		t.Errorf("the two copies have different ids: %d and %d", echo.ID, got.ID)
 	}
 
-	// Nobody else sees it. Carol is made to prove it by receiving the next
-	// broadcast instead: if the private message had reached her it would be
-	// first in her stream.
+	// Carol proves absence by reading the next broadcast: a leak would come first.
 	alice.send(proto.Command{Verb: proto.VerbMsg, Data: "public again"})
 	carol.expectMsg("", "public again")
 }
@@ -220,11 +202,7 @@ func TestPrivateMessageErrors(t *testing.T) {
 	})
 }
 
-// deliver is the one place backpressure could escape into the sender, so
-// its refusal is tested directly rather than through a socket: whether a
-// real recipient's queue fills depends on kernel buffer sizes and timing,
-// and a test that depends on those is a test that fails on someone else's
-// machine.
+// Unit-tested: whether a socket's queue fills depends on kernel buffers.
 func TestDeliverRefusesWhenFull(t *testing.T) {
 	c := &conn{priv: make(chan []byte, 2)}
 
@@ -247,9 +225,6 @@ func TestDeliverRefusesWhenFull(t *testing.T) {
 	}
 }
 
-// The end-to-end version of the same invariant: a recipient that has
-// stopped reading must not stall the person messaging it, whichever way
-// the server decides to handle it.
 func TestPrivateMessageToSilentRecipientDoesNotStallSender(t *testing.T) {
 	ta := newTestApp(t, func(c *config.Config) {
 		c.PrivBuffer = 1
@@ -266,8 +241,7 @@ func TestPrivateMessageToSilentRecipientDoesNotStallSender(t *testing.T) {
 		verb, payload := alice.recv() // fails the test if it takes >5s
 
 		if verb == proto.VerbErr {
-			// Whatever the reason, the sender was answered rather than
-			// left to wait on somebody else's socket.
+			// Any answer will do, as long as it is not a wait.
 			var e proto.Err
 			mustUnmarshal(t, alice, payload, &e)
 			switch e.Description {
@@ -362,9 +336,6 @@ func TestPumpsShareOneSocket(t *testing.T) {
 	}
 }
 
-// Shutting the server down closes the connections. net/http's Shutdown
-// ignores hijacked connections, so this is entirely our own doing and worth
-// a test.
 func TestShutdownClosesConnections(t *testing.T) {
 	ta := newTestApp(t)
 	c := ta.dial(t)
@@ -379,9 +350,7 @@ func TestShutdownClosesConnections(t *testing.T) {
 	}
 }
 
-// The whole suite above runs over JSON. These run the core of it over
-// every codec, which is the only way to know the interface actually
-// decouples anything rather than just existing.
+// The rest of the suite is JSON; these run the core over every codec.
 func TestEveryCodecDelivers(t *testing.T) {
 	for _, codec := range proto.Codecs() {
 		t.Run(codec.Name(), func(t *testing.T) {
@@ -414,9 +383,7 @@ func TestEveryCodecDelivers(t *testing.T) {
 	}
 }
 
-// Clients that negotiated different wire formats share a room. The frame
-// is encoded once per codec rather than once per client, so this is the
-// test that would catch a message being fanned out in the sender's format.
+// Catches a message fanned out in the sender's format to everybody.
 func TestCodecsMixInOneRoom(t *testing.T) {
 	ta := newTestApp(t)
 	jsonClient := ta.dialCodec(t, proto.JSON{})
@@ -429,13 +396,10 @@ func TestCodecsMixInOneRoom(t *testing.T) {
 		t.Fatalf("the two copies have different ids: %d and %d", first.ID, second.ID)
 	}
 
-	// And back the other way.
 	packClient.send(proto.Command{Verb: proto.VerbMsg, Data: "so do they"})
 	jsonClient.expectMsg(packClient.nick, "so do they")
 	packClient.expectMsg(packClient.nick, "so do they")
 
-	// A private message is encoded in the RECIPIENT's format, not the
-	// sender's.
 	jsonClient.send(proto.Command{Verb: proto.VerbPriv, Nick: packClient.nick, Data: "just you"})
 	if got := packClient.expectPriv("just you"); got.Nick != jsonClient.nick {
 		t.Fatalf("recipient sees %q, want %q", got.Nick, jsonClient.nick)
@@ -443,7 +407,6 @@ func TestCodecsMixInOneRoom(t *testing.T) {
 	jsonClient.expectPriv("just you")
 }
 
-// A client that asks for nothing gets the default rather than a refusal.
 func TestNoSubprotocolGetsTheDefault(t *testing.T) {
 	ta := newTestApp(t)
 
@@ -467,8 +430,6 @@ func TestNoSubprotocolGetsTheDefault(t *testing.T) {
 	}
 }
 
-// Message ids are handed out under the same lock that writes to every
-// codec's ring, so a client cannot see id 7 before id 6.
 func TestOrderIsConsistentAcrossCodecs(t *testing.T) {
 	ta := newTestApp(t)
 	jsonClient := ta.dialCodec(t, proto.JSON{})

@@ -17,14 +17,6 @@ import (
 	"github.com/sztanpet/ws-chat/internal/proto"
 )
 
-// Tests here are integration-first on purpose: a real httptest.Server, a
-// real WebSocket client dialing it, and assertions on what the CLIENT
-// received. Nothing reaches into the server's internals to check delivery,
-// because a test that does cannot tell the difference between "fanned out"
-// and "actually written to the socket".
-
-// testApp starts the server on a random port and tears it down with the
-// test.
 type testApp struct {
 	*app
 	srv *httptest.Server
@@ -36,7 +28,6 @@ func newTestApp(t *testing.T, tweak ...func(*config.Config)) *testApp {
 	return newTestAppWith(t, hook.Hooks{}, tweak...)
 }
 
-// newTestAppWith is the same with layers installed.
 func newTestAppWith(t *testing.T, hooks hook.Hooks, tweak ...func(*config.Config)) *testApp {
 	t.Helper()
 
@@ -59,25 +50,20 @@ func newTestAppWith(t *testing.T, hooks hook.Hooks, tweak ...func(*config.Config
 	return &testApp{app: a, srv: srv, t: t}
 }
 
-// client is a connected WebSocket with the assertions the tests need. It
-// speaks whichever codec it negotiated, so the same assertions work over
-// either wire format.
 type client struct {
 	t       *testing.T
 	ws      *websocket.Conn
 	codec   proto.Codec
-	nick    string      // as assigned by the server, from the READY frame
-	joined  []string    // channels it was put into on connect
-	backlog []proto.Msg // what it was replayed on connect
+	nick    string
+	joined  []string
+	backlog []proto.Msg
 }
 
-// dial connects with the default (JSON) codec.
 func (ta *testApp) dial(t *testing.T) *client {
 	t.Helper()
 	return ta.dialCodec(t, proto.Default())
 }
 
-// dialCodec connects asking for a specific wire format.
 func (ta *testApp) dialCodec(t *testing.T, codec proto.Codec) *client {
 	t.Helper()
 
@@ -99,10 +85,7 @@ func (ta *testApp) dialCodec(t *testing.T, codec proto.Codec) *client {
 
 	c := &client{t: t, ws: ws, codec: codec}
 
-	// Waiting for READY is not politeness, it is what makes the test
-	// deterministic: the handshake returns before the server has subscribed
-	// the connection, so a client that talks immediately can miss its own
-	// message.
+	// READY, or a client talking at once can miss its own message.
 	verb, payload := c.recv()
 	if verb != proto.VerbReady {
 		t.Fatalf("first frame was %s, want %s", verb, proto.VerbReady)
@@ -117,22 +100,10 @@ func (ta *testApp) dialCodec(t *testing.T, codec proto.Codec) *client {
 	return c
 }
 
-// settle consumes what a connection is sent on arrival: a JOIN and a
-// BACKLOG for each channel it was put into.
-//
-// It stops at the first frame that is neither, which is the point — a test
-// that dials and then reads gets live traffic, not setup.
 func (c *client) settle(ta *testApp) {
 	c.t.Helper()
 
-	// Each channel the server tried to put it in produces exactly one
-	// outcome — a JOIN, or an ERR saying why not — with a BACKLOG along the
-	// way if the backlog is on.
-	//
-	// Counted rather than read in a fixed order, because only the ordering
-	// WITHIN a channel is guaranteed. Its backlog is written directly while
-	// its JOIN comes through its pump, so with two channels the second
-	// backlog can overtake the first join.
+	// Counted, not in order: a second backlog can overtake the first JOIN.
 	outcomes := 0
 	for want := len(ta.app.autojoin(context.Background(), hook.Identity{})); outcomes < want; {
 		verb, payload := c.recv()
@@ -154,7 +125,6 @@ func (c *client) settle(ta *testApp) {
 	}
 }
 
-// msgType is the WebSocket message type this client's codec uses.
 func (c *client) msgType() websocket.MessageType {
 	if c.codec.Binary() {
 		return websocket.MessageBinary
@@ -162,8 +132,6 @@ func (c *client) msgType() websocket.MessageType {
 	return websocket.MessageText
 }
 
-// send encodes and sends a command. The verb is a field in the command, so
-// there is one document and one encode.
 func (c *client) send(cmd proto.Command) {
 	c.t.Helper()
 	c.sendRaw(c.encode(cmd), c.msgType())
@@ -186,7 +154,6 @@ func (c *client) encode(cmd proto.Command) []byte {
 	return frame
 }
 
-// sendRaw sends bytes as-is, for the tests that are about malformed input.
 func (c *client) sendRaw(frame []byte, typ websocket.MessageType) {
 	c.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -196,13 +163,6 @@ func (c *client) sendRaw(frame []byte, typ websocket.MessageType) {
 	}
 }
 
-// recv reads one frame and reports its verb along with the whole frame.
-//
-// The frame is returned intact rather than split, because there is nothing
-// to split any more: the verb is a field inside the document. A test that
-// wants the rest decodes the same bytes into the type the verb named. A
-// real client would decode once into a union struct of its own, the way the
-// server does with proto.Command.
 func (c *client) recv() (verb string, frame []byte) {
 	c.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -226,7 +186,6 @@ func (c *client) recv() (verb string, frame []byte) {
 	return header.Verb, frame
 }
 
-// decode unmarshals a frame with this client's codec.
 func (c *client) decode(frame []byte, v any) {
 	c.t.Helper()
 	var err error
@@ -240,12 +199,7 @@ func (c *client) decode(frame []byte, v any) {
 	}
 }
 
-// nextInteresting reads until it finds a frame that is not presence.
-//
-// Presence is noise for a test that is about something else: every client
-// already in a room sees a JOIN when the next one dials, and a PART when
-// anybody leaves. Skipping it here rather than in recv keeps the presence
-// tests honest — they use recv and see everything.
+// Presence is skipped here, not in recv, so the presence tests see everything.
 func (c *client) nextInteresting() (verb string, payload []byte) {
 	c.t.Helper()
 	for {
@@ -256,15 +210,8 @@ func (c *client) nextInteresting() (verb string, payload []byte) {
 	}
 }
 
-// sync waits until the server has finished handling everything this client
-// has sent.
-//
-// Commands are read and handled one at a time on this connection's read
-// pump, so a PONG proves the ones before it are done. Any test that asserts
-// on server STATE rather than on what a client received needs this: a frame
-// can reach a client before the handler that sent it has finished its work,
-// and parting is the case that bites — the leaving client is told directly,
-// on purpose, before its membership is torn down.
+// Commands are handled in order, so the PONG proves the rest are done; a frame
+// can arrive before its handler finishes, as a PART does before the teardown.
 func (c *client) sync() {
 	c.t.Helper()
 	c.send(proto.Command{Verb: proto.VerbPing})
@@ -273,7 +220,6 @@ func (c *client) sync() {
 	}
 }
 
-// expectMsg reads one frame and requires it to be a MSG with this body.
 func (c *client) expectMsg(nick, data string) proto.Msg {
 	c.t.Helper()
 	verb, payload := c.nextInteresting()
@@ -291,7 +237,6 @@ func (c *client) expectMsg(nick, data string) proto.Msg {
 	return msg
 }
 
-// expectPriv reads one frame and requires it to be a PRIVMSG with this body.
 func (c *client) expectPriv(data string) proto.Priv {
 	c.t.Helper()
 	verb, payload := c.nextInteresting()
@@ -306,10 +251,6 @@ func (c *client) expectPriv(data string) proto.Priv {
 	return msg
 }
 
-// expectAll requires every client to receive the same message. Clients that
-// are in the room receive everything said in it, so a test with more than
-// two of them has to drain all of them or the next assertion reads a
-// message it was not looking for.
 func expectAll(clients []*client, nick, data string) {
 	for _, c := range clients {
 		c.t.Helper()
@@ -317,7 +258,6 @@ func expectAll(clients []*client, nick, data string) {
 	}
 }
 
-// expectErr reads one frame and requires it to be an ERR with this code.
 func (c *client) expectErr(description string) {
 	c.t.Helper()
 	verb, payload := c.nextInteresting()
@@ -331,7 +271,6 @@ func (c *client) expectErr(description string) {
 	}
 }
 
-// contextWithTimeout is the deadline every test operation gets.
 func contextWithTimeout() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
 }
@@ -341,7 +280,6 @@ func mustUnmarshal(t *testing.T, c *client, data []byte, v any) {
 	c.decode(data, v)
 }
 
-// expectClosed requires the connection to be closed by the server.
 func (c *client) expectClosed() websocket.StatusCode {
 	c.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

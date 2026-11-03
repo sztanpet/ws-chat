@@ -15,8 +15,6 @@ import (
 	"github.com/sztanpet/ws-chat/internal/proto"
 )
 
-// scrape reads the metrics straight out of the registry, which is what the
-// endpoint does.
 func (ta *testApp) scrape(t *testing.T) string {
 	t.Helper()
 	var out strings.Builder
@@ -36,7 +34,6 @@ func requireMetric(t *testing.T, scrape, want string) {
 func TestMetricsCountConnectionsAndTraffic(t *testing.T) {
 	ta := newTestApp(t)
 
-	// Nothing has happened yet, but the metrics exist to say so.
 	requireMetric(t, ta.scrape(t), "wschat_connections 0")
 
 	alice, bob := ta.dial(t), ta.dial(t)
@@ -56,14 +53,11 @@ func TestMetricsCountConnectionsAndTraffic(t *testing.T) {
 	requireMetric(t, out, `wschat_commands_total{verb="PRIVMSG"} 1`)
 	requireMetric(t, out, `wschat_codec_negotiated_total{codec="chat.json"} 2`)
 
-	// One channel, both connections in it.
 	requireMetric(t, out, "wschat_channels 1")
 	requireMetric(t, out, "wschat_memberships 2")
 	requireMetric(t, out, "wschat_joins_total 2")
 }
 
-// Every refusal is counted by the code the client was told, because they
-// are counted in the same place they are sent.
 func TestMetricsCountRefusalsByCode(t *testing.T) {
 	ta := newTestApp(t, func(c *config.Config) { c.MaxMessage = 4 })
 	c := ta.dial(t)
@@ -81,14 +75,6 @@ func TestMetricsCountRefusalsByCode(t *testing.T) {
 	requireMetric(t, out, `wschat_refusals_total{code="unknown"} 1`)
 }
 
-// A refusal a hook decided on is counted like any other, on both message
-// paths, because it is sent like any other: the reason becomes the ERR code
-// and conn.reply counts what it sends.
-//
-// It is also the case where the label set leaves the core's hands. It stays
-// closed only as long as a filter returns codes rather than prose, which is
-// why the reason is documented as a short token and why a filter that
-// builds one per message would be a memory leak with a network interface.
 func TestMetricsCountHookRefusals(t *testing.T) {
 	ta := newTestAppWith(t, hook.Hooks{
 		Auth:   optionalAuth{"a": {ID: "u1", Nick: "alice"}},
@@ -112,9 +98,6 @@ func TestMetricsCountHookRefusals(t *testing.T) {
 	out := ta.scrape(t)
 	requireMetric(t, out, `wschat_refusals_total{code="needlogin"} 2`)
 
-	// Commands are counted as received whether or not they were acted on,
-	// which is what makes the pair worth reading together: a PRIVMSG arrived
-	// and nothing was delivered for it.
 	requireMetric(t, out, `wschat_commands_total{verb="PRIVMSG"} 1`)
 	requireMetric(t, out, "wschat_private_messages_total 0")
 }
@@ -142,8 +125,6 @@ func TestMetricsCountModeration(t *testing.T) {
 	requireMetric(t, out, "wschat_moderation_mutes 1")
 }
 
-// The gauges read the live state rather than a mirror of it, so they go
-// down again.
 func TestMetricsGaugesFollowState(t *testing.T) {
 	ta := newTestApp(t)
 
@@ -162,7 +143,6 @@ func TestMetricsGaugesFollowState(t *testing.T) {
 	t.Fatalf("the connection gauge did not come back down:\n%s", ta.scrape(t))
 }
 
-// The debug listener serves both, and on its own address.
 func TestDebugListener(t *testing.T) {
 	ta := newTestApp(t, func(c *config.Config) { c.DebugAddr = "127.0.0.1:0" })
 
@@ -190,20 +170,13 @@ func TestDebugListener(t *testing.T) {
 	})
 
 	t.Run("heap profile", func(t *testing.T) {
-		// A real profile, fetched the way pprof fetches it.
 		if body, _ := get(t, base+"/debug/pprof/heap?debug=1"); !strings.Contains(body, "heap profile") {
 			t.Errorf("the heap profile looks wrong:\n%.200s", body)
 		}
 	})
 }
 
-// Every goroutine is labelled, and a label is worth exactly nothing unless
-// it reaches a profile. So this asks the runtime for the goroutine profile
-// the way pprof does and looks for the labels in it.
-//
-// The one label not checked here is taskListener: these tests serve over
-// httptest, whose listener goroutine is not ours to label. It is the same
-// two lines as the debug listener, which is checked.
+// Not taskListener: httptest's listener goroutine is not ours to label.
 func TestGoroutinesAreLabelled(t *testing.T) {
 	ta := newTestApp(t, func(c *config.Config) { c.DebugAddr = "127.0.0.1:0" })
 	if err := ta.app.serveDebug(t.Context()); err != nil {
@@ -211,8 +184,6 @@ func TestGoroutinesAreLabelled(t *testing.T) {
 	}
 	t.Cleanup(ta.app.closeDebug)
 
-	// A connection is a serve goroutine, a private pump and — once it has
-	// landed in the default channel — a channel pump.
 	c := ta.dial(t)
 	c.send(proto.Command{Verb: proto.VerbMsg, Data: "hello"})
 	c.expectMsg("", "hello")
@@ -228,8 +199,7 @@ func TestGoroutinesAreLabelled(t *testing.T) {
 	}
 }
 
-// goroutineProfile is the goroutine profile in its protobuf form, which is
-// the only form that carries labels: the text form (?debug=1) drops them.
+// Protobuf, the only form with labels: ?debug=1 drops them.
 func goroutineProfile(t *testing.T) []byte {
 	t.Helper()
 
@@ -248,18 +218,11 @@ func goroutineProfile(t *testing.T) []byte {
 	return raw
 }
 
-// stringEntry is how one entry of a pprof string table appears on the wire:
-// field 6, length-delimited. Everything a profile names goes through that
-// table, labels included.
-//
-// Matching the framing rather than the bare text is the point. A profile of
-// this package mentions (*conn).serve either way, so a search for "conn"
-// alone would pass whether or not anything is labelled with it.
+// The framing, not the bare text: (*conn).serve would match "conn" regardless.
 func stringEntry(s string) []byte {
 	return append([]byte{6<<3 | 2, byte(len(s))}, s...)
 }
 
-// An empty DebugAddr binds nothing at all.
 func TestDebugListenerDisabled(t *testing.T) {
 	ta := newTestApp(t, func(c *config.Config) { c.DebugAddr = "" })
 
