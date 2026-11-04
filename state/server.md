@@ -206,6 +206,26 @@ extension points, and a single-channel WebSocket chat server.
   `pprof.Do` is called once per connection and once per join, never per
   message.
 
+## Codec benchmarks (4 Nov 2026, go1.27.3)
+
+`internal/proto/bench_test.go`, medians of ten, the message with roles and
+attrs unless it says plain:
+
+| | ns/op | B/op | allocs |
+|---|---|---|---|
+| JSON encode | 1057 | 496 | 5 |
+| JSON encode, plain | 609 | 400 | 3 |
+| JSON decode | 330 | 96 | 1 |
+| MessagePack encode | 740 | 672 | 6 |
+| MessagePack encode, plain | 551 | 672 | 6 |
+| MessagePack decode | 330 | 168 | 5 |
+
+The code is token-identical to 19 Aug, when go1.27.0 measured JSON encode
+at 1014ns and decode at 346, so +4% and -5% is the toolchain and the box.
+These are the first MessagePack numbers recorded: 30% faster to encode a
+message with roles, 10% without, level on decode, and more allocations
+both ways than JSON on the v2 engine.
+
 ## Gotchas
 
 1. **`net/http`'s `Shutdown` ignores hijacked connections**, and every

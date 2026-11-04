@@ -185,6 +185,7 @@ that matters more than the fan-out number does.
 
 **The cost is the send path: 28ns against 8ns, and one 24-byte allocation
 per broadcast**, because publishing `&msg` makes the slice header escape.
+On go1.27.3 it is 19-23ns (Re-measured, below).
 It is once per broadcast, not per subscriber, against an encode measured
 at 660ns and five allocations per message per codec — so any room of any
 size pays it back. The zero-allocation version stores the header in the
@@ -270,6 +271,10 @@ ring     65536     104 us      10.5      0.9984
 condring  4096     400 us      40.2      0.9968
 ```
 
+The delivery collapse in that table was the four-vCPU guest: the same
+harness and toolchain on six vCPUs deliver 89% at 256 slots (Re-measured,
+below). Too small still, but a leak rather than a wall.
+
 Sixteen times the capacity turns total collapse into 99.8% delivery and
 makes `Ring` **nine times faster than `MapChan`** at the same subscriber
 count. The senders are paced on AGGREGATE delivery, which bounds the
@@ -298,6 +303,101 @@ in the first place, for the same reason: waking every sleeper on every
 broadcast is work the sender does, which paces it. `Ring` skips the wakeup
 when nobody is asleep, which is exactly why it is faster once it has room —
 and why it has further to fall when it does not.
+
+## Re-measured (4 Nov 2026, go1.27.3, six vCPUs)
+
+The guest has six vCPUs where July's had four, and the toolchain is
+go1.27.3 where July's was go1.26.4. The implementations are token-identical
+to July's apart from comments and `CondRing`'s deletion, and the harness
+differs only in `pace` writing off what a drop lost (`808e806`, gotcha 8).
+So anything that moved was moved by the toolchain or the guest, and to
+tell which the same source ran under both toolchains on this guest,
+interleaved, `-cpu 4`, three to six runs a side. Medians; ns/op for send,
+join/part and churn, ns/msg for the rest:
+
+| | July | go1.26.4 | go1.27.3 | moved by |
+|---|---|---|---|---|
+| send, 1000 subs: seqring | 28 | 25.2 | 19.2 | toolchain -24%, guest -10% |
+| send: ring / mapchan | 8.0 / 29250 | 8.09 / 29364 | 8.17 / 29723 | nothing |
+| join/part, 0/100/1000 existing: seqring | — | 91/91/110 | 79/80/101 | toolchain, -8 to -13% |
+| join/part: ring | 146/147/169 | 98/99/116 | 82/82/104 | guest -32%, toolchain -10 to -17% |
+| join/part: mapchan | 1806-2204 | 683/807/1235 | 624/811/1229 | guest, -40 to -65% |
+| churn, 1/4 senders: seqring | 219/236 | 198/209 | 188/195 | guest -10%, toolchain -6% |
+| churn: ring | 586/1476 | 554/1877 | 509/1332 | noise: 4 senders spans 1262-2012 |
+| paced, 1000/10k: seqring | 8.15/8.22 | 7.74/8.19 | 5.88/8.23 | the guest's floor at 1000 (below) |
+| paced: mapchan | 98.7/337.9 | 104/233 | 111/235 | toolchain +7%; guest -31% |
+| chatty, 1000: seqring / ring | — / 16.7 | 11.9 / 15.4 | 10.9 / 15.4 | nothing |
+| chatty: mapchan | 39.2 | 31.5 | 45.5 | bimodal (below) |
+
+Paced `Ring` ran on go1.27.3 only, at 18.2 and 14.1 against July's 17.50
+and 15.12.
+
+**`SeqRing`'s send path is the compiler's.** 19-23ns from one subscriber
+to ten thousand on go1.27.3 against 25.2 on go1.26.4 on this guest, so it
+now costs 11ns more than `Ring`'s where it cost 20. Nothing else the
+toolchain touched moved more than 17%, almost all of it down. The
+exceptions are `MapChan` paced (+7%) and chatty (slower in its fast mode,
+three runs a side without overlap): the reference, not what runs.
+
+**Join/part is 30-65% cheaper, and that is the guest.** go1.26.4 on six
+vCPUs already does most of it; go1.27.3 adds 8-17% for the rings and
+nothing for `MapChan`.
+
+**`SeqRing` against `Ring` today:** churn 2.7x at one sender and 6.8x at
+four, still flat in the sender count; paced delivery 1.7x at ten thousand
+and 1.8-3x at a thousand depending on the mode; the chatty room 1.4x.
+
+**`SeqRing` paced at a thousand is bimodal on this guest.** Across twenty
+runs on the fixed harness and both toolchains, every run under 1e-4
+drops/op came in at 5.1-5.9 ns/msg, the runs near 5e-4 at 6-13, and the
+two near 1e-3 at 51 and 60. The floor is the guest, against July's
+8.1-9.3, and as far as the evidence goes so is the tail: it shows on both
+toolchains, and at `-cpu 6`, where the guest has no vCPU to spare, every
+run is drop-heavy and slow (9.2-31.5). It is not the write-off. The
+slowest run dropped about two hundred subscribers, who resubscribe at once
+having lost hundreds to a few thousand deliveries each; that crosses the
+64k lead a handful of times at 10ms each, and the run took 12s where a
+fast one takes 1.2.
+The drops and the time have a common cause, most likely readers losing
+their vCPU; not proven. The median of 6.00 in `808e806`'s message is the
+first eight runs; the next eight gave 10.36.
+
+**`MapChan` in the chatty room is bimodal on both toolchains**: 29.5-33.4
+ns/msg on go1.26.4 and 38-47 on go1.27.3 in the fast mode, 98-237 in the
+slow one, which took two runs in five on each and four in five on the
+first go1.27.3 pass (median 195). July's 39.2 is the fast mode. Drop
+counts do not separate the modes. Not investigated.
+
+**The 256-slot collapse at ten thousand does not reproduce.** Fixed
+harness, go1.27.3, medians of five, July in brackets; ns/msg is left out
+below 0.99 delivered (gotcha 1):
+
+| impl | cap | ns/msg | delivered | drops/op |
+|---|---|---|---|---|
+| mapchan | 256 | — | 0.936 (0.9993) | 1.0 |
+| ring | 256 | — | 0.841 (0.0007) | 2.0 |
+| ring | 4096 | 8.60 (7.7) | 0.9998 (0.9982) | 0 |
+| ring | 65536 | 9.05 (10.5) | 0.9999 (0.9984) | 0 |
+| seqring | 256 | — | 0.841 | 2.0 |
+| seqring | 4096 | 2.66-2.79 | 0.9957 | 0.007-0.009 |
+| seqring | 16384 | 2.04 | 0.9997 | 0 |
+| seqring | 65536 | 2.10 | 0.9999 | 0 |
+
+July's harness and toolchain on this guest deliver 89% at 256 slots too,
+three runs out of three. What they do reproduce is the time, 2137-8990
+ns/msg, which is the stall in gotcha 8. So the collapse was the four-vCPU
+guest, and the harness made it look slow as well as lossy. **256 slots is
+still too small**: two drops per message sent, which at ten thousand
+messages a run is every subscriber twice, and one fixed-harness run in
+eleven fell to 51%. A leak, not a wall; the capacity conclusion above
+stands on that rather than on the collapse.
+
+**`SeqRing` at ten thousand, the gap July left, costs a quarter to a
+third of what `Ring` does once it has slack, and it wants more slack.**
+Faster senders widen the lag spread: at 4096 slots about four subscribers
+in a hundred are dropped once a run (0.0085 drops per message sent, ~48k
+messages) where `Ring` drops none. 16384, the server's `Capacity`, is the
+first size with no drops in any run, five out of five.
 
 ## Harness gotchas (hard-won, do not undo)
 
@@ -333,14 +433,24 @@ and why it has further to fall when it does not.
    routinely a 10x outlier (goroutine setup, GC, `b.N` ramping). One run
    of it said `CondRing` was 2.2x slower on delivery; eight runs and a
    median put the two within 5%. Use `-count=8` and take the median for
-   anything that decides something.
-8. **A paced sender must be able to give up waiting.** A subscriber
-   dropped for lagging stops receiving until it reconnects, so messages it
-   missed are never delivered to anybody, and a sender waiting for the
-   delivered count to catch up waits forever. The first chatty benchmark
-   hung on exactly that. `pace` bails out after 100k yields with no
-   progress at all, and the abandonment shows up as a low delivered/sent
-   rather than as a hang.
+   anything that decides something. On six vCPUs `SeqRing` at a thousand
+   is bimodal and eight is not always enough either: two sets of eight in
+   a row gave medians of 6.00 and 10.36. Give the range and the drops
+   beside it.
+8. **A paced sender must write off what a drop lost, not just stop
+   waiting for it.** A dropped subscriber resubscribes at the head, so
+   what it missed is never delivered to anybody, and a sender waiting for
+   the delivered count to catch up waits forever; the first chatty
+   benchmark hung on exactly that. `pace` used to bail out after 100k
+   yields with no progress, which bounded one wait and forgave nothing:
+   once the accumulated loss passed the lead, every later send waited out
+   the whole patience. On go1.27.3 the chatty room crosses that within a
+   run, and `MapChan` reported 37,883-112,832 ns/msg at fifteen minutes a
+   sample, `SeqRing` 1013. `pace` now writes the shortfall off once
+   nothing has moved for 10ms (`808e806`). Wall time, because a yield
+   lasts as long as every other spinner's turn: with the write-off but
+   the yield count, chatty `SeqRing` still measured 38.6 ns/msg against
+   11.1-11.8.
 9. **`BenchmarkFanout`'s untimed drain is O(b.N x subs)**, so an
    implementation with a much cheaper timed op gets a much larger `b.N` and
    the drain stops finishing. `needsDrain` skips it for shared-storage
@@ -398,12 +508,6 @@ and why it has further to fall when it does not.
   the notify channel is the one that would pay better, since it is the
   larger of the two and it is allocated in exactly the quiet-room regime
   where `SeqRing` currently wins nothing.
-- Never measured for `SeqRing`, and the one gap in its numbers:
-  `BenchmarkFanoutChattyCapacity` at ten thousand subscribers. The
-  capacity findings transfer on the strength of an identical drop
-  threshold (deterministic, see gotcha 12) rather than a re-measurement.
-  If a large busy room ever behaves oddly, measure that before believing
-  anything else.
 - Untried alternatives, now probably not worth it: slice-based member set,
   sharded map, single owner goroutine.
 - Capacity for a real channel is measured, not guessed: 256 is too small
@@ -412,4 +516,9 @@ and why it has further to fall when it does not.
   time window (slots over the channel's message rate), which grows with the
   room since a big room is delivery-bandwidth-bound. The ceiling is
   `MaxChannels`: slots are 8 bytes and allocated per channel per codec at
-  creation, so 16384 x 2 codecs x 1024 channels is 256MB.
+  creation, so 16384 x 2 codecs x 1024 channels is 256MB. `SeqRing` at
+  ten thousand subscribers and a thousand senders drops nobody at 16384
+  and about 4% of the room once a run at 4096 (Re-measured, above), so
+  going back to 4096 is not free.
+- Open: why `SeqRing` paced at a thousand and `MapChan` in the chatty room
+  are bimodal on six vCPUs (Re-measured, above). Neither moves a decision.

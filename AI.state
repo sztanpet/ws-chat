@@ -6,19 +6,23 @@ only when you are touching that track.
 
 ## Latest
 
-**Every comment cut to the why, 2026-11-03.** The whole tree, not just
-new code: Go, the Makefile, the pipeline, the lint config and
-`config_default.hujson`. Each comment is the one non-obvious why, in a
-line (two for a concurrency argument). Narration, history, doc comments
-restating a name, and banners are gone, and so are the stale notes:
-"once channels exist", "until there is a login". Go comment lines went
-from 2,754 to 347. One commit per package, `ae6a7a6` (proto) to
-`6d30a78` (build). Each was checked by stripping comments and comparing
-the token stream with its parent's, so no code moved. No track file:
-the reasoning the comments carried is in CLAUDE.md and `state/`, and
-the stories are in the log. Before that, the same day: the optimisation
-round (`state/server.md` gotchas 15-16, `state/loadgen.md`,
-`state/ci.md`) and the fan-out review (`state/broadcast.md`).
+**Everything re-benchmarked, 2026-11-04.** The fan-out, the codecs and
+the wire, against July's records and against `04f4a2e`, the tree the
+3 Nov round started from. It is July's guest with six vCPUs instead of
+four, on go1.27.3 instead of go1.26.4; the same source under both
+toolchains on it splits the two. At the wire the round's changes take
+CPU per delivery at 399k/s from 6.2 to 4.9µs and p99 from 70 to 26ms,
+and lift the ceiling from ~540k to ~660k deliveries/s on fewer cores;
+the `-race` binary deployed before `07f8035` used 2.5x the CPU and 9x
+the memory (`state/loadgen.md`). In the fan-out, `SeqRing`'s send path
+is 24% cheaper on go1.27.3, join/part 30-65% cheaper on the bigger
+guest, July's 256-slot collapse was its four-vCPU guest (82-89%
+delivered here, not 0.07%), and `SeqRing` at ten thousand subscribers,
+never measured before, drops nobody at the configured 16384 slots and 4%
+of the room at 4096 (`state/broadcast.md`). The harness needed fixing
+first: `pace` never forgave what a drop lost, so the chatty room took
+fifteen minutes a sample (`808e806`). Codec numbers, the first for
+MessagePack, are in `state/server.md`.
 
 ## State file index
 
@@ -45,6 +49,9 @@ round (`state/server.md` gotchas 15-16, `state/loadgen.md`,
   channel, `CondRing` deleted. Production build without `-race`; the
   shared write deadline no longer cleared under a writer still going;
   one `write(2)` per batch. Every comment in the tree cut to the why.
+- **2026-11-04** — no change outside the benchmark harness, where `pace`
+  now writes off what a drop lost. Everything re-measured on go1.27.3
+  and six vCPUs.
 
 ## Key decisions
 
@@ -70,18 +77,20 @@ round (`state/server.md` gotchas 15-16, `state/loadgen.md`,
   needs enough buffer and an actual rate limiter. `internal/ratelimit` is
   load-bearing, not a nicety.
 - **Ring capacity has to be sized for the lag SPREAD, not the average.** At
-  10k subscribers with 1000 senders, 256 slots collapses to 0.07% delivery
-  and 4096 gives 99.8% at 7.7 ns/msg — nine times faster than MapChan.
-  Affordable only because the storage is shared: 4096 slots is 64KB total,
-  where the same slack per subscriber would be 655MB. The server default
-  Capacity is 4096 for this reason. Measured in
-  `BenchmarkFanoutChattyCapacity`.
+  10k subscribers with 1000 senders, 256 slots drops every subscriber
+  twice a run (82-89% delivered; July's 0.07% was its four-vCPU guest).
+  `Ring` drops nobody at 4096; `SeqRing`, faster and so with a wider
+  spread, drops 4% of the room there and nobody at 16384, the server's
+  default Capacity. Affordable only because the storage is shared:
+  16384 slots is 128KB per codec, where the same slack per subscriber
+  would be gigabytes. Measured in `BenchmarkFanoutChattyCapacity`.
 - **The fan-out read path is lock-free: `SeqRing`, not `Ring`.** A pointer
   per slot means the writer replaces and never mutates, so a reader holds
   what it loaded safely with the GC as the grace period; `begin`/`published`
-  bracket the write so a whole batch is validated with one load. 2x on
-  paced delivery, up to 6x on churn under load and flat in the sender
-  count, for 20ns and one 24-byte allocation per broadcast. **The win is
+  bracket the write so a whole batch is validated with one load. 1.7-3x
+  on paced delivery, up to 7x on churn under load and flat in the sender
+  count, for 11ns more than `Ring` per broadcast on go1.27.3 (20 on
+  go1.26.4) and one 24-byte allocation. **The win is
   proportional to reader contention**, so busy rooms and join/part gain and
   quiet rooms are a wash — worth knowing before optimising this again.
   `Ring` stays as the reference implementation.

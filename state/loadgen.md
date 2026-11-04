@@ -772,6 +772,75 @@ wrote a batch's frames and flushed once. The wrapper measured the same
 (2.00 and 1.94 cores at 399k, against 1.97 and 1.95) and needs nothing from
 the library, which decided it.
 
+## Everything again (4 Nov 2026, `808e806` against `04f4a2e`)
+
+`04f4a2e` is the tree this round of work started from: the forked library
+with `SetWriteDeadline`, a `write(2)` per frame, and one ordering lock for
+every channel. Against it, the socket deadline (`cc40cba`), one write per
+batch (`7c4b0e9`) and the lock per channel (`d6e137f`). Same method as the
+two sections above: 500 connections in one room, 10% speaking, JSON, 30s
+after a 5s ramp, server CPU from `/proc` over 15s starting 10s into the
+talking. Two runs each, interleaved, on the same 6-vCPU guest with the
+generator beside the server. Medians:
+
+| offered | | `04f4a2e` | `808e806` |
+|---|---|---|---|
+| 49k/s | server cores | 0.55 | 0.54 |
+| | p50 / p99 | 1.92/5.88ms | 1.92/5.38ms |
+| 199k/s | server cores | 1.56 | 1.40 |
+| | p50 / p99 | 2.05/11.8ms | 1.79/9.2ms |
+| 399k/s | server cores | 2.48 | 1.96 |
+| | p50 / p99 | 5.38/70ms | 2.94/26ms |
+| 600k/s | delivered | 515k/s | 588k/s |
+| | server cores | 2.89 | 2.21 |
+| | p50 / p99 | 59/360ms | 25/164ms |
+| 800k/s | delivered | 540k/s | 663k/s |
+| | server cores | 2.98 | 2.29 |
+| | p50 / p99 | 90/557ms | 53/328ms |
+
+CPU per delivery goes 11.2, 7.8, 6.2, 5.6, 5.5µs down the old tree's rows
+and 10.9, 7.1, 4.9, 3.8, 3.5µs down the new one's. All of the saving is
+system time: at 399k, 1.64 sys cores down to 1.13, with user level at
+0.84. That is the batching, and nothing at 49k is what a batch of one frame
+predicts. The ceiling moves from ~540k deliveries/s on three cores to
+~660k on 2.3, and at 660k the guest is what is full, not the server: the
+generator is using ~2.9 of the six cores, and its speakers manage 1331
+msg/s of the 1600 asked (1086 against the old tree). RSS is the same for
+both trees at every load, 39MB rising to 61MB, and garbage stays at a few
+bytes per delivery. The corked runs of 3 Nov above reproduce within noise.
+
+**The production build at the start of the round had `-race` on**, until
+`07f8035`. Against that binary:
+
+| offered | | `04f4a2e`, `-race` | `808e806` |
+|---|---|---|---|
+| 49k/s | server cores | 1.34 | 0.51 |
+| | p50 / p99 | 3.58/10.8ms | 1.92/5.89ms |
+| | RSS | 370MB | 39MB |
+| 199k/s | server cores | 3.60 | 1.42 |
+| | p50 / p99 | 7.68/61ms | 1.85/10.2ms |
+| | RSS | 385MB | 48MB |
+
+What was being deployed used 2.5x the CPU and nine times the memory for the
+same traffic. The 1.33 cores in `state/ci.md` is the same measurement.
+
+**Overload** (3000 connections, 90% speaking at 1/s) is not comparable
+between runs, and here the generator is a limit too, at 3.2-3.9 cores. For
+what it shows: the old tree delivered 865k/s (24.4%) on 2.12 cores, the new
+one 1.04M/s (28.0%) on 1.33, with p50 6.6s against 5.5s and 2170-2420 of
+the 3000 connections dropped in both. The losses are a different mix from
+July's, which were nearly all `too slow`: here 1440-1730 are `too slow` and
+590-750 are EOF, reset or closed, in both trees. Not investigated.
+
+**Codecs** at 399k: MessagePack 1.89 cores against JSON's 1.98 (-4.5%), p99
+22.5ms against 27.7. Level at 49k. That agrees with the 4.2% from the label
+split above, which whole-process CPU at steady load cannot resolve.
+
+**Four rooms** (400 connections, 25% speaking at 5/s, MessagePack, the
+shape of the first table in this file) take 0.60 cores in both trees, at
+p50/p99 0.64/2.05ms against 0.57/1.92, a histogram bucket apart. The 26 Jul
+laptop measured p50 1.02ms and p99 3.84ms for the same shape.
+
 ## Pending
 
 - Two machines, and **`proxmox.lan` is not one** — this box is a guest on
