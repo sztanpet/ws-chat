@@ -37,6 +37,7 @@ type rig struct {
 	bc       Broadcaster
 	counters []*counter
 	total    *atomic.Int64
+	lost     atomic.Int64
 	wg       sync.WaitGroup
 }
 
@@ -113,23 +114,38 @@ func warm(r *rig) {
 	}
 }
 
-const pacingPatience = 100_000
+// Wall time, not yields: a yield lasts as long as every other spinner's turn.
+const pacingPatience = 10 * time.Millisecond
 
-// It gives up eventually: what a dropped subscriber missed is never delivered.
+// What a dropped subscriber missed never arrives. Once nothing moves it is
+// written off, or it stays owed and every later send waits out the patience.
 func pace(r *rig, base, sent int64, subs, lead int) {
 	limit := int64(subs) * int64(lead)
+	owed := func(lost int64) int64 { return sent*int64(subs) - (r.total.Load() - base) - lost }
 	last := r.total.Load()
-	stalled := 0
+	var still time.Time
 
-	for sent*int64(subs)-(r.total.Load()-base) > limit {
+	for owed(r.lost.Load()) > limit {
 		runtime.Gosched()
 
 		if now := r.total.Load(); now != last {
-			last, stalled = now, 0
+			last, still = now, time.Time{}
 			continue
 		}
-		if stalled++; stalled > pacingPatience {
-			return
+		if still.IsZero() {
+			still = time.Now()
+			continue
+		}
+		if time.Since(still) < pacingPatience {
+			continue
+		}
+		// Stalled senders give up together; an Add would write one loss off twice.
+		for {
+			lost := r.lost.Load()
+			d := owed(lost)
+			if d <= 0 || r.lost.CompareAndSwap(lost, lost+d) {
+				return
+			}
 		}
 	}
 }
