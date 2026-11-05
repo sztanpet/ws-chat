@@ -6,19 +6,19 @@ only when you are touching that track.
 
 ## Latest
 
-**The overload EOFs and resets traced, 2026-11-05.** The 4 Nov
-re-benchmark (`895be7c`, every number in the state files) lost a third
-of its overload drops to EOF, resets and "connection closed" where July
-lost them all to `too slow`. An instrumented server and generator joined
-by nick show every one is the server dropping the socket: 642 of 660 by
-the 10s `WriteTimeout`, which cannot send a close frame through the full
-socket that tripped it. Raising it to 30s turns them into lag drops with
-the reason; pinning the server to one core makes the generator fast
-enough again and they vanish, which is why July never saw them: the slow
-side is now the generator. Not a bug, but the deadline's drops were
-counted nowhere and logged at Debug, so `69d0a2c` adds
-`write_timeouts_total` and an Info line. Detail and the `WriteTimeout`
-trade-off in `state/loadgen.md`; the gotcha is `state/server.md` 17.
+**A busy room profiled into the kernel, 2026-11-05.** The 399k/s room
+from the sweep, pprof and `perf` over the same window, published as an
+interactive flamegraph. 55% of server cycles are inside `write(2)`, and
+a third of the profile is the box: on loopback the client's TCP receive
+runs in the server's `write(2)` (23%), and Docker's 304 iptables rules
+cost every packet twice (12.9%). The server's own costs worth a look are
+the library's per-message framing (15.7%) and `SetWriteDeadline` twice
+a batch (6.3%, in `state/loadgen.md` Pending: the clear exists for the
+library's uncorked close frames). The fan-out is 8.8%, mostly the
+subscriber's park/wake `select`. Earlier the same day: the overload
+EOFs and resets were traced to the write deadline, now counted as
+`write_timeouts_total` (`69d0a2c`, `state/server.md` 17). Detail for
+both in `state/loadgen.md`.
 
 ## State file index
 
@@ -94,9 +94,12 @@ trade-off in `state/loadgen.md`; the gotcha is `state/server.md` 17.
   `Ring` stays as the reference implementation.
 - **The fan-out is not the bottleneck and further fan-out work will not
   move the server.** Profiled at both loads: under 5% of CPU healthy, under
-  1% collapsing, no attributable allocation. The server is `write(2)`, two
-  thirds of CPU then and more once the per-write context below went. Spend
-  optimisation effort there or on a second machine, not here.
+  1% collapsing, no attributable allocation; 8.8% of a busy room once
+  batching made the rest cheaper, most of it the subscriber's park/wake
+  `select`. The server is `write(2)`, 55% of cycles, and on loopback a
+  third of the profile is the box (the client's receive path, Docker's
+  netfilter rules). Spend optimisation effort there or on a second
+  machine, not here.
 - **Writes are bounded by a deadline on the socket under `coder/websocket`,
   not by a context and not by a fork.** A context per write cost 729 bytes
   of garbage per delivered message; a deadline costs nothing, and took CPU

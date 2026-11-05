@@ -897,7 +897,50 @@ holds its pumps and how long a slow one has to take a batch. At 10s it
 blinds a third of the drops under this overload; at 30s almost none, and a
 dead client is reaped three times later.
 
+## Profiled into the kernel (5 Nov 2026, `889f92a`)
+
+The busy room from the sweep above (500 connections, 10% at 16/s, JSON:
+399k deliveries/s, 1.96 cores, p99 24.6ms, the same as unprofiled),
+profiled over one 25s window two ways at once: pprof, and
+`sudo perf record -F 499 -g --call-graph fp -p <server>`, which follows
+the system calls into the kernel. perf needs root on this guest
+(`perf_event_paranoid` is 4); nothing was reconfigured for it. The
+flamegraphs are a published artifact, not in the repo.
+
+| | share of server CPU |
+|---|---|
+| inside `write(2)`; 61% of cycles end in the kernel | 55% |
+| the client's TCP receive, run inside the server's `write(2)` because it is loopback | 23% |
+| netfilter: nf_tables walking 304 iptables rules (207 Docker's), conntrack 3.7 of it | 12.9% |
+| coder/websocket's per-message `Write` into the cork buffer | 15.7% |
+| `internal/broadcast`, 6.2 of it the `select` a subscriber parks on | 8.8% |
+| `SetWriteDeadline`, twice a batch, through the runtime's timers | 6.3% |
+| AppArmor | 2.2% |
+
+**A third of this profile is the box rather than the server.** The
+receive path and the netfilter rules are paid by whichever process sends,
+and on loopback that is the server: over a NIC the receive half moves to
+the client, and a host without Docker's rules skips most of netfilter.
+That is the strongest argument yet for two machines. On the server's own
+side, the library's framing and the deadline calls are 22% between them;
+the deadline is in Pending.
+
+Two perf traps on this box. perf names unresolved nf_tables code
+`cleanup_module`; root's `/proc/kallsyms` resolves it (`nft_do_chain`,
+`expr_call_ops_eval`), and `/proc/modules` does not, because on this
+kernel a module's size spans sections that are not contiguous, so the
+ranges overlap. And in frequency mode the period varies from sample to
+sample (the first ones have period 1), so a sample weighs its period, not
+one.
+
 ## Pending
+
+- **`SetWriteDeadline` is 6.3% of a busy server's CPU** (profiled above):
+  `cork` arms the socket's deadline and the last `uncork` clears it, every
+  batch, and each call reprograms a runtime timer. Arming without clearing
+  would halve it, but the clear is load-bearing: the library writes close
+  frames outside any cork, and a stale deadline left armed would fail them
+  at once.
 
 - Two machines, and **`proxmox.lan` is not one** — this box is a guest on
   it, so that topology is the same silicon with a virtio hop (see above).

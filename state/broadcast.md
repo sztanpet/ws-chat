@@ -500,7 +500,9 @@ first size with no drops in any run, five out of five.
   allocation is attributable to it at either. The server is `write(2)` and
   the websocket library's per-`Write` deadline context. Another 2x here
   buys ~2% there; the numbers below are real and no longer where the time
-  goes.
+  goes. Re-profiled 5 Nov with batching in, a busy room spends 8.8% here,
+  6.2 points of it in the `select` a subscriber parks on between batches:
+  the rest of the server got cheaper around it (`state/loadgen.md`).
 - The per-broadcast allocations are the remaining known cost: the
   replacement notify channel (both implementations, whenever anybody is
   asleep) and `SeqRing`'s 24-byte header publication. Worth attacking only
