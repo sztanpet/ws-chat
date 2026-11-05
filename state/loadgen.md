@@ -830,7 +830,8 @@ what it shows: the old tree delivered 865k/s (24.4%) on 2.12 cores, the new
 one 1.04M/s (28.0%) on 1.33, with p50 6.6s against 5.5s and 2170-2420 of
 the 3000 connections dropped in both. The losses are a different mix from
 July's, which were nearly all `too slow`: here 1440-1730 are `too slow` and
-590-750 are EOF, reset or closed, in both trees. Not investigated.
+590-750 are EOF, reset or closed, in both trees. Traced in the next
+section: the server's write deadline.
 
 **Codecs** at 399k: MessagePack 1.89 cores against JSON's 1.98 (-4.5%), p99
 22.5ms against 27.7. Level at 49k. That agrees with the 4.2% from the label
@@ -840,6 +841,61 @@ split above, which whole-process CPU at steady load cannot resolve.
 shape of the first table in this file) take 0.60 cores in both trees, at
 p50/p99 0.64/2.05ms against 0.57/1.92, a histogram bucket apart. The 26 Jul
 laptop measured p50 1.02ms and p99 3.84ms for the same shape.
+
+## The EOFs and resets under overload (5 Nov 2026, `69d0a2c`)
+
+Traced with a scratch build of both ends. The server logged every lag
+drop, close-handshake result, write failure and read-pump exit; the
+generator logged each loss and failed send with its nick; the two were
+joined on the nick. One run of the overload shape above (3000
+connections, 90% at 1/s, JSON, one guest):
+
+| what the server did first | what the client reported |
+|---|---|
+| lag drop, close handshake done (1445) | `too slow` 1429, unseen by the end 16 |
+| lag drop, close frame not written in the library's 5s (95) | `too slow` 55, closed or reset 18, unseen 22 |
+| write deadline expired, `i/o timeout` (886) | closed 248, reset 178, EOF 216 (83 listeners), unseen 244 |
+
+**Every EOF, reset and "connection closed" is the server dropping the
+socket**: 642 of the 660 by the 10s `WriteTimeout`, which closes without a
+close frame because none fits through the full socket, and 18 lag drops
+whose close frame did not fit either. The label is TCP's. A listener has
+sent nothing the server has not read, so it gets a FIN and reads to EOF; a
+speaker's unread messages turn the close into a reset; and when a
+speaker's next write meets the reset before its reader does, the library
+closes the socket under the reader, which reports "connection closed".
+There were 260 of those and 260 sends failing with ECONNRESET or EPIPE. The
+560 server write failures saying "broken pipe" or "reset" all fall in the
+last 20ms, when the generator hangs up: teardown, not drops.
+
+**The deadline was killing clients that were still reading.** The same
+run with `WriteTimeout` at 30s had no write timeouts, 2369 `too slow` and
+33 closed or reset, against 1484 and 660. Given 30s their batches went
+out, and the ring dropped them with the reason.
+
+**It is new because the slow side is now the generator.** July's guest
+delivered 204k/s under this load: the server could not keep up, every
+socket drained, and every drop was a lag drop with room for its close
+frame. Now the server delivers ~1M/s on one to two cores and the
+generator beside it runs at 4.5 of the six, so it is the slow reader.
+Pinning the server to one core and the generator to the other five puts
+July back: 2875 `too slow`, 6 resets, 2 write timeouts.
+
+Nothing is broken. Both mechanisms drop a client that cannot keep up, and
+the deadline exists for the client that has gone, which it has to reap in
+bounded time. What was wrong is that one of them could not be seen —
+logged at Debug among every peer that hung up, counted nowhere — so
+`69d0a2c` counts it (`write_timeouts_total`, 798 in a rerun against 1692
+lag drops) and logs it at Info. Over loopback a closed window reopens in
+steps up to the 64KB MSS, so a slow reader drains far more before a
+blocked write moves than it would behind a 1460-byte MSS; on a real
+network the deadline probably pre-empts the ring much less often.
+Untested; two machines would settle it.
+
+**The decision it leaves:** `WriteTimeout` is both how long a dead client
+holds its pumps and how long a slow one has to take a batch. At 10s it
+blinds a third of the drops under this overload; at 30s almost none, and a
+dead client is reaped three times later.
 
 ## Pending
 

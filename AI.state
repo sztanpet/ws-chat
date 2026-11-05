@@ -6,23 +6,19 @@ only when you are touching that track.
 
 ## Latest
 
-**Everything re-benchmarked, 2026-11-04.** The fan-out, the codecs and
-the wire, against July's records and against `04f4a2e`, the tree the
-3 Nov round started from. It is July's guest with six vCPUs instead of
-four, on go1.27.3 instead of go1.26.4; the same source under both
-toolchains on it splits the two. At the wire the round's changes take
-CPU per delivery at 399k/s from 6.2 to 4.9µs and p99 from 70 to 26ms,
-and lift the ceiling from ~540k to ~660k deliveries/s on fewer cores;
-the `-race` binary deployed before `07f8035` used 2.5x the CPU and 9x
-the memory (`state/loadgen.md`). In the fan-out, `SeqRing`'s send path
-is 24% cheaper on go1.27.3, join/part 30-65% cheaper on the bigger
-guest, July's 256-slot collapse was its four-vCPU guest (82-89%
-delivered here, not 0.07%), and `SeqRing` at ten thousand subscribers,
-never measured before, drops nobody at the configured 16384 slots and 4%
-of the room at 4096 (`state/broadcast.md`). The harness needed fixing
-first: `pace` never forgave what a drop lost, so the chatty room took
-fifteen minutes a sample (`808e806`). Codec numbers, the first for
-MessagePack, are in `state/server.md`.
+**The overload EOFs and resets traced, 2026-11-05.** The 4 Nov
+re-benchmark (`895be7c`, every number in the state files) lost a third
+of its overload drops to EOF, resets and "connection closed" where July
+lost them all to `too slow`. An instrumented server and generator joined
+by nick show every one is the server dropping the socket: 642 of 660 by
+the 10s `WriteTimeout`, which cannot send a close frame through the full
+socket that tripped it. Raising it to 30s turns them into lag drops with
+the reason; pinning the server to one core makes the generator fast
+enough again and they vanish, which is why July never saw them: the slow
+side is now the generator. Not a bug, but the deadline's drops were
+counted nowhere and logged at Debug, so `69d0a2c` adds
+`write_timeouts_total` and an Info line. Detail and the `WriteTimeout`
+trade-off in `state/loadgen.md`; the gotcha is `state/server.md` 17.
 
 ## State file index
 
@@ -52,6 +48,8 @@ MessagePack, are in `state/server.md`.
 - **2026-11-04** — no change outside the benchmark harness, where `pace`
   now writes off what a drop lost. Everything re-measured on go1.27.3
   and six vCPUs.
+- **2026-11-05** — drops by the write deadline counted
+  (`write_timeouts_total`) and logged at Info, like lag drops.
 
 ## Key decisions
 
@@ -107,7 +105,9 @@ MessagePack, are in `state/server.md`.
   `Conn.SetWriteDeadline` until 2026-11-03, when the same deadline set on
   the hijacked `net.Conn` measured the same on stock v1.8.15 and the module
   came back into `govulncheck`'s view. The deadline is shared by every
-  writer on the connection, so the last one out clears it. Numbers in
+  writer on the connection, so the last one out clears it. It is also
+  the blind way a slow client goes, since no close frame fits a full
+  socket, so it is counted beside lag drops. Numbers in
   `state/loadgen.md`.
 - **The cheaper variant, memoising the armed context, is not worth it.**
   It removes the per-frame amplification under overload and changes
