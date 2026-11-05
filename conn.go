@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"runtime/pprof"
 	"sync"
 	"time"
@@ -395,7 +396,13 @@ func (c *conn) uncork(err error) bool {
 		err = serr
 	}
 	if err != nil {
-		c.log.Debug("write failed", "err", err)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			// A drop like ErrLagged's, but blind: no close frame fits a full socket.
+			c.app.metrics.writeTimeouts.Inc()
+			c.log.Info("dropped: write timed out")
+		} else {
+			c.log.Debug("write failed", "err", err)
+		}
 		_ = c.ws.CloseNow() // unblocks the read pump
 		return false
 	}

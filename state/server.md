@@ -318,6 +318,19 @@ both ways than JSON on the v2 engine.
     `TestCorkSendsOneWriteForEveryone` counts the writes, which the wire
     cannot show, and `TestPumpsShareOneSocket` runs four busy pumps into
     one socket under `-race`.
+17. **A write timeout is a drop the client is never told about.** A pump
+    blocked flushing a batch cannot notice the ring lapping it, so a
+    client that cannot take one batch within `WriteTimeout` is closed by
+    the deadline first, and no close frame fits through the full socket
+    that caused it. The client sees EOF, a reset, or its own next write
+    failing, depending on which end notices first. Under overload with the
+    generator on the same guest that was 886 of ~2400 drops, and it was
+    invisible: logged at Debug among every peer that left, counted
+    nowhere. It is now `write_timeouts_total` beside
+    `subscribers_lagged_total`, logged at Info as `dropped: write timed
+    out`. `TestWriteTimeoutIsCounted`. The trade-off it exposes is in
+    `state/loadgen.md`: a longer timeout lets the ring drop a slow client
+    with its reason, and reaps a dead one later.
 
 ## Pending
 

@@ -64,6 +64,14 @@ private message arrives on *somebody else's* read pump, so this is not
 theoretical: without it, one person who stopped reading would stall
 everyone who messages them.
 
+The deadline is also the second way a slow client goes, and the blind
+one. A client that cannot take one batch within it is closed before the
+ring laps it, with no close frame, because none fits through a full
+socket: it sees EOF or a reset where a lag drop would have told it `too
+slow`. Under overload on one box that was a third of all drops
+(`state/loadgen.md`), so it is counted (`write_timeouts_total`) and
+logged where the lag drop is.
+
 The deadline is set on the socket under the library and the write itself
 gets `context.Background()`, because a context per frame cost a
 `WithTimeout` here and a `context.AfterFunc` in the library — ~700 bytes

@@ -16,6 +16,7 @@ type appMetrics struct {
 	refusalsTotal *metrics.CounterVec
 
 	laggedTotal   *metrics.Counter
+	writeTimeouts *metrics.Counter
 	recordsFailed *metrics.Counter
 
 	channelsTotal *metrics.Counter
@@ -46,6 +47,8 @@ func newMetrics(r *metrics.Registry) *appMetrics {
 
 		laggedTotal: r.Counter("subscribers_lagged_total",
 			"Subscribers dropped for falling too far behind the fan-out."),
+		writeTimeouts: r.Counter("write_timeouts_total",
+			"Connections dropped for not taking one batch within WriteTimeout."),
 		recordsFailed: r.Counter("records_failed_total",
 			"Persistence jobs that returned an error."),
 

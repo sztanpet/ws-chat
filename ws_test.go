@@ -288,6 +288,29 @@ func TestWriteDeadlineOutlivesTheFirstWriter(t *testing.T) {
 	}
 }
 
+// The client is never told, so the server is the only one who can count it.
+func TestWriteTimeoutIsCounted(t *testing.T) {
+	ta := newTestApp(t, func(c *config.Config) {
+		c.WriteTimeout = config.Duration(200 * time.Millisecond)
+	})
+	silent := ta.dial(t) // never reads again after this
+	c, ok := ta.app.lookup(silent.nick)
+	if !ok {
+		t.Fatal("connection is not in the directory")
+	}
+
+	frame := make([]byte, 64<<10)
+	giveUp := time.Now().Add(5 * time.Second)
+	for c.write(t.Context(), frame) {
+		if time.Now().After(giveUp) {
+			t.Fatal("a write to a client that stopped reading outlived its deadline")
+		}
+	}
+	if got := ta.app.metrics.writeTimeouts.Value(); got != 1 {
+		t.Fatalf("write_timeouts_total = %d, want 1", got)
+	}
+}
+
 func TestPumpsShareOneSocket(t *testing.T) {
 	ta := newTestApp(t)
 	obs := ta.dial(t)
